@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Pre-push privacy guard (generic shim — contains no private data).
+#
+# For the repo operator (git config guard.operator true), every push is
+# scanned by a private house-data/secret scanner before anything leaves
+# the machine; the push is BLOCKED on findings or if the scanner cannot
+# run (fail closed). For everyone else this hook is inert — and without
+# `git config core.hooksPath .githooks` it never runs at all.
+# Install both configs with scripts/install-hooks.sh.
+set -u
+
+operator_raw="$(git config guard.operator 2>/dev/null || true)"
+operator="$(git config --bool guard.operator 2>/dev/null || true)"
+# A set-but-unparseable value (e.g. "maybe") must not silently take the
+# inert path — every other inability-to-decide in this guard fails closed.
+if [ -n "$operator_raw" ] && [ "$operator" != "true" ] && [ "$operator" != "false" ]; then
+  echo "pre-push: guard.operator='$operator_raw' is not a clean bool — scanning anyway (fail closed)" >&2
+  operator=true
+fi
+[ "$operator" = "true" ] || exit 0
+
+SCANNER="$HOME/Documents/garage/privacy/scan-repo.sh"
+if [ ! -x "$SCANNER" ]; then
+  echo "pre-push: guard.operator is set but the scanner is missing at $SCANNER" >&2
+  echo "pre-push: refusing to push (fail closed) — restore the private checkout" >&2
+  echo "pre-push: or, if this machine truly should not scan: git config --unset guard.operator" >&2
+  exit 1
+fi
+
+remote_name="$1"
+zero=0000000000000000000000000000000000000000
+repo_top="$(git rev-parse --show-toplevel)"
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue   # ref deletion — nothing outgoing
+  # </dev/null: the scanner must NOT inherit this loop's stdin, or its
+  # child processes could swallow the remaining ref lines.
+  if [ "$remote_sha" = "$zero" ]; then
+    # New remote branch: scan everything not already on any ref of this remote.
+    "$SCANNER" --push "$repo_top" "$local_sha" --not --remotes="$remote_name" \
+      < /dev/null || status=1
+  else
+    "$SCANNER" --push "$repo_top" "$remote_sha..$local_sha" < /dev/null \
+      || status=1
+  fi
+done
+if [ "$status" -ne 0 ]; then
+  echo "pre-push: BLOCKED — findings (or guard failure) above. Nothing was pushed." >&2
+fi
+exit "$status"

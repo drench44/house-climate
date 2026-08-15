@@ -1,0 +1,13 @@
+{
+  "id": "dev1",
+  "name": "Main Room",
+  "model": "ONETOUCH",
+  "equipmentStatus": 1,
+  "tempIndoor": 22.4,
+  "humIndoor": 48,
+  "tempOutdoor": 32.8,
+  "humOutdoor": 30,
+  "mode": 2,
+  "heatSetpoint": 20.0,
+  "coolSetpoint": 22.2
+}

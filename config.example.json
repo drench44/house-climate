@@ -1,0 +1,56 @@
+{
+  "poll_interval_s": 180,
+  "timezone": "America/Los_Angeles",
+  "system_kw": 3.0,
+  "system_tons": 3.0,
+  "kw_per_ton": 1.2,
+  "heat_kw": 0.5,
+  "short_cycle_minutes": 10,
+  "weather_url": "http://weather:8137/wx.json",
+  "weather_url_fallback": "http://192.168.1.50:8137/wx.json",
+  "web_port": 8090,
+  "filter_reminder_hours": 300.0,
+  "setpoint_tolerance_f": 1.0,
+  "latitude": 40.0,
+  "longitude": -100.0,
+  "ecowitt": {
+    "enabled": false,
+    "gateway_url": "http://192.168.1.60",
+    "channels": {
+      "1": "Upstairs",
+      "2": "Downstairs"
+    },
+    "outdoor_name": "Outdoor"
+  },
+  "tou": {
+    "plan": "EXAMPLE 3-tier time-of-day — REPLACE with your utility's published rates",
+    "seasons": {
+      "summer": { "months": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] },
+      "winter": { "months": [] }
+    },
+    "bands": [
+      { "name": "peak", "season": "summer", "days": "weekday",
+        "start": "17:00", "end": "21:00", "rate": 0.40 },
+      { "name": "midpeak", "season": "summer", "days": "weekday",
+        "start": "07:00", "end": "17:00", "rate": 0.16 },
+      { "name": "offpeak", "season": "summer", "days": "weekday",
+        "start": "21:00", "end": "07:00", "rate": 0.09 },
+      { "name": "offpeak", "season": "summer", "days": "weekend",
+        "start": "00:00", "end": "00:00", "rate": 0.09 }
+    ]
+  },
+  "alerts": {
+    "channel": "noop",
+    "ntfy_topic": "house-climate-REPLACE",
+    "cooldown_minutes": 60,
+    "humidity_high_pct": 60,
+    "humidity_sustained_minutes": 60,
+    "setpoint_drift_f": 3.0,
+    "setpoint_drift_minutes": 45,
+    "short_cycles_window_hours": 3,
+    "short_cycles_threshold": 3,
+    "offline_missed_polls": 5,
+    "peak_surge_ratio": 1.5,
+    "aqi_unhealthy": 101
+  }
+}
