@@ -1,0 +1,21 @@
+# /etc/systemd/system/house-climate-backup-failure.service
+# Fired by house-climate-backup.service's OnFailure= when the nightly dump
+# fails, so a silently-failing backup gets a push notification instead of only
+# a journal line nobody reads.
+#
+# Generic on purpose: the ntfy URL is read from an operator-provided env file
+# (HC_NTFY_URL=https://ntfy.sh/<your-topic>) so no topic is baked into this
+# public repo. If HC_NTFY_URL is unset, this is a harmless no-op — but then you
+# have no failure alerting, so set it.
+[Unit]
+Description=Notify that house-climate backup failed
+
+[Service]
+Type=oneshot
+# EDIT: a file containing HC_NTFY_URL=... . The leading '-' makes a missing
+# file non-fatal (the ExecStart then no-ops rather than erroring).
+EnvironmentFile=-/etc/house-climate/backup.env
+ExecStart=/bin/sh -c 'test -n "$HC_NTFY_URL" && curl -fsS \
+    -H "Title: house-climate backup FAILED" -H "Priority: high" \
+    -d "Nightly pg_dump failed on $(hostname) at $(date -Is). Check: journalctl -u house-climate-backup.service" \
+    "$HC_NTFY_URL" || true'

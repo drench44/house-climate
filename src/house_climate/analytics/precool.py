@@ -77,7 +77,7 @@ def effectiveness(readings, tz_name, *, min_days_each=2, base_f=75.0,
         cm = sum(x["cool_min"] for x in lst) / n
         outs = [x["out_f"] for x in lst if x["out_f"] is not None]
         avg_out = sum(outs) / len(outs) if outs else None
-        norm = cm / (avg_out - base_f) if (avg_out and avg_out > base_f) else None
+        norm = cm / (avg_out - base_f) if (avg_out is not None and avg_out > base_f) else None
         return {"days": n, "avg_peak_cool_min": round(cm, 1),
                 "avg_peak_out_f": round(avg_out, 1) if avg_out is not None else None,
                 "cool_min_per_deg": round(norm, 2) if norm is not None else None}

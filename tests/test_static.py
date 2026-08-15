@@ -183,7 +183,7 @@ def test_square_uses_only_shared_threshold_logic():
     a threshold tweaked in one file but not the other would let the same
     reading be green on the calendar and red on the dashboard."""
     for fn in ("tempClass", "rhClass", "crawlRhClass", "crawlTempClass",
-               "equipmentState", "bandNow", "pmChip", "aqiChipClass"):
+               "equipmentState", "bandTierLabel", "pmChip", "aqiChipClass"):
         assert f"function {fn}" in COMMON_JS, f"{fn} left common.js"
         assert f"function {fn}" not in SQ_JS, f"square.js redefines {fn}"
         assert f"function {fn}" not in APP_JS, f"app.js redefines {fn} — single-source it in common.js"
@@ -233,7 +233,7 @@ def test_app_js_has_peak_strip():
     assert "function peakStripHtml" not in src, "app.js redefines peakStripHtml — single-source it in common.js"
     assert "function peakStripHtml" in COMMON_JS
     assert "peak-strip" in COMMON_JS
-    assert "bandNow(" not in src.split("function renderRail")[1][:2000]  # rail no longer uses it
+    assert "bandTierLabel(" not in src.split("function renderRail")[1][:2000]  # band label is the square tile's, not the rail's
 
 
 def test_app_js_has_smoke_banner():

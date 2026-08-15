@@ -1,5 +1,6 @@
 from types import SimpleNamespace
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import pytest
 from house_climate import poller
 from house_climate.daikin import DeviceState, RateLimited, DaikinError
 from house_climate.weather import WeatherSnapshot
@@ -88,6 +89,36 @@ def test_poll_once_no_duplicate_weather_error_while_still_down(monkeypatch):
     assert recorded == []   # no repeat row every tick
 
 
+def test_discover_device_id_empty_returns_none():
+    # An empty device list must return None (-> run() logs + retries), NOT
+    # raise IndexError as devices[0] used to.
+    class NoDevices:
+        def list_devices(self): return []
+    assert poller._discover_device_id(None, NoDevices()) is None
+
+
+def test_discover_device_id_upserts_and_returns_first(monkeypatch):
+    upserted = []
+    monkeypatch.setattr(poller.db, "upsert_device",
+                        lambda c, i, n, m: upserted.append(i))
+
+    class TwoDevices:
+        def list_devices(self):
+            return [{"id": "d1", "name": "Main", "model": "ONE"},
+                    {"id": "d2", "name": "Shop", "model": "ONE"}]
+    assert poller._discover_device_id(None, TwoDevices()) == "d1"
+    assert upserted == ["d1", "d2"]
+
+
+def test_discover_device_id_propagates_daikin_error():
+    # A transient API failure must propagate so run() retries (not treated as
+    # "no devices" -> misleading credentials message).
+    class Failing:
+        def list_devices(self): raise DaikinError("HTTP 503")
+    with pytest.raises(DaikinError):
+        poller._discover_device_id(None, Failing())
+
+
 def _ecowitt_cfg():
     return SimpleNamespace(ecowitt={"enabled": True, "gateway_url": "http://gw",
                                     "channels": {"1": "crawl"}})
@@ -101,6 +132,109 @@ def test_poll_ecowitt_records_error_on_fetch_failure(monkeypatch):
                         lambda url: (_ for _ in ()).throw(RuntimeError("gw down")))
     assert poller.poll_ecowitt(None, _ecowitt_cfg()) == "ecowitt_error"
     assert recorded == ["ecowitt_fetch"]
+
+
+def test_poll_ecowitt_success_inserts_and_returns_count(monkeypatch):
+    # The previously-untested happy path: parse -> attach signal -> compute
+    # dewpoint -> insert, returning ecowitt_ok(n).
+    inserted = []
+    monkeypatch.setattr(poller.ecowitt, "fetch_livedata", lambda url: {})
+    monkeypatch.setattr(poller.ecowitt, "parse_channels",
+                        lambda data, ch: [{"sensor_id": "ecowitt_ch1", "temp_f": 60.0,
+                                           "humidity": 80.0, "battery_low": False}])
+    monkeypatch.setattr(poller.ecowitt, "fetch_sensors_info", lambda url: {})
+    monkeypatch.setattr(poller.ecowitt, "signal_by_sensor_id", lambda info: {"ecowitt_ch1": 85})
+    monkeypatch.setattr(poller.db, "insert_sensor_reading",
+                        lambda c, sid, ts, **k: inserted.append((sid, k)))
+    assert poller.poll_ecowitt(None, _ecowitt_cfg()) == "ecowitt_ok(1)"
+    sid, kw = inserted[0]
+    assert sid == "ecowitt_ch1"
+    assert kw["extra"] == {"signal": 85}          # signal attached
+    assert kw["dewpoint_f"] is not None           # dewpoint computed
+
+
+def test_poll_ecowitt_disabled_returns_off():
+    assert poller.poll_ecowitt(None, SimpleNamespace(ecowitt={"enabled": False})) == "ecowitt_off"
+    assert poller.poll_ecowitt(None, SimpleNamespace(ecowitt=None)) == "ecowitt_off"
+
+
+# --- update_precip: the rainfall-series builder behind the moisture verdict.
+# DB-free via monkeypatched db.* + requests. Resets the module throttle globals.
+
+def _precip_cfg(**kw):
+    base = dict(timezone="America/Los_Angeles", latitude=None, longitude=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _reset_precip(monkeypatch):
+    monkeypatch.setattr(poller, "_precip_last_rollup", None)
+    monkeypatch.setattr(poller, "_precip_last_backfill_day", None)
+
+
+def _local_today():
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/Los_Angeles")).date()
+
+
+def test_update_precip_trust_gate_skips_incomplete_past_day(monkeypatch):
+    _reset_precip(monkeypatch)
+    today = _local_today()
+    yest = today - timedelta(days=1)
+    days = [{"day": yest, "rain_in": 0.0, "last_hour": 5},    # past + incomplete -> skip
+            {"day": today, "rain_in": 0.3, "last_hour": 8}]   # today -> always upsert
+    upserts = []
+    monkeypatch.setattr(poller.db, "outdoor_daily", lambda *a, **k: days)
+    monkeypatch.setattr(poller.db, "upsert_precip",
+                        lambda c, d, inches, src: upserts.append((d, inches, src)))
+    poller.update_precip(None, "dev1", _precip_cfg())
+    assert (today, 0.3, "station") in upserts
+    assert all(d != yest for d, _, _ in upserts)   # the incomplete past day left absent
+
+
+def test_update_precip_upserts_complete_past_day_as_station(monkeypatch):
+    _reset_precip(monkeypatch)
+    yest = _local_today() - timedelta(days=1)
+    days = [{"day": yest, "rain_in": 0.42, "last_hour": 23}]   # extends into the evening
+    upserts = []
+    monkeypatch.setattr(poller.db, "outdoor_daily", lambda *a, **k: days)
+    monkeypatch.setattr(poller.db, "upsert_precip",
+                        lambda c, d, inches, src: upserts.append((d, inches, src)))
+    poller.update_precip(None, "dev1", _precip_cfg())
+    assert (yest, 0.42, "station") in upserts
+
+
+def test_update_precip_hourly_throttle(monkeypatch):
+    _reset_precip(monkeypatch)
+    calls = {"n": 0}
+    def od(*a, **k):
+        calls["n"] += 1
+        return []
+    monkeypatch.setattr(poller.db, "outdoor_daily", od)
+    monkeypatch.setattr(poller.db, "upsert_precip", lambda *a, **k: None)
+    poller.update_precip(None, "dev1", _precip_cfg())
+    after_first = calls["n"]
+    assert poller.update_precip(None, "dev1", _precip_cfg()) == "precip_noop"
+    assert calls["n"] == after_first   # throttled before any rollup
+
+
+def test_update_precip_backfill_failure_is_swallowed(monkeypatch):
+    _reset_precip(monkeypatch)
+    monkeypatch.setattr(poller.db, "outdoor_daily", lambda *a, **k: [])
+    monkeypatch.setattr(poller.db, "upsert_precip", lambda *a, **k: None)
+    monkeypatch.setattr(poller.db, "precip_range", lambda *a, **k: [])
+    first_ts = datetime.now(timezone.utc) - timedelta(days=10)
+
+    class FakeCur:
+        def fetchone(self): return (first_ts,)
+
+    class FakeConn:
+        def execute(self, *a, **k): return FakeCur()
+
+    def boom(*a, **k): raise RuntimeError("open-meteo down")
+    monkeypatch.setattr(poller.requests, "get", boom)
+    res = poller.update_precip(FakeConn(), "dev1", _precip_cfg(latitude=47.6, longitude=-122.3))
+    assert res.startswith("precip_station_only")   # failure swallowed, not raised
 
 
 def test_poll_ecowitt_records_error_on_insert_failure(monkeypatch):

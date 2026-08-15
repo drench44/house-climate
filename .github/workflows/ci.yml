@@ -31,8 +31,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      # httpx is a test-only dep (FastAPI TestClient transport)
-      - run: pip install -r requirements.txt httpx
+      # requirements-dev.txt pulls in requirements.txt plus the test-only deps
+      # (pytest, httpx for the FastAPI TestClient) that no longer ship in the
+      # runtime images.
+      - run: pip install -r requirements-dev.txt
       - run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Load schema (same initdb scripts docker-compose mounts)
         run: |

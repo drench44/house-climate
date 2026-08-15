@@ -22,13 +22,16 @@ const {
   clamp, fmtTemp, fmtPct, fmtAge, fmtHour, escapeHtml,
   timePath, hoverTargetMs, nearestByMs,
   tempClass, rhClass, crawlRhClass, crawlTempClass,
-  equipmentState, bandNow, pmChip, peakStripHtml, smokeBannerHtml,
+  equipmentState, bandTierLabel, pmChip, peakStripHtml, smokeBannerHtml,
 } = sandbox;
 const { GAP_MS } = vm.runInContext('({ GAP_MS })', sandbox);
 // Arrays/objects born inside the vm carry the vm realm's prototypes, which
 // deepStrictEqual rejects — rewrap results in host values.
 const gridLevels = (...a) => Array.from(sandbox.gridLevels(...a));
-const band = (d) => ({ ...sandbox.bandNow(d) });
+const band = (cost) => {
+  const b = sandbox.bandTierLabel(cost);
+  return b == null ? null : { ...b };
+};
 
 // ------------------------------------------------------------- timePath
 
@@ -193,18 +196,24 @@ test('equipmentState maps the Daikin equipment/mode fields', () => {
   assert.equal(equipmentState({ equipment_status: 'idle', mode: 'cool' }), 'idle');
 });
 
-test('bandNow: example TOU schedule bands on the local clock', () => {
-  const wed6pm = new Date(2026, 7, 12, 18);
-  assert.deepEqual(band(wed6pm), { name: 'on-peak', until: 21 });
-  const wed10am = new Date(2026, 7, 12, 10);
-  assert.deepEqual(band(wed10am), { name: 'mid-peak', until: 17 });
-  const wed11pm = new Date(2026, 7, 12, 23);
-  assert.deepEqual(band(wed11pm), { name: 'off-peak', until: 7 });
-  const satNoon = new Date(2026, 7, 15, 12);
-  assert.deepEqual(band(satNoon), { name: 'off-peak', until: null });
-  // Friday 21:00+ rolls into the weekend: no "until 7am" lie
-  const fri10pm = new Date(2026, 7, 14, 22);
-  assert.deepEqual(band(fri10pm), { name: 'off-peak', until: null });
+test('bandTierLabel: derives the kiosk band label from the cost tier fields', () => {
+  // Peak tier with a known boundary -> "on-peak until <time>" (the exact time
+  // string is locale/tz dependent, so assert the shape, not the clock value).
+  const peak = band({ tier_now: 'peak', next_change_at: '2026-08-12T21:00:00-07:00' });
+  assert.equal(peak.name, 'on-peak');
+  assert.equal(peak.cls, 'sq-peak');
+  assert.match(peak.until, /^ until /);
+  // Mid and off map to their own classes; off with no next change carries no "until".
+  assert.deepEqual(band({ tier_now: 'mid', next_change_at: null }),
+    { name: 'mid-peak', cls: 'sq-mid', until: '' });
+  assert.deepEqual(band({ tier_now: 'off', next_change_at: null }),
+    { name: 'off-peak', cls: 'sq-off', until: '' });
+  // Flat-rate utility: labeled, off-styled, never a peak/countdown.
+  assert.deepEqual(band({ tier_now: 'flat', next_change_at: null }),
+    { name: 'flat rate', cls: 'sq-off', until: '' });
+  // No cost / no tier yet -> null, so the caller keeps the last label.
+  assert.equal(band(null), null);
+  assert.equal(band({}), null);
 });
 
 test('aqiChipClass US AQI band edges', () => {

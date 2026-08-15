@@ -33,10 +33,13 @@ function sqAqi(hum) {
   return `<span class="aqi num ${aqiChipClass(n)}">AQI ${n}${cat}</span>`;
 }
 
-/* The humidity engine's windows verdict, one short line. */
+/* The humidity engine's windows verdict, one short line. The engine
+   (humidity.window_advice) emits 'open' | 'keep_closed' | 'neutral' — matching
+   'vent' here meant the real 'open' action fell through and the most actionable
+   advice silently rendered nothing on the kiosk while the dashboard showed it. */
 function sqWindows(hum) {
   const action = hum && hum.available && hum.window && hum.window.action;
-  if (action === 'vent') return '<span class="sq-vent">windows: open them</span>';
+  if (action === 'open') return '<span class="sq-vent">windows: open them</span>';
   if (action === 'keep_closed') return '<span class="sq-winline">windows: keep closed</span>';
   if (action === 'neutral') return '<span class="sq-winline">windows: either way</span>';
   return '';
@@ -109,12 +112,12 @@ function renderStats(cost, forecast) {
   el.innerHTML = parts.join('');
 }
 
-function renderBand() {
-  const b = bandNow(new Date());
+function renderBand(cost) {
+  const b = bandTierLabel(cost);
+  if (!b) return;   // no cost/tier yet: keep the last label, don't blank or lie
   const el = document.getElementById('sq-band');
-  const cls = b.name === 'on-peak' ? 'sq-peak' : b.name === 'mid-peak' ? 'sq-mid' : 'sq-off';
-  el.className = `sq-band num ${cls}`;
-  el.textContent = b.until == null ? b.name : `${b.name} until ${fmtHour(b.until)}`;
+  el.className = `sq-band num ${b.cls}`;
+  el.textContent = `${b.name}${b.until}`;
 }
 
 function tickSqClock() {
@@ -124,16 +127,18 @@ function tickSqClock() {
 
 async function refresh() {
   const upd = document.getElementById('sq-updated');
+  let cost = null;
   try {
     const [n, rooms, air] = await Promise.all([
       j('/api/now'), j('/api/rooms'), j('/api/air'),
     ]);
     // secondary feeds degrade to blank sections, never to "offline"
-    const [hum, cost, fc] = await Promise.all([
+    const [hum, c, fc] = await Promise.all([
       j('/api/humidity').catch(() => null),
       j('/api/cost/summary').catch(() => null),
       j('/api/forecast').catch(() => null),
     ]);
+    cost = c;
     sqRoot.setAttribute('data-conn', 'up');
     renderHero(n, hum);
     renderRooms(n, rooms, air);
@@ -146,7 +151,7 @@ async function refresh() {
     sqRoot.setAttribute('data-conn', 'down');
     upd.textContent = 'offline';
   }
-  renderBand();
+  renderBand(cost);
 }
 
 tickSqClock();

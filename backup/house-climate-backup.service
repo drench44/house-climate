@@ -3,6 +3,10 @@
 [Unit]
 Description=Nightly pg_dump of house-climate TimescaleDB
 After=docker.service
+# A backup that quietly stops is worse than none: the script exits non-zero on
+# failure, and this fires a push so it's actually NOTICED instead of only
+# sitting in the journal. Ship house-climate-backup-failure.service alongside.
+OnFailure=house-climate-backup-failure.service
 
 [Service]
 Type=oneshot

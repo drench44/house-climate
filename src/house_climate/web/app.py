@@ -3,7 +3,7 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 
 from .. import db
@@ -96,13 +96,13 @@ def history(range: str = "24h"):
 
 
 @app.get("/api/runtime")
-def runtime_ep(days: int = 7):
+def runtime_ep(days: int = Query(7, ge=1, le=400)):
     c = _db()
     return api.build_runtime(c, _device(c), cfg, days)
 
 
 @app.get("/api/cost")
-def cost_ep(days: int = 1):
+def cost_ep(days: int = Query(1, ge=1, le=400)):
     c = _db()
     return api.build_cost(c, _device(c), cfg, days)
 

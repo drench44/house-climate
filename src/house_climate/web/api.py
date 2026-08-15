@@ -23,6 +23,26 @@ def _since(range_key):
     return datetime.now(timezone.utc) - _RANGES.get(range_key, _RANGES["24h"])
 
 
+# A day counts toward the complete-day cost average / forecast fit only if its
+# readings both span the day (first by ~2am, last by ~10pm) AND have no interior
+# gap longer than this. Endpoint-only spanning let a day with a long mid-day
+# poller outage pass as "complete"; cost.compute then gap-caps the missing
+# runtime to zero, dragging that day's total -- and the avg/projection built on
+# it -- silently low. 3h is comfortably above normal poll spacing yet flags a
+# real multi-hour outage.
+_COMPLETE_DAY_MAX_GAP_S = 3 * 3600
+
+
+def _day_is_complete(drows, zone) -> bool:
+    ts = sorted(r["ts"] for r in drows)
+    if not ts:
+        return False
+    if ts[0].astimezone(zone).hour > 2 or ts[-1].astimezone(zone).hour < 22:
+        return False
+    return all((b - a).total_seconds() <= _COMPLETE_DAY_MAX_GAP_S
+               for a, b in zip(ts, ts[1:]))
+
+
 def _peak_mid_weekday_rates(cfg):
     """The two highest distinct weekday TOU rates as (peak, mid), derived from
     the rates themselves rather than hardcoded band NAMES so any utility works
@@ -156,8 +176,7 @@ def _cost_summary_impl(conn, device_id, cfg, now=None) -> dict:
     for d, drows in by_date.items():
         if d >= today_local_date or d <= window_edge_day:
             continue
-        hours = [r["ts"].astimezone(zone).hour for r in drows]
-        if min(hours) <= 2 and max(hours) >= 22:
+        if _day_is_complete(drows, zone):
             dollars, _ = costed(drows)
             complete_day_dollars.append(dollars)
 
@@ -770,8 +789,7 @@ def build_forecast(conn, device_id, cfg, days=14) -> dict:
         # axes. Same completeness rule the cost averages use.
         if d >= today_local:
             continue
-        hours = [x["ts"].astimezone(zone).hour for x in drows]
-        if min(hours) > 2 or max(hours) < 22:
+        if not _day_is_complete(drows, zone):
             continue
         highs = [x["wx_outdoor_temp_f"] for x in drows if x.get("wx_outdoor_temp_f") is not None]
         if not highs:

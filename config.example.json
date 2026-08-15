@@ -2,8 +2,6 @@
   "poll_interval_s": 180,
   "timezone": "America/Los_Angeles",
   "system_kw": 3.0,
-  "system_tons": 3.0,
-  "kw_per_ton": 1.2,
   "heat_kw": 0.5,
   "short_cycle_minutes": 10,
   "weather_url": "http://weather:8137/wx.json",
