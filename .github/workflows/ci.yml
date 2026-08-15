@@ -1,0 +1,60 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # Same pinned image as docker-compose.yml — see the comment there for
+      # why the tag is nailed down instead of floating.
+      db:
+        image: timescale/timescaledb:2.29.1-pg16
+        env:
+          POSTGRES_USER: climate
+          POSTGRES_PASSWORD: climate
+          POSTGRES_DB: climate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U climate"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # httpx is a test-only dep (FastAPI TestClient transport)
+      - run: pip install -r requirements.txt httpx
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Load schema (same initdb scripts docker-compose mounts)
+        run: |
+          # -v ON_ERROR_STOP=1: without it psql exits 0 even when a statement
+          # errors, so a broken aggregates.sql (bad column, Timescale API
+          # change) would load "successfully", CI would stay green, and the
+          # continuous aggregate would silently not exist. Fail loud instead.
+          PGPASSWORD=climate psql -v ON_ERROR_STOP=1 -h localhost -U climate -d climate \
+            -f db/init.sql -f db/aggregates.sql
+      - run: python -m pytest tests -q
+        env:
+          PYTHONPATH: src
+          CI: "true"
+          TEST_DB_DSN: postgresql://climate:climate@localhost:5432/climate
+      - run: node --test tests/js/*.mjs
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history — the sweep covers every commit
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

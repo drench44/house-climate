@@ -1,0 +1,1121 @@
+/* ================================================================
+   HOUSE CLIMATE — the house is the interface.
+   Committed single-theme night design: the page is the house's
+   environment (sky above, earth below). Every color painted explicitly;
+   this runs on a LAN wall display with no internet, no webfonts.
+   ================================================================ */
+:root {
+  --void-top: #0A0D14;
+  --void-bot: #0D0C10;
+  --panel: #12161F;
+  --edge: rgba(233, 238, 247, 0.07);
+  --edge-strong: rgba(233, 238, 247, 0.14);
+  --ink: #E9EEF7;
+  --dim: #8593A9;
+  --faint: #5A6478;
+  --cool: #5BC9F0;
+  --cool-soft: rgba(91, 201, 240, 0.14);
+  --heat: #F5A45C;
+  --heat-soft: rgba(245, 164, 92, 0.13);
+  /* Location palette — one hue per PLACE, on every chart on every page:
+     indoor = teal (--cool, solid), outside = amber (--heat, dashed),
+     crawl space = violet (solid). Never reuse a place hue for a metric. */
+  --crawl-line: #C39BEA;
+  --crawl-soft: rgba(195, 155, 234, 0.16);
+  --mint: #8AE0AD;
+  --mint-soft: rgba(138, 224, 173, 0.12);
+  --warn: #E8C268;
+  --warn-soft: rgba(232, 194, 104, 0.10);
+  --crit: #EB7A70;
+  --ok-value: #8FDCA9;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scrollbar-color: #2A3140 transparent; }
+
+body {
+  font-family: var(--sans);
+  color: var(--ink);
+  background:
+    radial-gradient(1100px 480px at 78% -8%, rgba(91, 201, 240, 0.05), transparent 60%),
+    linear-gradient(180deg, var(--void-top) 0%, #0B0E14 55%, var(--void-bot) 100%);
+  background-attachment: fixed;
+  min-height: 100vh;
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 1160px; margin: 0 auto; padding: 0 28px 60px; }
+
+/* ---- microlabel voice: everything quiet speaks mono ---- */
+.micro {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.num { font-variant-numeric: tabular-nums; }
+.dim { color: var(--dim); }
+
+/* ---- range coloring: the number itself is the status ----
+   green = in range, yellow = drifting, red = out of range.
+   These are override utilities: they must defeat the component base color
+   rules (e.g. `.card .lead .v`, `.floor .t`) that set the default ink, and
+   those carry higher selector specificity — so !important is the correct
+   tool here, not a shortcut. */
+.v-ok { color: var(--ok-value) !important; }
+.v-watch { color: var(--warn) !important; }
+.v-out { color: var(--crit) !important; }
+
+/* ================= top bar ================= */
+.topbar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 22px 0 18px;
+}
+.wordmark { display: flex; align-items: baseline; gap: 10px; }
+.wordmark h1 {
+  font-family: var(--mono);
+  font-size: 14px; font-weight: 700;
+  letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.wordmark .sub { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+
+.breath-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--mint);
+  box-shadow: 0 0 8px 1px rgba(138, 224, 173, 0.55);
+  animation: breathe 4.5s ease-in-out infinite;
+  flex: none;
+}
+[data-state="cooling"] .breath-dot {
+  background: var(--cool);
+  box-shadow: 0 0 10px 2px rgba(91, 201, 240, 0.6);
+  animation-duration: 2.6s;
+}
+[data-state="heating"] .breath-dot {
+  background: var(--heat);
+  box-shadow: 0 0 10px 2px rgba(245, 164, 92, 0.6);
+  animation-duration: 2.6s;
+}
+/* connection lost / no data: the pulse goes red and stops */
+[data-conn="down"] .breath-dot {
+  background: var(--crit);
+  box-shadow: 0 0 10px 2px rgba(235, 122, 112, 0.6);
+  animation: none;
+}
+@keyframes breathe {
+  0%, 100% { transform: scale(1); opacity: 0.75; }
+  50% { transform: scale(1.35); opacity: 1; }
+}
+
+.topbar .spacer { flex: 1; }
+
+/* ---- site nav: the two pages of the app, active page marked ---- */
+.site-nav { display: flex; gap: 3px; margin-left: 12px; }
+.site-nav a {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--dim); text-decoration: none;
+  padding: 5px 12px; border-radius: 8px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.site-nav a:hover { color: var(--ink); background: rgba(233, 238, 247, 0.05); }
+.site-nav a:focus-visible { outline: 2px solid var(--cool); outline-offset: 1px; }
+.site-nav a.active {
+  color: var(--ink);
+  background: rgba(91, 201, 240, 0.12);
+  border-color: rgba(91, 201, 240, 0.2);
+}
+.clock { font-family: var(--mono); font-size: 12.5px; color: var(--dim); letter-spacing: 0.04em; }
+.today-chip {
+  font-family: var(--mono); font-size: 12.5px; font-weight: 600;
+  color: var(--mint);
+  background: var(--mint-soft);
+  border: 1px solid rgba(138, 224, 173, 0.22);
+  padding: 5px 12px; border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* ================= alerts strip ================= */
+.alerts { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+.alerts:empty { display: none; }
+.alert {
+  display: flex; align-items: baseline; gap: 10px;
+  font-family: var(--mono); font-size: 13px; line-height: 1.5;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border-left: 3px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--ink);
+}
+.alert .sev {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--warn); flex: none;
+}
+.alert.crit { border-left-color: var(--crit); background: rgba(235, 122, 112, 0.10); }
+.alert.crit .sev { color: var(--crit); }
+
+/* ================= hero row ================= */
+.hero-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2.05fr) minmax(250px, 1fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
+/* ---- page-load orchestration: the system comes online in order ---- */
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+.scene, .rail, .humidity-panel, .crawl-panel, .ribbon-panel, .card { animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.rail { animation-delay: 0.10s; }
+.humidity-panel { animation-delay: 0.18s; }
+.crawl-panel { animation-delay: 0.24s; }
+.ribbon-panel { animation-delay: 0.28s; }
+.cards .card:nth-child(1) { animation-delay: 0.38s; }
+.cards .card:nth-child(2) { animation-delay: 0.46s; }
+.cards .card:nth-child(3) { animation-delay: 0.54s; }
+
+.scene {
+  position: relative;
+  border: 1px solid var(--edge);
+  border-radius: 18px;
+  background: linear-gradient(180deg, #0D1119 0%, #0F131C 72%, #12100F 100%);
+  overflow: hidden;
+  padding: 26px 30px 22px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 26px;
+  transition: filter 0.6s ease, background 1.2s ease;
+}
+/* stale reading: the whole scene desaturates */
+.scene.is-stale { filter: saturate(0.35) brightness(0.85); }
+
+/* ---- the sky: driven by the real weather feed ----
+   data-weather on #root: day | night | clouds | rain | snow */
+.stars { position: absolute; inset: 0; z-index: 0; pointer-events: none; display: none; }
+[data-weather="night"] .stars { display: block; }
+.stars i {
+  position: absolute;
+  width: 2px; height: 2px; border-radius: 50%;
+  background: #E9EEF7;
+  opacity: 0.18;
+  animation: twinkle var(--tw, 9s) ease-in-out var(--twd, 0s) infinite;
+}
+@keyframes twinkle {
+  0%, 100% { opacity: 0.10; }
+  50% { opacity: var(--twmax, 0.42); }
+}
+
+/* sun by day, moon by night */
+[data-weather="night"] .sun {
+  background: radial-gradient(circle at 62% 38%, #F0F3F9 42%, #B9C2D4 60%, rgba(185, 194, 212, 0.2) 100%);
+  box-shadow: 0 0 14px 3px rgba(233, 238, 247, 0.18);
+  animation: none;
+}
+[data-weather="clouds"] .sun { filter: brightness(0.72) saturate(0.7); }
+[data-weather="rain"] .sun { filter: brightness(0.45) saturate(0.4); }
+[data-weather="snow"] .sun { filter: brightness(0.6) saturate(0.5); }
+
+/* drifting clouds — present for clouds, rain, and snow */
+.clouds { position: absolute; inset: 0; z-index: 0; pointer-events: none; display: none; overflow: hidden; }
+[data-weather="clouds"] .clouds,
+[data-weather="rain"] .clouds,
+[data-weather="snow"] .clouds { display: block; }
+.clouds i {
+  position: absolute;
+  width: 130px; height: 30px; border-radius: 999px;
+  background: rgba(233, 238, 247, 0.10);
+  filter: blur(13px);
+  animation: cloud-drift var(--cd, 85s) linear var(--cdd, 0s) infinite;
+}
+[data-weather="rain"] .clouds i,
+[data-weather="snow"] .clouds i { background: rgba(160, 176, 205, 0.13); }
+@keyframes cloud-drift {
+  from { transform: translateX(-160px); }
+  to { transform: translateX(1200px); }
+}
+
+/* rain falls around the house */
+.rain { position: absolute; inset: 0; z-index: 0; pointer-events: none; display: none; }
+[data-weather="rain"] .rain { display: block; }
+.rain i {
+  position: absolute; top: -14px;
+  width: 1.5px; height: 12px; border-radius: 2px;
+  background: linear-gradient(180deg, rgba(122, 168, 255, 0), rgba(122, 168, 255, 0.4));
+  transform: rotate(9deg);
+  animation: rainfall var(--rd, 1.1s) linear var(--rdd, 0s) infinite;
+}
+@keyframes rainfall {
+  from { transform: translateY(0) rotate(9deg); opacity: 0.9; }
+  to { transform: translateY(480px) rotate(9deg); opacity: 0.35; }
+}
+
+/* snow drifts down with a gentle sway */
+.snow { position: absolute; inset: 0; z-index: 0; pointer-events: none; display: none; }
+[data-weather="snow"] .snow { display: block; }
+.snow i {
+  position: absolute; top: -12px;
+  width: 3px; height: 3px; border-radius: 50%;
+  background: rgba(233, 238, 247, 0.75);
+  animation: snowfall var(--sd, 8s) linear var(--sdd, 0s) infinite;
+}
+@keyframes snowfall {
+  0% { transform: translate(0, 0); opacity: 0; }
+  12% { opacity: 0.85; }
+  100% { transform: translate(var(--sx, 12px), 470px); opacity: 0.4; }
+}
+
+/* sky tint follows the weather */
+[data-weather="night"] .scene { background: linear-gradient(180deg, #0A0D16 0%, #0E121B 72%, #12100F 100%); }
+[data-weather="rain"] .scene { background: linear-gradient(180deg, #0B0F15 0%, #0E1119 72%, #100F0E 100%); }
+[data-weather="clouds"] .scene,
+[data-weather="snow"] .scene { background: linear-gradient(180deg, #0E1219 0%, #10141C 72%, #12100F 100%); }
+
+/* ambience pauses when the tab is hidden — this runs for months on a wall */
+[data-anim="paused"] .stars i,
+[data-anim="paused"] .clouds i,
+[data-anim="paused"] .rain i,
+[data-anim="paused"] .snow i,
+[data-anim="paused"] .airflow .aw-stream,
+[data-anim="paused"] .airflow .aw-stream path,
+[data-anim="paused"] .breath-dot,
+[data-anim="paused"] .sun,
+[data-anim="paused"] .rb-now-dot { animation-play-state: paused; }
+
+.scene .outdoor, .scene .house, .scene .stat-col { position: relative; z-index: 1; }
+
+/* ---- outdoor strip ---- */
+.outdoor {
+  grid-column: 1 / -1;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 16px;
+  min-height: 30px;
+}
+.sun {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: radial-gradient(circle at 38% 35%, #FFD9A8, var(--heat) 58%, rgba(245, 164, 92, 0.25) 100%);
+  box-shadow: 0 0 18px 4px rgba(245, 164, 92, calc(0.12 + 0.35 * var(--solar, 0.27)));
+  animation: sunpulse 8s ease-in-out infinite;
+  flex: none;
+}
+@keyframes sunpulse { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.18); } }
+.outdoor .line { font-family: var(--mono); font-size: 12.5px; color: var(--dim); letter-spacing: 0.03em; }
+.outdoor .line b { color: var(--ink); font-weight: 600; }
+.outdoor .aqi {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  padding: 3px 10px; border-radius: 999px;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.aqi-ok { color: var(--mint); background: var(--mint-soft); }
+.aqi-neutral { color: var(--dim); background: rgba(233, 238, 247, 0.06); }
+.aqi-warn { color: var(--warn); background: var(--warn-soft); }
+.aqi-crit { color: var(--crit); background: rgba(235, 122, 112, 0.14); }
+
+/* prominent escalation above the modest .aqi chip — same crit hue.
+   flex-basis:100% forces it onto its own row in the flex-wrap .outdoor
+   strip, pushing the sun/temp line beneath it. */
+.smoke-banner {
+  flex-basis: 100%;
+  color: var(--crit); background: rgba(235, 122, 112, 0.14);
+  border-radius: 10px; padding: 8px 12px;
+  font-family: var(--mono); font-size: 0.85rem; font-weight: 600;
+}
+
+/* ---- the house cross-section ---- */
+.house { position: relative; padding-top: 44px; }
+.roof {
+  position: absolute; top: 0; left: -7%; width: 114%; height: 52px;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  background: linear-gradient(180deg, #1B2230, #141924);
+  border-radius: 2px;
+}
+.roof::after {
+  content: ""; position: absolute; inset: 0;
+  clip-path: polygon(50% 0, 100% 100%, 50% 6px, 0 100%);
+  background: var(--edge-strong);
+}
+.floors {
+  position: relative;
+  border: 1px solid var(--edge-strong);
+  border-radius: 0 0 4px 4px;
+  background: rgba(18, 22, 31, 0.6);
+  overflow: hidden;
+  transition: box-shadow 1.2s ease;
+}
+[data-state="cooling"] .floors {
+  box-shadow: inset 0 0 34px rgba(91, 201, 240, 0.10), 0 0 22px rgba(91, 201, 240, 0.07);
+  animation: wallglow 2.6s ease-in-out infinite;
+}
+@keyframes wallglow {
+  0%, 100% { box-shadow: inset 0 0 34px rgba(91, 201, 240, 0.08), 0 0 22px rgba(91, 201, 240, 0.05); }
+  50% { box-shadow: inset 0 0 44px rgba(91, 201, 240, 0.15), 0 0 26px rgba(91, 201, 240, 0.10); }
+}
+[data-state="heating"] .floors { animation: heatglow 2.6s ease-in-out infinite; }
+@keyframes heatglow {
+  0%, 100% { box-shadow: inset 0 0 34px rgba(245, 164, 92, 0.08), 0 0 22px rgba(245, 164, 92, 0.05); }
+  50% { box-shadow: inset 0 0 44px rgba(245, 164, 92, 0.15), 0 0 26px rgba(245, 164, 92, 0.10); }
+}
+
+.floor {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+  padding: 15px 18px;
+  border-top: 1px solid var(--edge);
+  position: relative; z-index: 2;
+}
+.floor:first-child { border-top: none; }
+.floor .room { display: flex; flex-direction: column; gap: 3px; }
+.floor .vals { display: flex; align-items: baseline; gap: 12px; }
+.floor .t { font-family: var(--mono); font-size: 21px; font-weight: 500; color: var(--ink); }
+.floor .t .u { font-size: 12px; color: var(--faint); font-weight: 400; }
+.floor .rh { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+.floor .age { font-family: var(--mono); font-size: 10px; color: var(--faint); }
+.floor .age.old { color: var(--warn); }
+.sig { display: inline-flex; align-items: flex-end; gap: 1.5px; height: 10px; margin-left: 2px; opacity: 0.75; }
+.sig i { width: 2.5px; border-radius: 1px; background: var(--ok-value); }
+.sig i:nth-child(1) { height: 3px; } .sig i:nth-child(2) { height: 5px; }
+.sig i:nth-child(3) { height: 7px; } .sig i:nth-child(4) { height: 10px; }
+.sig.weak i { background: var(--warn); }
+.sig i.off { background: rgba(233, 238, 247, 0.14); }
+.batt-chip {
+  font-family: var(--mono); font-size: 9px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--crit); background: rgba(235, 122, 112, 0.14);
+  padding: 2px 6px; border-radius: 999px; margin-left: 2px;
+}
+/* indoor PM2.5 chip (Levoit via the HA bridge) — severity-colored */
+.pm {
+  font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
+  padding: 2px 6px; border-radius: 999px; margin-left: 2px;
+  border: 1px solid transparent; cursor: default;
+}
+.pm.pm-ok { color: var(--ok-value); background: var(--mint-soft); }
+.pm.pm-warn { color: var(--warn); background: var(--warn-soft); }
+.pm.pm-bad { color: var(--crit); background: rgba(235, 122, 112, 0.14); }
+.pm.pm-stale { color: var(--faint); border-color: var(--edge); }
+.floor.stale .t, .floor.stale .rh { color: var(--faint); }
+.floor.absent .t, .floor.absent .rh { color: var(--faint); }
+.floor.absent .waiting { font-family: var(--mono); font-size: 11.5px; color: var(--faint); font-style: normal; }
+
+/* crawl space: below the drawn ground line */
+.crawl {
+  margin-top: 10px;
+  border: 1px dashed rgba(233, 238, 247, 0.13);
+  border-radius: 4px;
+  background: rgba(13, 12, 10, 0.5);
+  position: relative; z-index: 2;
+}
+.crawl:empty { display: none; }
+.crawl::before {
+  content: "";
+  position: absolute; top: -6px; left: -60px; right: -60px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--edge-strong) 8%, var(--edge-strong) 92%, transparent);
+  pointer-events: none;
+}
+.crawl .floor { border-top: none; padding: 11px 18px; }
+.crawl .t { font-size: 17px; }
+
+/* Conditioned air moving through the house — streamlines. Each stream is a
+   full-width sine path; puffs of light (stroke dashes) travel ALONG the
+   curve, so the motion itself undulates instead of a shape being dragged
+   across. The whole stream also breathes vertically. Deliberately NOT rain:
+   horizontal, wavy, soft-ended (the stroke gradient fades both edges).
+   Cyan cooling, amber heating, neutral fan. */
+.airflow { position: absolute; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
+.airflow .aw-stream {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0;
+  transition: opacity 0.9s ease;
+  will-change: opacity;
+}
+.airflow .aw-stream path {
+  fill: none;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  /* pathLength=100 on the element makes these units stable */
+  stroke-dasharray: 7 26;
+}
+[data-state="cooling"] .airflow .aw-stream,
+[data-state="heating"] .airflow .aw-stream,
+[data-state="fan"] .airflow .aw-stream {
+  opacity: 1;
+  animation: stream-breathe var(--bob, 7s) ease-in-out var(--delay, 0s) infinite;
+}
+[data-state="cooling"] .airflow .aw-stream path { stroke: url(#aw-cool); animation: dashflow var(--dur, 6s) linear var(--delay, 0s) infinite; }
+[data-state="heating"] .airflow .aw-stream path { stroke: url(#aw-heat); animation: dashflow var(--dur, 6s) linear var(--delay, 0s) infinite; }
+[data-state="fan"] .airflow .aw-stream path { stroke: url(#aw-fan); animation: dashflow calc(var(--dur, 6s) * 1.6) linear var(--delay, 0s) infinite; }
+@keyframes dashflow {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -66; } /* two dash periods per cycle, seamless */
+}
+@keyframes stream-breathe {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(var(--bobamp, 4px)); }
+}
+
+/* ---- thermostat column ---- */
+.stat-col { display: flex; flex-direction: column; justify-content: center; gap: 16px; padding-bottom: 60px; }
+.big-temp { display: flex; align-items: baseline; gap: 6px; line-height: 1; }
+.big-temp .v {
+  font-size: 84px; font-weight: 200; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.big-temp .u { font-size: 22px; font-weight: 300; color: var(--dim); }
+
+.eq-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  align-self: flex-start;
+  font-family: var(--mono); font-size: 12px; font-weight: 600;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  padding: 7px 14px; border-radius: 999px;
+  border: 1px solid var(--edge-strong);
+  color: var(--dim); background: rgba(233, 238, 247, 0.03);
+  transition: all 0.6s ease;
+}
+.eq-pill .d { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+[data-state="cooling"] .eq-pill {
+  color: var(--cool); border-color: rgba(91, 201, 240, 0.35); background: var(--cool-soft);
+}
+[data-state="cooling"] .eq-pill .d {
+  background: var(--cool);
+  box-shadow: 0 0 8px 2px rgba(91, 201, 240, 0.5);
+  animation: breathe 2.6s ease-in-out infinite;
+}
+[data-state="heating"] .eq-pill {
+  color: var(--heat); border-color: rgba(245, 164, 92, 0.35); background: var(--heat-soft);
+}
+[data-state="heating"] .eq-pill .d {
+  background: var(--heat);
+  box-shadow: 0 0 8px 2px rgba(245, 164, 92, 0.5);
+  animation: breathe 2.6s ease-in-out infinite;
+}
+
+/* comfort band: heat notch … indoor marker … cool notch */
+.band { display: flex; flex-direction: column; gap: 7px; max-width: 320px; }
+[data-state="off"] .band { opacity: 0.5; }
+.band .track {
+  position: relative; height: 5px; border-radius: 999px;
+  background: linear-gradient(90deg, rgba(245, 164, 92, 0.35), rgba(233, 238, 247, 0.10) 38%, rgba(233, 238, 247, 0.10) 62%, rgba(91, 201, 240, 0.35));
+}
+.band .notch {
+  position: absolute; top: -4px; width: 2.5px; height: 13px; border-radius: 2px;
+}
+.band .notch.h { background: var(--heat); }
+.band .notch.c { background: var(--cool); }
+.band .marker {
+  position: absolute; top: -3.5px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--ink);
+  border: 2.5px solid #0F131C;
+  box-shadow: 0 0 0 1.5px rgba(233, 238, 247, 0.35);
+  transform: translateX(-50%);
+}
+[data-state="cooling"] .band .marker {
+  background: var(--cool);
+  box-shadow: 0 0 0 1.5px rgba(91, 201, 240, 0.5), 0 0 10px 2px rgba(91, 201, 240, 0.35);
+}
+[data-state="heating"] .band .marker {
+  background: var(--heat);
+  box-shadow: 0 0 0 1.5px rgba(245, 164, 92, 0.5), 0 0 10px 2px rgba(245, 164, 92, 0.35);
+}
+.band .labels { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.band .labels .h b { color: var(--heat); font-weight: 600; }
+.band .labels .c b { color: var(--cool); font-weight: 600; }
+
+.rh-line { font-family: var(--mono); font-size: 13px; color: var(--dim); }
+.rh-line b { font-weight: 600; color: var(--ink); }
+/* the source note wraps as one unit instead of breaking mid-phrase */
+.rh-line .rh-src { white-space: nowrap; color: var(--faint); }
+
+/* stale banner + no-data empty state */
+.stale-banner {
+  grid-column: 1 / -1;
+  font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--warn); background: var(--warn-soft);
+  border: 1px solid rgba(232, 194, 104, 0.25);
+  border-radius: 8px; padding: 8px 12px; text-align: center;
+}
+.scene-empty {
+  grid-column: 1 / -1;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 40px 20px; text-align: center;
+}
+.scene-empty .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--crit); box-shadow: 0 0 10px 2px rgba(235, 122, 112, 0.5); }
+.scene-empty p { color: var(--ink); font-size: 14px; }
+.scene-empty p.sub { color: var(--dim); font-size: 12.5px; }
+
+/* ================= cost rail ================= */
+.rail {
+  border: 1px solid var(--edge);
+  border-radius: 18px;
+  background: var(--panel);
+  padding: 22px 22px 18px;
+  display: flex; flex-direction: column;
+}
+.peak-strip {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 12px; border-radius: 10px; margin-bottom: 12px; line-height: 1.25;
+}
+.peak-strip b { font-size: 0.95rem; letter-spacing: 0.02em; }
+.peak-strip span { font-size: 0.8rem; opacity: 0.9; }
+/* Same three hues as the band breakdown below (.b-off/.b-mid/.b-peak) and
+   the chart's on-peak shading (.rb-peak), so the strip reads as one system. */
+.peak-strip.is-off { background: var(--mint-soft); color: var(--mint); }
+.peak-strip.is-warn { background: var(--warn-soft); color: var(--warn); }
+.peak-strip.is-peak { background: rgba(235, 122, 112, 0.14); color: var(--crit); }
+/* Mid tier active (not bordering peak): same amber as .b-mid below, so it
+   never reads as the mint "cheap power" off-peak state. */
+.peak-strip.is-mid { background: var(--warn-soft); color: var(--warn); }
+/* Flat-rate utility: no peak/off framing exists, so no mint/amber/red — a
+   plain neutral gray instead of implying either "cheap" or "watch out". */
+.peak-strip.is-flat { background: rgba(133, 147, 169, 0.12); color: var(--dim); }
+
+.rail .today-amt {
+  font-size: 46px; font-weight: 250; line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  margin-top: 8px;
+  transition: color 0.5s ease;
+}
+.rail .today-amt.is-ticking { color: var(--mint); text-shadow: 0 0 18px rgba(138, 224, 173, 0.25); }
+.accrual {
+  margin-top: 6px;
+  font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+  color: var(--mint);
+}
+.accrual[hidden] { display: none; }
+
+.rail hr { border: none; border-top: 1px solid var(--edge); margin: 16px 0 14px; }
+
+.bands { display: flex; flex-direction: column; gap: 8px; margin-top: 9px; }
+.bandrow { display: flex; align-items: center; gap: 9px; font-family: var(--mono); font-size: 12px; }
+.bandrow .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.bandrow .nm { color: var(--dim); width: 70px; }
+.bandrow .bar { flex: 1; height: 3px; border-radius: 999px; background: rgba(233, 238, 247, 0.07); overflow: hidden; }
+.bandrow .bar i { display: block; height: 100%; border-radius: 999px; }
+.bandrow .amt { color: var(--ink); font-weight: 600; width: 50px; text-align: right; }
+.b-peak .dot, .b-peak .bar i { background: var(--crit); }
+.b-mid .dot, .b-mid .bar i { background: var(--warn); }
+.b-off .dot, .b-off .bar i { background: var(--mint); }
+
+.proj-row { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12px; color: var(--dim); margin-top: 10px; }
+.proj-row b { color: var(--ink); font-weight: 600; }
+
+.fc-line { margin-top: 9px; font-size: 13px; color: var(--dim); line-height: 1.5; }
+.fc-line b { color: var(--ink); font-weight: 600; }
+.fc-basis { margin-top: 5px; font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+.fc-tip {
+  margin-top: 9px; padding: 9px 12px;
+  border-left: 2px solid var(--mint);
+  background: var(--mint-soft);
+  border-radius: 0 8px 8px 0;
+  font-size: 12.5px; color: var(--ink); line-height: 1.5;
+}
+.fc-tip b { color: var(--mint); }
+
+/* ================= humidity panel (full width) ================= */
+.humidity-panel {
+  margin-top: 18px;
+  border: 1px solid var(--edge);
+  border-radius: 18px;
+  background: var(--panel);
+  padding: 20px 24px 16px;
+}
+.hum-top { display: flex; align-items: baseline; gap: 22px; flex-wrap: wrap; margin: 8px 0 4px; }
+.hum-big { display: flex; align-items: baseline; gap: 7px; }
+.hum-big .v { font-size: 44px; font-weight: 250; line-height: 1; font-variant-numeric: tabular-nums; }
+.hum-big .u { font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+.hum-dew { font-size: 13.5px; color: var(--dim); line-height: 1.5; }
+.hum-dew b { font-weight: 600; color: var(--ink); font-family: var(--mono); font-size: 13px; }
+.hum-spark { display: block; width: 100%; height: auto; margin-top: 6px; }
+.hs-indoor { fill: none; stroke: var(--cool); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.hs-outdoor { fill: none; stroke: rgba(245, 164, 92, 0.55); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.hs-fill { fill: url(#hs-grad); }
+.hs-label { font-family: var(--mono); font-size: 10px; fill: var(--faint); }
+.hs-grid { stroke: rgba(233, 238, 247, 0.05); stroke-width: 1; }
+.hum-foot { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 10px; align-items: baseline; }
+.hum-window {
+  padding-left: 10px;
+  border-left: 3px solid var(--edge-strong);
+  font-size: 13px; font-weight: 600; color: var(--dim);
+}
+.hum-window.open { color: var(--ok-value); border-left-color: var(--ok-value); }
+.hum-window.closed { color: var(--warn); border-left-color: var(--warn); }
+.hum-ac { margin-left: auto; font-size: 12.5px; color: var(--dim); }
+.hum-ac b { color: var(--ink); font-weight: 600; font-family: var(--mono); font-size: 12px; }
+
+/* ================= crawl space panel (full width) ================= */
+.crawl-panel {
+  margin-top: 18px;
+  border: 1px solid var(--edge);
+  border-radius: 18px;
+  background: var(--panel);
+  padding: 20px 24px 16px;
+}
+.crawl-panel[hidden] { display: none; }
+/* range tabs */
+.range-tabs { display: flex; gap: 2px; background: rgba(233, 238, 247, 0.04); border-radius: 8px; padding: 2px; }
+.range-tabs button {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--dim); background: none; border: 0; border-radius: 6px;
+  padding: 3px 10px; cursor: pointer;
+}
+.range-tabs button:hover { color: var(--ink); }
+.range-tabs button:focus-visible { outline: 2px solid var(--cool); outline-offset: 1px; }
+.range-tabs button.is-on { color: var(--ink); background: rgba(91, 201, 240, 0.14); }
+/* stat chips */
+.cs-chips { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 4px; }
+.cs-chip {
+  display: inline-flex; align-items: baseline; gap: 7px;
+  border: 1px solid var(--edge); border-radius: 9px; padding: 4px 10px;
+  font-size: 12.5px;
+}
+.cs-chip .cl {
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint);
+}
+.cs-chip b { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--ink); }
+/* trend */
+.ct-up { color: var(--warn); font-family: var(--mono); font-size: 12.5px; }
+.ct-down { color: var(--ok-value); font-family: var(--mono); font-size: 12.5px; }
+.ct-flat { color: var(--dim); font-family: var(--mono); font-size: 12.5px; }
+/* chart */
+.crawl-wrap { position: relative; margin-top: 4px; }
+.crawl-wrap svg { display: block; width: 100%; height: auto; }
+.cz-watch { fill: var(--warn-soft); }
+.cz-mold { fill: rgba(235, 122, 112, 0.10); }
+.cz-line { stroke-width: 1; stroke-dasharray: 4 4; }
+.cz-line.watch { stroke: rgba(232, 194, 104, 0.45); }
+.cz-line.mold { stroke: rgba(235, 122, 112, 0.5); }
+.cz-band { fill: var(--crawl-soft); }
+.cz-avg { fill: none; stroke: var(--crawl-line); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+/* crawl temperature: same place-hue as the RH line, dashed = secondary metric.
+   NOT amber — amber dashes mean "outside" everywhere else. */
+.cz-temp { fill: none; stroke: rgba(195, 155, 234, 0.55); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.cz-templabel { font-family: var(--mono); font-size: 10px; fill: rgba(195, 155, 234, 0.6); }
+.cz-hidot { fill: var(--crit); }
+.cz-lodot { fill: var(--ok-value); }
+.cz-marklabel { font-family: var(--mono); font-size: 10.5px; font-weight: 600; fill: var(--dim); letter-spacing: 0.05em; }
+/* legend swatches */
+.sw-crawlband { background: rgba(195, 155, 234, 0.28); height: 8px; border-radius: 2px; }
+.sw-crawlavg { background: var(--crawl-line); }
+.sw-crawltemp { background: rgba(195, 155, 234, 0.55); }
+.sw-moout { background: rgba(245, 164, 92, 0.6); }
+.sw-rainbar { background: rgba(91, 201, 240, 0.65); height: 8px; border-radius: 2px; }
+.sw-watchzone { background: var(--warn-soft); height: 10px; border-radius: 2px; border: 1px solid rgba(232, 194, 104, 0.4); }
+.sw-moldzone { background: rgba(235, 122, 112, 0.12); height: 10px; border-radius: 2px; border: 1px solid rgba(235, 122, 112, 0.45); }
+/* foot: mold verdict + vent advice */
+.crawl-foot { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 10px; align-items: baseline; }
+.cs-mold {
+  padding-left: 10px;
+  border-left: 3px solid var(--edge-strong);
+  font-size: 13px; font-weight: 600; color: var(--dim);
+}
+.cs-mold.ok { color: var(--ok-value); border-left-color: var(--ok-value); }
+.cs-mold.watch { color: var(--warn); border-left-color: var(--warn); }
+.cs-mold.bad { color: var(--crit); border-left-color: var(--crit); }
+.cs-vent { margin-left: auto; font-size: 12.5px; color: var(--dim); }
+
+/* ================= day ribbon ================= */
+.ribbon-panel {
+  margin-top: 18px;
+  border: 1px solid var(--edge);
+  border-radius: 18px;
+  background: var(--panel);
+  padding: 20px 24px 14px;
+}
+.panel-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+.panel-head .right { margin-left: auto; }
+.ribbon-wrap { position: relative; }
+.ribbon-wrap svg { display: block; width: 100%; height: auto; }
+.rb-peak { fill: rgba(235, 122, 112, 0.07); }
+.rb-peak-edge { stroke: rgba(235, 122, 112, 0.25); stroke-width: 1; stroke-dasharray: 3 4; }
+.rb-grid { stroke: rgba(233, 238, 247, 0.05); stroke-width: 1; }
+.rb-outdoor { fill: none; stroke: rgba(245, 164, 92, 0.55); stroke-width: 1.6; stroke-dasharray: 5 4; }
+.rb-indoor { fill: none; stroke: var(--cool); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.rb-indoor-fill { fill: url(#rb-grad); }
+.rb-now-halo { fill: rgba(91, 201, 240, 0.22); }
+.rb-cool-seg { fill: rgba(91, 201, 240, 0.75); }
+.rb-cool-glow { fill: rgba(91, 201, 240, 0.16); }
+.rb-heat-seg { fill: rgba(245, 164, 92, 0.78); }
+.rb-heat-glow { fill: rgba(245, 164, 92, 0.16); }
+.rb-hour { font-family: var(--mono); font-size: 10px; fill: var(--faint); letter-spacing: 0.08em; }
+.rb-tick { stroke: rgba(233, 238, 247, 0.18); stroke-width: 1; }
+.rb-templabel { font-family: var(--mono); font-size: 10px; fill: var(--faint); }
+.rb-now { stroke: var(--ink); stroke-width: 1.2; opacity: 0.8; }
+.rb-now-dot { fill: var(--ink); animation: breathe 2.4s ease-in-out infinite; transform-origin: center; transform-box: fill-box; }
+.rb-empty { font-family: var(--mono); font-size: 11px; fill: var(--faint); }
+.ribbon-legend { display: flex; gap: 20px; margin-top: 10px; flex-wrap: wrap; }
+.ribbon-legend .li { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.ribbon-legend .sw { width: 14px; height: 3px; border-radius: 2px; }
+.sw-in { background: var(--cool); }
+.sw-out { background: rgba(245, 164, 92, 0.55); }
+.sw-run { background: rgba(91, 201, 240, 0.65); height: 6px; border-radius: 2px; }
+.sw-peak { background: rgba(235, 122, 112, 0.35); height: 10px; border-radius: 2px; }
+/* ribbon hover tooltip */
+.rb-tip {
+  position: absolute; z-index: 5; pointer-events: none;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  color: var(--ink); background: #171D29;
+  border: 1px solid var(--edge-strong); border-radius: 8px;
+  padding: 6px 9px; transform: translate(-50%, -120%);
+  white-space: nowrap; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+.rb-tip[hidden] { display: none; }
+
+/* ================= quiet band ================= */
+.cards {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+.card {
+  border: 1px solid var(--edge);
+  border-radius: 16px;
+  background: var(--panel);
+  padding: 18px 20px;
+  display: flex; flex-direction: column; gap: 10px;
+  transition: border-color 0.4s ease;
+}
+.card.due { border-color: rgba(235, 122, 112, 0.4); }
+.card .lead { display: flex; align-items: baseline; gap: 8px; }
+.card .lead .v { font-size: 30px; font-weight: 250; font-variant-numeric: tabular-nums; color: var(--ink); }
+.card .lead .u { font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+.card .row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; color: var(--dim); }
+.card .row b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+.card .note { font-size: 12.5px; color: var(--dim); line-height: 1.5; border-top: 1px solid var(--edge); padding-top: 9px; margin-top: auto; }
+.card .note.good { color: var(--mint); }
+.card .note.warn { color: var(--warn); }
+
+.minibar { height: 4px; border-radius: 999px; background: rgba(233, 238, 247, 0.07); overflow: hidden; display: flex; }
+.minibar i { display: block; height: 100%; }
+.mb-cool { background: var(--cool); }
+.mb-heat { background: var(--heat); }
+.mb-fan { background: var(--dim); }
+.mb-idle { background: rgba(233, 238, 247, 0.10); }
+.mb-filter { background: var(--mint); border-radius: 999px; }
+.mb-filter.watch { background: var(--warn); }
+.mb-filter.due { background: var(--crit); }
+
+.learn-head { display: flex; justify-content: space-between; align-items: baseline; }
+.learn-sub { font-size: 11.5px; color: var(--faint); line-height: 1.45; margin: -4px 0 3px; }
+.learn-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--ink); }
+.learn-row > span:first-child { min-width: 0; }
+.learn-row .st {
+  margin-left: auto; flex: none;
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 999px;
+  color: var(--dim); background: rgba(233, 238, 247, 0.05);
+  border: 1px solid var(--edge);
+  white-space: nowrap;
+}
+.learn-row .st.active { color: var(--cool); background: var(--cool-soft); border-color: rgba(91, 201, 240, 0.25); }
+.learn-row .st.ready { color: var(--ok-value); background: var(--mint-soft); border-color: rgba(138, 224, 173, 0.25); }
+
+.ghost-btn {
+  align-self: flex-start;
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--dim);
+  background: none;
+  border: 1px solid var(--edge-strong);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.ghost-btn:hover { color: var(--ink); border-color: rgba(233, 238, 247, 0.3); }
+.ghost-btn:focus-visible { outline: 2px solid var(--cool); outline-offset: 2px; }
+.ghost-btn.is-armed { color: var(--warn); border-color: var(--warn); }
+.ghost-btn.due { color: var(--ink); background: var(--crit); border-color: var(--crit); }
+.ghost-btn:disabled { opacity: 0.6; cursor: default; }
+
+/* panel loading placeholder */
+.loading { color: var(--faint); font-family: var(--mono); font-size: 12px; }
+
+/* ================= footer ================= */
+.foot {
+  margin-top: 26px;
+  display: flex; gap: 14px;
+  font-family: var(--mono); font-size: 11px; color: var(--faint);
+  letter-spacing: 0.06em;
+}
+.foot .r { margin-left: auto; }
+
+/* ================= moisture case page ================= */
+.mo-wrap { max-width: 1040px; }
+.mo-actions { display: flex; gap: 8px; align-items: center; }
+.mo-actions .ghost-btn { white-space: nowrap; }
+.mo-actions .ghost-btn { text-decoration: none; display: inline-block; }
+.mo-panel {
+  margin-top: 18px;
+  border: 1px solid var(--edge);
+  border-radius: 18px;
+  background: var(--panel);
+  padding: 18px 24px 16px;
+  animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.mo-panel svg { display: block; width: 100%; height: auto; }
+/* verdict strip */
+.mo-verdict {
+  display: flex; gap: 12px; align-items: baseline;
+  padding: 8px 0 8px 12px; margin-top: 6px;
+  border-left: 3px solid var(--edge-strong);
+  font-size: 13.5px; line-height: 1.5;
+}
+.mo-verdict.ok { border-left-color: var(--ok-value); }
+.mo-verdict.watch { border-left-color: var(--warn); }
+.mo-verdict.bad { border-left-color: var(--crit); }
+.mo-verdict.info { border-left-color: var(--cool); }
+.mo-vk {
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint);
+  min-width: 64px; flex: none;
+}
+/* now row */
+.mo-now-row { display: flex; gap: 34px; flex-wrap: wrap; margin-top: 10px; align-items: flex-end; }
+.mo-dp { display: flex; flex-direction: column; gap: 4px; }
+.mo-dp .v { font-size: 30px; font-weight: 250; line-height: 1; }
+.mo-dp .u { font-size: 15px; color: var(--dim); }
+.mo-delta-big { padding-left: 22px; border-left: 1px solid var(--edge-strong); }
+.mo-delta-big .v { font-size: 40px; }
+.mo-dp-sub { font-size: 11.5px; color: var(--dim); }
+/* charts */
+.mo-pos-zone { fill: rgba(232, 194, 104, 0.05); }
+.mo-zero { stroke: rgba(233, 238, 247, 0.3); stroke-width: 1; }
+.mo-delta-line { fill: none; stroke: var(--warn); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+/* indoor reference: teal, matching "indoor" on every dashboard chart */
+.mo-ref-line { fill: none; stroke: rgba(91, 201, 240, 0.5); stroke-width: 1.4; }
+.sw-moref { background: rgba(91, 201, 240, 0.5); }
+/* outdoor on the moisture page: amber dashed, matching the dashboard */
+.mo-out-line { fill: none; stroke: rgba(245, 164, 92, 0.55); stroke-width: 1.5; stroke-dasharray: 5 4; }
+/* direct line-end labels on the dew-point sparkline */
+.hs-endlabel { font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: 0.06em; }
+.mo-marker { stroke: var(--mint); stroke-width: 1.2; stroke-dasharray: 2 3; }
+.mo-marker-label { font-family: var(--mono); font-size: 9.5px; fill: var(--mint); }
+.mo-cond-bar { fill: rgba(235, 122, 112, 0.75); }
+.mo-duct-bar { fill: rgba(232, 194, 104, 0.6); }
+.mo-rain-bar { fill: rgba(91, 201, 240, 0.65); }
+.mo-rain-bar.est { fill: rgba(91, 201, 240, 0.2); stroke: rgba(91, 201, 240, 0.5); stroke-width: 1; }
+/* readouts */
+.mo-read { font-size: 13.5px; line-height: 1.55; margin-top: 8px; }
+.mo-read b { font-family: var(--mono); font-size: 13px; }
+.mo-dim { color: var(--dim); }
+.mo-foot-note { font-size: 11px; color: var(--faint); margin-top: 6px; }
+.mo-chipsub { font-family: var(--mono); font-size: 10px; color: var(--faint); }
+/* the winning rain lag, once the correlation is actually scoreable */
+.cs-chip.mo-best { border-color: rgba(91, 201, 240, 0.55); background: rgba(91, 201, 240, 0.08); }
+.mo-lags { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.mo-best { border-color: var(--cool); }
+/* tables */
+.mo-tablewrap { overflow-x: auto; }
+.mo-twocol { display: flex; gap: 28px; flex-wrap: wrap; margin-top: 8px; }
+.mo-table { border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
+.mo-table th {
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint);
+  text-align: left; padding: 4px 14px 4px 0;
+}
+.mo-table td { padding: 4px 14px 4px 0; border-top: 1px solid var(--edge); }
+/* interventions */
+.mo-iv { margin-top: 12px; padding-top: 4px; }
+.mo-iv + .mo-iv { border-top: 1px solid var(--edge); }
+.mo-iv-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.mo-iv-note { font-size: 12.5px; margin-top: 2px; }
+.mo-badge {
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim);
+  border: 1px solid var(--edge-strong); border-radius: 6px; padding: 1px 7px;
+}
+.mo-badge.real { color: var(--mint); border-color: rgba(138, 224, 173, 0.4); }
+.mo-iv-del {
+  background: none; border: 0; color: var(--faint); font-size: 15px;
+  cursor: pointer; padding: 0 4px; margin-left: auto;
+}
+.mo-iv-del:hover, .mo-iv-del.is-armed { color: var(--crit); }
+.mo-iv-form { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.mo-iv-form input {
+  background: rgba(233, 238, 247, 0.04); border: 1px solid var(--edge-strong);
+  border-radius: 8px; color: var(--ink); padding: 6px 10px;
+  font-family: var(--sans); font-size: 13px;
+}
+.mo-iv-form input:focus-visible { outline: 2px solid var(--cool); outline-offset: 1px; }
+.mo-iv-form input[type="text"] { flex: 1 1 180px; }
+/* print header hidden on screen */
+.mo-print-head { display: none; }
+
+/* ================= square tile (square.html) =================
+   Condensed glanceable view for the kitchen wall calendar (Apolosign,
+   Android kiosk browser). Fills any viewport but is tuned for a square:
+   every size is in vmin so the same page reads correctly as a small
+   widget square or the full 21.5" screen. Same night palette and place
+   hues as the dashboard: indoor teal, outside amber, crawl violet. */
+.sq-page { overflow: hidden; user-select: none; -webkit-user-select: none; }
+.sq {
+  height: 100dvh; display: flex; flex-direction: column;
+  /* spare height spreads evenly into every gap — no single big void */
+  justify-content: space-between;
+  /* stay a square even on a 16:9 fullscreen kiosk: cap width near the
+     viewport height and center, so room values sit beside their names */
+  max-width: 115vmin; margin: 0 auto;
+  padding: clamp(12px, 4vmin, 40px);
+  gap: clamp(6px, 2vmin, 22px);
+}
+.sq .spacer { flex: 1; }
+.sq .breath-dot { width: clamp(8px, 2vmin, 16px); height: clamp(8px, 2vmin, 16px); }
+.sq .loading { color: var(--faint); font-size: clamp(12px, 3vmin, 22px); }
+
+.sq-head { display: flex; align-items: center; gap: clamp(8px, 2.5vmin, 20px); }
+.sq-title {
+  font-family: var(--mono); font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.22em; color: var(--ink);
+  font-size: clamp(11px, 3vmin, 22px);
+}
+.sq-clock { font-family: var(--mono); color: var(--dim); font-size: clamp(11px, 3vmin, 22px); }
+
+.sq-hero {
+  display: flex; align-items: flex-end; gap: clamp(10px, 3vmin, 30px);
+  justify-content: space-between;
+  flex: none;   /* natural height — .sq distributes the spare space */
+}
+.sq-hero.is-stale { filter: saturate(0.35) brightness(0.85); }
+.sq-hero-in { min-width: 0; }
+.sq-big { font-size: clamp(52px, 21vmin, 200px); font-weight: 300; line-height: 0.95; letter-spacing: -0.02em; }
+.sq-inmeta { color: var(--dim); font-size: clamp(12px, 3.2vmin, 26px); margin-top: clamp(2px, 1vmin, 8px); }
+/* place hues on the labels, matching the chart palette everywhere else */
+.sq-inlabel { color: var(--cool); }
+.sq-outlabel { color: rgba(245, 164, 92, 0.85); }
+.sq-state { color: var(--dim); }
+.sq-hero-out {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: clamp(2px, 0.8vmin, 8px); text-align: right;
+}
+.sq-big2 { font-size: clamp(26px, 9vmin, 84px); font-weight: 350; line-height: 1; color: var(--ink); }
+.sq-outmeta { color: var(--faint); font-size: clamp(11px, 2.9vmin, 22px); }
+.sq-outchips .aqi { font-size: clamp(9px, 2.4vmin, 17px); }
+.sq-vent { color: var(--mint); }
+.sq-winline { color: var(--faint); }
+
+.sq-rooms {
+  display: grid; grid-template-columns: 1fr max-content max-content max-content;
+  column-gap: clamp(10px, 3vmin, 28px); row-gap: clamp(3px, 1.2vmin, 12px);
+  align-items: baseline;
+  font-size: clamp(13px, 4vmin, 34px);
+  border-top: 1px solid var(--edge);
+  padding-top: clamp(6px, 2vmin, 20px);
+}
+.sq-room { display: contents; }
+.sq-room.is-stale > span { opacity: 0.45; }
+.sq-rname { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sq-crawl .sq-rname { color: var(--crawl-line); }
+.sq-rval { text-align: right; }
+.sq .pm { font-size: clamp(9px, 2.6vmin, 20px); justify-self: end; align-self: center; }
+
+.sq-stats {
+  display: flex; justify-content: space-between; gap: clamp(8px, 2.5vmin, 20px);
+  font-family: var(--mono); font-size: clamp(10px, 2.8vmin, 19px); color: var(--dim);
+  border-top: 1px solid var(--edge); padding-top: clamp(5px, 1.6vmin, 14px);
+}
+.sq-stats:empty { display: none; }
+
+.sq-foot { display: flex; align-items: center; gap: clamp(8px, 2.5vmin, 20px); }
+.sq-band {
+  font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.12em;
+  font-size: clamp(10px, 2.8vmin, 20px);
+  padding: clamp(2px, 0.8vmin, 6px) clamp(6px, 2vmin, 14px);
+  border-radius: 999px; border: 1px solid var(--edge-strong); color: var(--dim);
+}
+.sq-band.sq-peak { color: var(--warn); border-color: rgba(232, 194, 104, 0.55); background: var(--warn-soft); }
+.sq-band.sq-mid { color: var(--dim); }
+.sq-band.sq-off { color: var(--mint); border-color: rgba(138, 224, 173, 0.4); background: var(--mint-soft); }
+.sq-updated { font-family: var(--mono); color: var(--faint); font-size: clamp(10px, 2.8vmin, 20px); }
+
+/* tiny widget squares: keep only the essentials — the cost line needs
+   room to earn its place. Must sit AFTER the base .sq-stats rule: equal
+   specificity, so source order decides. */
+@media (max-height: 430px) {
+  .sq-stats { display: none; }
+}
+
+/* ================= print (the evidence report) ================= */
+@media print {
+  :root { color-scheme: light; }
+  body, .moisture-body {
+    background: #ffffff !important; color: #111 !important;
+    font-size: 11px;
+  }
+  .topbar, .mo-actions, .mo-iv-form, .mo-iv-del, .foot { display: none !important; }
+  .mo-print-head { display: block; margin: 0 0 12px; color: #111; }
+  .mo-print-head h1 { font-size: 18px; margin-bottom: 2px; }
+  .mo-print-head p { font-size: 10px; color: #555; }
+  .mo-wrap { max-width: none; padding: 0; }
+  .mo-panel {
+    border: 1px solid #ddd; border-radius: 6px; background: #fff;
+    padding: 10px 14px; margin-top: 10px;
+    break-inside: avoid; animation: none;
+  }
+  .micro { color: #666 !important; }
+  .mo-read, .mo-verdict { color: #111; font-size: 11px; }
+  .mo-verdict.ok { border-left-color: #2e9e5b; }
+  .mo-verdict.watch { border-left-color: #b8860b; }
+  .mo-verdict.bad { border-left-color: #c0392b; }
+  .mo-dim, .mo-chipsub, .mo-foot-note { color: #666 !important; }
+  .mo-table td { border-top-color: #e5e5e5; }
+  .mo-table th { color: #666; }
+  .cs-chip { border-color: #ddd; }
+  .cs-chip b, .mo-read b, .mo-dp .v { color: #111; }
+  .v-ok { color: #2e9e5b !important; }
+  .v-watch { color: #b8860b !important; }
+  .v-out { color: #c0392b !important; }
+  /* charts: keep colored strokes, darken the scaffolding for white paper */
+  .hs-grid { stroke: #eee; }
+  .hs-label, .rb-hour, .cz-templabel, .rb-empty { fill: #888; }
+  .rb-tick { stroke: #bbb; }
+  .mo-zero { stroke: #999; }
+  .cz-avg { stroke: #7d4bb5; }
+  .mo-delta-line { stroke: #b8860b; }
+  .cz-temp { stroke: #a87fd4; }
+  .mo-out-line { stroke: #d08030; }
+  .mo-ref-line { stroke: #147cad; }
+  .mo-rain-bar { fill: #4aa3cc; }
+  .mo-rain-bar.est { fill: #d6ecf5; stroke: #4aa3cc; }
+  .mo-cond-bar { fill: #c0392b; }
+  .mo-duct-bar { fill: #d9a62e; }
+  .mo-marker { stroke: #2e9e5b; }
+  .mo-marker-label { fill: #2e9e5b; }
+  .mo-pos-zone { fill: #fdf6e3; }
+}
+
+/* ================= responsive ================= */
+@media (max-width: 980px) {
+  .hero-row { grid-template-columns: 1fr; }
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .wrap { padding: 0 16px 80px; }
+  .scene { grid-template-columns: 1fr; padding: 20px; }
+  .stat-col { padding-bottom: 0; }
+  .big-temp .v { font-size: 64px; }
+  .cards { grid-template-columns: 1fr; }
+  .topbar { flex-wrap: wrap; }
+  .panel-head { flex-wrap: wrap; align-items: center; }
+  .cs-vent { margin-left: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

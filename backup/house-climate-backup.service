@@ -1,0 +1,15 @@
+# /etc/systemd/system/house-climate-backup.service
+# Nightly pg_dump of the house-climate TimescaleDB.
+[Unit]
+Description=Nightly pg_dump of house-climate TimescaleDB
+After=docker.service
+
+[Service]
+Type=oneshot
+# EDIT: your user + wherever you installed the script. Env knobs the script
+# honors: HC_BACKUP_DIR, HC_KEEP, HC_REQUIRE_MOUNTPOINT (see script header).
+User=YOUR-USER
+ExecStart=/home/YOUR-USER/bin/house-climate-backup.sh
+# Finite: a hung dump (stalled container, wedged docker) must fail rather than
+# sit in 'activating' forever.
+TimeoutStartSec=15m

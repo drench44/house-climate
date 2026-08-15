@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Moisture &middot; House Climate</title>
+  <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0iZyIgeDE9IjAiIHkxPSIwIiB4Mj0iMCIgeTI9IjEiPjxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzE0YjhhNiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzBmNzY2ZSIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPgo8cmVjdCB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHJ4PSI3IiBmaWxsPSJ1cmwoI2cpIi8+CjxwYXRoIGQ9Ik0xNiA1LjVsOS42IDguM2ExIDEgMCAwIDEtLjY2IDEuNzVIMjMuNFYyNS42YTEgMSAwIDAgMS0xIDFIOS42YTEgMSAwIDAgMS0xLTFWMTUuNTVINy4wNkExIDEgMCAwIDEgNi40IDEzLjh6IiBmaWxsPSIjZmZmZmZmIi8+CjxwYXRoIGQ9Ik0xNiAxNS40Yy0yLjMgMy0zLjQ1IDQuODUtMy40NSA2LjU1YTMuNDUgMy40NSAwIDAgMCA2LjkgMGMwLTEuNy0xLjE1LTMuNTUtMy40NS02LjU1eiIgZmlsbD0iIzBmNzY2ZSIvPgo8L3N2Zz4K">
+  <link rel="stylesheet" href="styles.css?v=2">
+</head>
+<body class="moisture-body">
+  <div class="wrap mo-wrap" id="root">
+
+    <header class="topbar">
+      <div class="wordmark">
+        <h1>House Climate</h1>
+        <span class="sub" id="mo-sub">loading&hellip;</span>
+      </div>
+      <nav class="site-nav" aria-label="Site">
+        <a href="./">Dashboard</a>
+        <a href="moisture.html" class="active" aria-current="page">Moisture</a>
+      </nav>
+      <span class="spacer"></span>
+      <span class="mo-actions">
+        <button type="button" class="ghost-btn" id="mo-print">Print report</button>
+        <a class="ghost-btn" href="/api/moisture/export.csv" download>Sensor CSV</a>
+        <a class="ghost-btn" href="/api/moisture/precip.csv" download>Rain CSV</a>
+      </span>
+    </header>
+
+    <!-- print-only header -->
+    <div class="mo-print-head">
+      <h1>Crawl Space Moisture Case &mdash; House Climate</h1>
+      <p id="mo-print-meta"></p>
+    </div>
+
+    <!-- executive verdicts -->
+    <section class="mo-panel" id="mo-verdicts" aria-label="Findings summary">
+      <p class="loading">Loading the case&hellip;</p>
+    </section>
+
+    <!-- current dew points + delta -->
+    <section class="mo-panel" aria-label="Dew points now">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Dew points now</span>
+        <span class="micro right">absolute moisture &mdash; comparable across temperatures, unlike RH</span>
+      </div>
+      <div id="mo-now"></div>
+    </section>
+
+    <!-- delta chart -->
+    <section class="mo-panel" aria-label="Crawl to indoor dew point delta">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Crawl &minus; indoor dew point &middot; 7 days</span>
+        <span class="micro right">the gradient pushing moisture &amp; odor upward &mdash; positive and growing is bad</span>
+      </div>
+      <div id="mo-delta-lead"></div>
+      <svg id="mo-delta-chart" viewBox="0 0 960 130" role="img" aria-label="Crawl minus indoor dew point over 7 days"></svg>
+    </section>
+
+    <!-- source attribution -->
+    <section class="mo-panel" aria-label="Moisture source attribution">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Where the moisture comes from</span>
+        <span class="micro right">does crawl dew point follow outdoor air, or ignore it?</span>
+      </div>
+      <svg id="mo-attr-chart" viewBox="0 0 960 150" role="img" aria-label="Crawl and outdoor dew point overlaid, 7 days"></svg>
+      <div class="ribbon-legend">
+        <span class="li"><span class="sw sw-crawlavg"></span>crawl dew point</span>
+        <span class="li"><span class="sw sw-moout"></span>outdoor dew point</span>
+        <span class="li"><span class="sw sw-moref"></span>indoor (reference)</span>
+      </div>
+      <div id="mo-attr-read"></div>
+    </section>
+
+    <!-- condensation risk -->
+    <section class="mo-panel" aria-label="Condensation risk">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Condensation-risk hours per day</span>
+        <span class="micro right">air-to-dew-point spread under 3&deg;F &mdash; surfaces at air temp are wetting</span>
+      </div>
+      <svg id="mo-cond-chart" viewBox="0 0 960 130" role="img" aria-label="Condensation risk hours per day"></svg>
+      <div id="mo-cond-read"></div>
+    </section>
+
+    <!-- rainfall correlation -->
+    <section class="mo-panel" aria-label="Rainfall response">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Rain response &middot; the drainage question</span>
+        <span class="micro right">a 1&ndash;3 day lag spike = liquid intrusion &rarr; drainage justified; no response &rarr; decline the sump</span>
+      </div>
+      <svg id="mo-rain-chart" viewBox="0 0 960 150" role="img" aria-label="Daily rainfall bars with crawl dew point overlay"></svg>
+      <div class="ribbon-legend">
+        <span class="li"><span class="sw sw-rainbar"></span>rain (in/day)</span>
+        <span class="li"><span class="sw sw-crawlavg"></span>crawl dew point (daily mean)</span>
+      </div>
+      <div id="mo-rain-read"></div>
+    </section>
+
+    <!-- threshold counters -->
+    <section class="mo-panel" aria-label="Humidity threshold hours">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Hours above RH thresholds</span>
+        <span class="micro right">duration beats peaks for fungal growth &mdash; sustained &gt;70% is the danger</span>
+      </div>
+      <div id="mo-thresholds"></div>
+    </section>
+
+    <!-- interventions -->
+    <section class="mo-panel" aria-label="Interventions and baselines">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Interventions &middot; before vs after</span>
+        <span class="micro right">mark work done; the preceding period freezes as its baseline</span>
+      </div>
+      <div id="mo-interventions"></div>
+      <form id="mo-iv-form" class="mo-iv-form" autocomplete="off">
+        <input type="date" id="mo-iv-date" required aria-label="Intervention date">
+        <input type="text" id="mo-iv-label" required maxlength="80" placeholder="e.g. Vapor barrier installed" aria-label="Intervention label">
+        <input type="text" id="mo-iv-note" maxlength="200" placeholder="note (optional)" aria-label="Intervention note">
+        <button type="submit" class="ghost-btn">Mark intervention</button>
+      </form>
+    </section>
+
+    <!-- winter projection -->
+    <section class="mo-panel" aria-label="Winter projection">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Projected winter crawl conditions</span>
+        <span class="micro right">shown only once the fit has earned it</span>
+      </div>
+      <div id="mo-projection"></div>
+    </section>
+
+    <!-- daily table (report backbone) -->
+    <section class="mo-panel" aria-label="Daily statistics">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Daily record &middot; last 14 days</span>
+        <span class="micro right">full history in the CSV export</span>
+      </div>
+      <div class="mo-tablewrap" id="mo-daily"></div>
+    </section>
+
+    <footer class="foot">
+      <span>house-climate &middot; moisture case</span>
+      <span class="r num" id="mo-generated">&mdash;</span>
+    </footer>
+  </div>
+
+  <script src="common.js?v=2"></script>
+  <script src="moisture.js?v=2"></script>
+</body>
+</html>

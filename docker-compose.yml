@@ -1,0 +1,55 @@
+services:
+  db:
+    # Pinned on purpose: a floating `latest-pg16` tag could silently jump a
+    # TimescaleDB (or Postgres) major on a `docker compose pull` and demand a
+    # migration mid-outage. To upgrade, bump this deliberately and test a
+    # restore first.
+    image: timescale/timescaledb:2.29.1-pg16
+    environment:
+      # local-trust credentials: the DB port is published on loopback only
+      POSTGRES_USER: climate
+      POSTGRES_PASSWORD: climate
+      POSTGRES_DB: climate
+    volumes:
+      - climate_pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+      - ./db/aggregates.sql:/docker-entrypoint-initdb.d/20-aggregates.sql:ro
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U climate"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  poller:
+    build: { context: ., dockerfile: poller.Dockerfile }
+    env_file: .env
+    depends_on: { db: { condition: service_healthy } }
+    # Weather comes from config.json's weather_url (a container name if the
+    # weather service shares a docker network with this stack), falling back
+    # automatically to weather_url_fallback (a LAN URL). Both optional —
+    # the poller runs fine with no weather source at all.
+    restart: unless-stopped
+
+  web:
+    build: { context: ., dockerfile: web.Dockerfile }
+    env_file: .env
+    depends_on: { db: { condition: service_healthy } }
+    # CLIMATE_BIND (in .env) pins the dashboard to one LAN interface.
+    # There is NO auth — never expose it beyond your LAN. See README.
+    # Default is loopback (fail CLOSED): if .env omits CLIMATE_BIND, the
+    # dashboard is reachable only from the host, not published to every
+    # interface. Set CLIMATE_BIND to your LAN IP to actually serve the wall.
+    ports:
+      - "${CLIMATE_BIND:-127.0.0.1}:8090:8090"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8090/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  climate_pgdata:

@@ -1,0 +1,13 @@
+# /etc/systemd/system/house-climate-backup.timer
+# Fires the nightly house-climate pg_dump. Persistent so a missed run fires
+# on next boot.
+[Unit]
+Description=Nightly house-climate DB backup timer
+
+[Timer]
+OnCalendar=*-*-* 02:15:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
