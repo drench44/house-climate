@@ -1,6 +1,9 @@
+import logging
 import time
 from dataclasses import dataclass
 import requests
+
+log = logging.getLogger("house_climate.daikin")
 
 DEFAULT_BASE = "https://integrator-api.daikinskyport.com"   # Daikin One Open API host
 
@@ -10,13 +13,43 @@ _EQUIP = {1: "cooling", 2: "overcool", 3: "heating", 4: "fan", 5: "idle"}
 # mode: 0 off, 1 heat, 2 cool, 3 auto, 4 emergency heat.
 _MODE = {0: "off", 1: "heat", 2: "cool", 3: "auto", 4: "emheat"}
 
+# A Daikin firmware update could introduce an equipmentStatus/mode value not in
+# the confirmed sets above. Mapping it to "unknown" is safe (it just isn't in
+# runtime._COOL/_HEAT/_FAN or cost._RUNNING), but that silently counts a
+# genuinely-running system as idle, deflating runtime and cost with no signal.
+# Warn once per unseen value so an API drift shows up in the logs instead.
+_seen_unknown = set()
+
 
 class DaikinError(Exception): ...
 class RateLimited(DaikinError): ...
 
 
+def _map_enum(table: dict, raw, label: str) -> str:
+    if raw in table:
+        return table[raw]
+    if raw is not None and (label, raw) not in _seen_unknown:
+        _seen_unknown.add((label, raw))
+        log.warning("unmapped Daikin %s value %r -> treated as 'unknown' "
+                    "(counted as idle in runtime/cost); update _EQUIP/_MODE if "
+                    "Daikin added a code", label, raw)
+    return "unknown"
+
+
 def _c_to_f(c):
     return None if c is None else c * 9 / 5 + 32
+
+
+def _humidity(v):
+    """Humidity carries no unit conversion, so unlike the temps it would
+    otherwise store a raw string on type-drift. Coerce here: a non-numeric,
+    non-null value raises (-> read_device wraps it as DaikinError -> recorded
+    poll_error) instead of a string silently entering the DB."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        raise ValueError(f"non-numeric humidity: {v!r}")
+    return float(v)   # str/int/float coerce; other types raise TypeError
 
 
 @dataclass(frozen=True)
@@ -34,13 +67,13 @@ class DeviceState:
 def _parse_device(d: dict) -> DeviceState:
     return DeviceState(
         indoor_temp_f=_c_to_f(d.get("tempIndoor")),
-        indoor_humidity=d.get("humIndoor"),
+        indoor_humidity=_humidity(d.get("humIndoor")),
         heat_setpoint_f=_c_to_f(d.get("heatSetpoint")),
         cool_setpoint_f=_c_to_f(d.get("coolSetpoint")),
-        equipment_status=_EQUIP.get(d.get("equipmentStatus"), "unknown"),
-        mode=_MODE.get(d.get("mode"), "unknown"),
+        equipment_status=_map_enum(_EQUIP, d.get("equipmentStatus"), "equipmentStatus"),
+        mode=_map_enum(_MODE, d.get("mode"), "mode"),
         outdoor_temp_f=_c_to_f(d.get("tempOutdoor")),
-        outdoor_humidity=d.get("humOutdoor"))
+        outdoor_humidity=_humidity(d.get("humOutdoor")))
 
 
 class DaikinClient:

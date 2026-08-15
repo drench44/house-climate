@@ -95,8 +95,13 @@ def compute(readings, *, max_gap_s=600, short_cycle_min=10, setpoint_grace_s=360
         c.setpoint_induced = any(
             c.start - grace <= t <= c.end + grace for t in changes)
 
+    # A cycle whose observed duration is 0 is degenerate: a single isolated
+    # cool/heat sample (last row in the window, or one immediately before a
+    # poller gap, both of which get cyc_mins=0). Its true length is unknown,
+    # not "under the threshold", so it must not be scored as a short-cycle
+    # fault -- one stray sample would otherwise trip a short-cycling alert.
     short = [c for c in res.cycles
-             if c.status in ("cool", "heat") and c.minutes < short_cycle_min]
+             if c.status in ("cool", "heat") and 0 < c.minutes < short_cycle_min]
     res.short_cycles = sum(1 for c in short if not c.setpoint_induced)
     res.short_cycles_setpoint_induced = sum(1 for c in short if c.setpoint_induced)
     return res

@@ -31,11 +31,11 @@ class TouTable:
     summer_months: frozenset
     bands: tuple
 
-    def _season(self, month: int) -> str:
+    def season(self, month: int) -> str:
         return "summer" if month in self.summer_months else "winter"
 
     def band_for(self, dt_local: datetime) -> tuple[str, float]:
-        season = self._season(dt_local.month)
+        season = self.season(dt_local.month)
         weekend = dt_local.weekday() >= 5
         t = dt_local.time()
         for b in self.bands:

@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 import pytest
 from house_climate import daikin
@@ -103,6 +104,42 @@ def test_list_devices_bad_shape_raises_daikin_error(monkeypatch):
 
 def test_read_device_bad_shape_raises_daikin_error(monkeypatch):
     monkeypatch.setattr(daikin.requests, "get", lambda *a, **k: FakeResp(200, ["not", "a", "dict"]))
+    monkeypatch.setattr(DaikinClient, "_headers", lambda self: {})
+    with pytest.raises(DaikinError):
+        _client().read_device("d1")
+
+
+# --- Enum drift + humidity type-drift: a Daikin firmware change must SURFACE
+# (a warning, or a recorded poll_error), never silently deflate the numbers.
+
+def test_unmapped_equipment_status_maps_unknown_and_warns(caplog):
+    daikin._seen_unknown.clear()
+    with caplog.at_level(logging.WARNING, logger="house_climate.daikin"):
+        st = daikin._parse_device({**FIX, "equipmentStatus": 99})
+    assert st.equipment_status == "unknown"
+    assert any("equipmentStatus" in r.message and "99" in r.message
+               for r in caplog.records)
+
+
+def test_unmapped_enum_warns_once_per_value(caplog):
+    daikin._seen_unknown.clear()
+    with caplog.at_level(logging.WARNING, logger="house_climate.daikin"):
+        daikin._parse_device({**FIX, "mode": 42})
+        daikin._parse_device({**FIX, "mode": 42})
+    warns = [r for r in caplog.records if "mode" in r.message and "42" in r.message]
+    assert len(warns) == 1
+
+
+def test_numeric_string_humidity_is_coerced():
+    st = daikin._parse_device({**FIX, "humIndoor": "48"})
+    assert st.indoor_humidity == 48.0
+
+
+def test_string_humidity_raises_daikin_error_via_read_device(monkeypatch):
+    # Humidity as a non-numeric string is type-drift: it must become a
+    # DaikinError (-> recorded poll_error), not a string silently in the DB.
+    monkeypatch.setattr(daikin.requests, "get",
+                        lambda *a, **k: FakeResp(200, {**FIX, "humIndoor": "high"}))
     monkeypatch.setattr(DaikinClient, "_headers", lambda self: {})
     with pytest.raises(DaikinError):
         _client().read_device("d1")

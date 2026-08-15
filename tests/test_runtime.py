@@ -47,6 +47,25 @@ def test_short_cycle_without_setpoint_change_counts():
     assert res.short_cycles_setpoint_induced == 0
 
 
+def test_lone_cooling_sample_is_not_a_short_cycle():
+    # A single isolated cooling reading (last in the window) has an unknown,
+    # zero observed duration; it must NOT be scored as a short-cycle fault --
+    # one stray sample would otherwise trip a short-cycling alert.
+    rows = [_r(0, "idle"), _r(3, "idle"), _r(6, "cooling")]
+    res = runtime.compute(rows, short_cycle_min=10)
+    assert res.short_cycles == 0
+
+
+def test_cooling_sample_truncated_by_gap_is_not_a_short_cycle():
+    # A lone cooling sample right before a poller gap: cyc_mins=0, a zero-length
+    # cycle that must not count as a fault.
+    rows = [_r(0, "cooling"),
+            {"ts": datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc),
+             "equipment_status": "idle"}]
+    res = runtime.compute(rows, max_gap_s=600, short_cycle_min=10)
+    assert res.short_cycles == 0
+
+
 def test_cycle_breaks_across_poller_gap():
     # Two distinct cool runs separated by a 2h poller outage, with "cooling"
     # observed on both sides of the gap: these are TWO cycles, not one bridged

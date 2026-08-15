@@ -152,14 +152,18 @@ _T_CRIT_BONF6 = [(8, 3.48), (10, 3.17), (15, 2.94), (20, 2.85),
 def _r_crit_bonf6(n):
     """Minimum |r| that is significant at family-wise 5% when the best of six
     lags is selected. Without this, max-of-six on pure noise clears a fixed
-    0.5 bar ~18% of the time at n=10-15 — a coin-flip-ish 'buy a sump pump'."""
+    0.5 bar ~18% of the time at n=10-15 — a coin-flip-ish 'buy a sump pump'.
+    dof is rounded DOWN to the nearest table anchor (a LARGER t, so a larger
+    |r| bar -> conservative); rounding up to the next anchor used a smaller t
+    and let noise clear the bar slightly too easily."""
     dof = n - 2
     if dof < 1:
         return 1.0
-    t = _T_CRIT_BONF6[-1][1]
+    t = _T_CRIT_BONF6[0][1]
     for max_dof, tv in _T_CRIT_BONF6:
-        if dof <= max_dof:
+        if max_dof <= dof:
             t = tv
+        else:
             break
     return t / math.sqrt(dof + t * t)
 
@@ -307,16 +311,22 @@ def threshold_rollups(daily_stats):
 # Intervention baselines
 # ---------------------------------------------------------------------------
 
-# Two-sided 95% t critical values by dof (Welch), interpolated conservatively.
+# Two-sided 95% t critical values by dof (Welch), rounded down conservatively.
 _T_CRIT_95 = [(9, 2.26), (12, 2.18), (15, 2.13), (20, 2.09),
               (30, 2.04), (60, 2.00), (10 ** 9, 1.96)]
 
 
 def _t_crit_95(dof):
-    for max_dof, tv in _T_CRIT_95:
-        if dof <= max_dof:
-            return tv
-    return 1.96
+    """Round dof DOWN to the nearest table anchor: a larger crit -> a wider CI
+    -> conservative. Rounding up to the next anchor narrowed the Welch CI and
+    flipped 'noise' to 'real' slightly too easily."""
+    tv = _T_CRIT_95[0][1]
+    for max_dof, v in _T_CRIT_95:
+        if max_dof <= dof:
+            tv = v
+        else:
+            break
+    return tv
 
 
 def _metric_compare(base_vals, post_vals):

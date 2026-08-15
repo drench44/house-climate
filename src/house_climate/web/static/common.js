@@ -127,19 +127,25 @@ function equipmentState(n) {
   return 'idle';
 }
 
-/* Current TOU band + when it ends (viewer local clock; this only loads on
-   the LAN). The example TOU schedule: weekday peak 17-21, mid 7-17, off otherwise;
-   weekends all off-peak. */
-function bandNow(d) {
-  const h = d.getHours();
-  const weekend = d.getDay() === 0 || d.getDay() === 6;
-  if (weekend) return { name: 'off-peak', until: null };
-  if (h >= 17 && h < 21) return { name: 'on-peak', until: 21 };
-  if (h >= 7 && h < 17) return { name: 'mid-peak', until: 17 };
-  // off-peak 21:00-07:00 -> ends 7am, EXCEPT Friday night: the weekend
-  // follows, so the next real boundary is Monday 7am — don't name a time.
-  if (d.getDay() === 5 && h >= 21) return { name: 'off-peak', until: null };
-  return { name: 'off-peak', until: 7 };
+/* Current TOU band label for the square tile, derived from the server's
+   cost-summary TIER fields (tier_now / rate_now / next_change_at), NOT a
+   hardcoded schedule — the old bandNow() baked in the EXAMPLE 17-21 peak, so
+   any operator whose real hours differed saw a wrong band on the kiosk while
+   the dashboard (which reads these same fields via peakStripHtml) was right.
+   Returns null when there's no tier yet, so the caller keeps the last label
+   instead of blanking. `until` is a pre-formatted " until 9pm" or ''. */
+function bandTierLabel(cost) {
+  if (!cost || !cost.tier_now) return null;
+  const names = { peak: 'on-peak', mid: 'mid-peak', off: 'off-peak', flat: 'flat rate' };
+  const clss = { peak: 'sq-peak', mid: 'sq-mid', off: 'sq-off', flat: 'sq-off' };
+  let until = '';
+  if (cost.next_change_at) {
+    const at = new Date(cost.next_change_at);
+    until = ` until ${at.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+  }
+  return { name: names[cost.tier_now] || cost.tier_now,
+           cls: clss[cost.tier_now] || 'sq-off',
+           until };
 }
 
 /* Generic peak-cost guidance strip. All copy derives from rate TIERS

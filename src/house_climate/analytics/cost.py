@@ -18,10 +18,12 @@ def compute(readings, tou, system_kw, tz, *, max_gap_s=600, heat_kw=None) -> Cos
     res = CostResult()
     rows = sorted(readings, key=lambda r: r["ts"])
     running_min = 0.0
+    seasons_run = set()   # seasons in which cooling/heating actually ran
     for i, row in enumerate(rows):
         status = row["equipment_status"]
         if status not in _RUNNING:
             continue
+        seasons_run.add(tou.season(row["ts"].astimezone(zone).month))
         dt = (rows[i + 1]["ts"] - row["ts"]).total_seconds() if i + 1 < len(rows) else 0
         mins = min(dt, max_gap_s) / 60.0
         if mins <= 0:
@@ -40,17 +42,21 @@ def compute(readings, tou, system_kw, tz, *, max_gap_s=600, heat_kw=None) -> Cos
         res.total_kwh += kwh; res.total_dollars += dollars
         running_min += mins
     # "% of runtime in the peak band" -- the peak band(s) are those at the
-    # TARIFF'S highest rate (derived from the full tou table, name-independent
-    # so "on-peak" etc. works), NOT "the highest rate that happened to run".
-    # If cooling ran only off-peak, the peak band simply didn't run, so peak_min
-    # stays 0 and pct_runtime_peak is 0 -- not 100 (the regression fable caught:
-    # picking the max rate among only the bands that ran mislabels off-peak-only
-    # runtime as 100% peak).
+    # highest rate among the bands APPLICABLE TO THE SEASON(S) that actually
+    # ran (name-independent so "on-peak" etc. works), NOT "the highest rate
+    # that happened to run". Two subtleties this guards:
+    #  - If cooling ran only off-peak, the peak band simply didn't run, so
+    #    peak_min stays 0 and pct is 0 -- not 100 (picking the max among only
+    #    the bands that ran mislabels off-peak-only runtime as 100% peak).
+    #  - Restricting to seasons_run keeps a DIFFERENT season's higher peak rate
+    #    (e.g. winter @ $0.44 vs summer @ $0.40) from stealing the "peak" label
+    #    for a summer-only query, which zeroed pct_runtime_peak for real
+    #    seasonal tariffs. With no season present (nothing ran) this is moot.
     peak_min = 0.0
-    tariff_rates = [b.rate for b in tou.bands]
-    if tariff_rates:
-        peak_rate = max(tariff_rates)
-        peak_names = {b.name for b in tou.bands if b.rate == peak_rate}
+    applicable = [b for b in tou.bands if b.season in seasons_run]
+    if applicable:
+        peak_rate = max(b.rate for b in applicable)
+        peak_names = {b.name for b in applicable if b.rate == peak_rate}
         peak_min = sum(res.by_band.get(n, {}).get("minutes", 0.0) for n in peak_names)
     res.pct_runtime_peak = (peak_min / running_min * 100) if running_min else 0.0
     return res
