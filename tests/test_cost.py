@@ -133,6 +133,30 @@ def test_pct_runtime_peak_is_zero_when_all_offpeak():
     assert res.pct_runtime_peak == 0.0               # so 0% of runtime was peak
 
 
+def test_pct_runtime_peak_seasonal_tariff_uses_the_season_that_ran():
+    # Two-season tariff where WINTER's peak rate (0.44) exceeds SUMMER's (0.40).
+    # A summer-only query must measure peak against SUMMER's peak band; the old
+    # code took the global max rate across ALL bands, so winter's higher rate
+    # became "the peak band", never ran in summer, and zeroed pct_runtime_peak.
+    tou = TouTable(frozenset({6, 7, 8, 9}), (
+        TouBand("peak", "summer", "all", time(17, 0), time(21, 0), 0.40),
+        TouBand("off", "summer", "all", time(21, 0), time(17, 0), 0.10),
+        TouBand("peak_winter", "winter", "all", time(17, 0), time(21, 0), 0.44),
+        TouBand("off_winter", "winter", "all", time(21, 0), time(17, 0), 0.12),
+    ))
+    # Aug is summer: 3 min in summer peak (18:00) + 3 min off (12:00) -> 50%.
+    rows = [{"ts": datetime(2026, 8, 10, 18, 0, tzinfo=ZoneInfo(TZ)).astimezone(timezone.utc),
+             "equipment_status": "cooling"},
+            {"ts": datetime(2026, 8, 10, 18, 3, tzinfo=ZoneInfo(TZ)).astimezone(timezone.utc),
+             "equipment_status": "idle"},
+            {"ts": datetime(2026, 8, 10, 12, 0, tzinfo=ZoneInfo(TZ)).astimezone(timezone.utc),
+             "equipment_status": "cooling"},
+            {"ts": datetime(2026, 8, 10, 12, 3, tzinfo=ZoneInfo(TZ)).astimezone(timezone.utc),
+             "equipment_status": "idle"}]
+    res = cost.compute(rows, tou, 3.0, TZ)
+    assert res.pct_runtime_peak == pytest.approx(50.0, rel=1e-9)
+
+
 def test_pct_runtime_peak_partial_on_real_config():
     # Mixed: one 3-min cooling run at peak (18:00) + one 3-min run off-peak
     # (23:00) on the real config -> 50% peak runtime. idle terminators so the

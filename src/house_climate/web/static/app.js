@@ -350,7 +350,7 @@ function tickCost() {
   }
 }
 
-/* bandNow() and peakStripHtml() come from common.js (shared with square.js) */
+/* peakStripHtml() comes from common.js (shared with square.js) */
 
 function renderRail(cost, forecast, precool) {
   const el = document.getElementById('rail');
@@ -1137,7 +1137,7 @@ function precoolChip(pe, ha) {
     lastGrow = raw.ts || 0; lastVal = raw.days != null ? raw.days : -1;
   } catch (e) { /* ignore */ }
   const now = Date.now();
-  if (days > lastVal || days < lastVal) { lastGrow = now; lastVal = days; } // any movement = activity (a reset restarts the clock too)
+  if (days !== lastVal) { lastGrow = now; lastVal = days; } // any movement = activity (a reset restarts the clock too)
   else if (lastGrow === 0) { lastGrow = now; }
   try { localStorage.setItem('hc_precool', JSON.stringify({ days: lastVal, ts: lastGrow })); } catch (e) { /* ignore */ }
 

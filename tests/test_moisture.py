@@ -3,7 +3,26 @@ moisture case's conclusions rest on. No database needed."""
 import math
 from datetime import date, datetime, timezone, timedelta
 
+import pytest
 from house_climate.analytics import moisture
+
+
+def test_t_crit_95_rounds_dof_down_conservatively():
+    # A dof between anchors uses the LOWER anchor's (larger) crit -> wider CI,
+    # so 'noise' isn't flipped to 'real' too easily. dof=13 must use the df=12
+    # value (2.18), NOT round up to df=15's 2.13.
+    assert moisture._t_crit_95(13) == 2.18
+    assert moisture._t_crit_95(9) == 2.26            # exact anchor
+    assert moisture._t_crit_95(8) == 2.26            # below first anchor -> most conservative
+    assert moisture._t_crit_95(10 ** 10) == 1.96     # top anchor
+    assert moisture._t_crit_95(13) > moisture._t_crit_95(15)  # down-rounding is conservative
+
+
+def test_r_crit_bonf6_rounds_dof_down_conservatively():
+    # n=13 -> dof=11 -> rounds down to anchor 10 (t=3.17), not up to 15 (t=2.94).
+    expected = 3.17 / math.sqrt(11 + 3.17 ** 2)
+    assert moisture._r_crit_bonf6(13) == pytest.approx(expected, rel=1e-9)
+    assert moisture._r_crit_bonf6(2) == 1.0          # too few points -> impossible bar
 
 
 def _hourly(now, hours, fn):

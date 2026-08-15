@@ -58,6 +58,11 @@ docker compose up -d --build
 curl -s http://<your-server>:8090/health
 ```
 
+By default the dashboard binds to loopback (`127.0.0.1`) — reachable only from
+the server itself. To serve the wall display to your LAN, set `CLIMATE_BIND` in
+`.env` to the server's LAN IP. `config.json` is copied into the image at build
+time, so re-run `docker compose up -d --build` after editing it.
+
 Dashboard: `http://<your-server>:8090/` — a wall-friendly night design with a
 compact `square.html` view for small kiosk screens, plus `moisture.html` for
 the humidity/moisture deep-dive.
@@ -171,10 +176,17 @@ TimescaleDB holds your entire climate history. `backup/` has a nightly
 edit the paths in the `.service` file, install, and
 `systemctl enable --now house-climate-backup.timer`.
 
+A failed backup exits non-zero but nothing watches that on its own — so also
+install `house-climate-backup-failure.service` (wired via `OnFailure=`) and
+point `HC_NTFY_URL` at your ntfy topic, so a silently-stopped backup pushes an
+alert instead of just sitting in the journal. The restore procedure (Timescale
+needs its pre/post-restore wrappers) is documented at the top of
+`backup/house-climate-backup.sh` — read it *before* you need it.
+
 ## Tests
 
 ```bash
-pip install pytest fastapi httpx uvicorn psycopg[binary] pyyaml
+pip install -r requirements-dev.txt
 PYTHONPATH=src python3 -m pytest tests -q
 ```
 

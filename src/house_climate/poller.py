@@ -123,9 +123,11 @@ _precip_last_backfill_day = None  # local day the backfill last ran
 
 def update_precip(conn, device_id, cfg) -> str:
     """Station rollup hourly (so today's rain lands same-day), Open-Meteo
-    backfill check once per local day. Failures are logged and swallowed:
-    rainfall upkeep must never stall the sensor poll, and a missing internet
-    connection only delays the one-time backfill."""
+    backfill check once per local day. The Open-Meteo backfill is guarded and
+    swallowed (a missing internet connection only delays the one-time fill,
+    retried tomorrow). A DB error in the station rollup is NOT swallowed here:
+    it propagates to run()'s handler, which logs it and rebuilds the connection,
+    so the loop survives but the failure is still recorded/visible."""
     global _precip_last_rollup, _precip_last_backfill_day
     from zoneinfo import ZoneInfo
     now_mono = time.monotonic()
@@ -202,6 +204,20 @@ def update_precip(conn, device_id, cfg) -> str:
     return f"precip_ok(station={n_recent}, backfilled={filled})"
 
 
+def _discover_device_id(conn, client):
+    """One boot-time device-discovery attempt. Returns the first device's id
+    (upserting every returned device), or None if the account returned no
+    devices. Raises DaikinError on a transient API/network failure so run()
+    can distinguish "retry the call" from "no devices — check the account".
+    Replaces a blind devices[0] that raised IndexError on an empty list."""
+    devices = client.list_devices()
+    if not devices:
+        return None
+    for d in devices:
+        db.upsert_device(conn, d["id"], d["name"], d["model"])
+    return devices[0]["id"]
+
+
 def run(cfg, secrets):
     logging.basicConfig(level=logging.INFO)
     conn = db.connect(secrets.db_dsn)
@@ -210,10 +226,27 @@ def run(cfg, secrets):
     # service — so it must ensure the schema itself. Idempotent.
     db.ensure_app_schema(conn)
     client = DaikinClient(secrets.api_key, secrets.integrator_token, secrets.email)
-    devices = client.list_devices()
-    for d in devices:
-        db.upsert_device(conn, d["id"], d["name"], d["model"])
-    device_id = devices[0]["id"]
+    # Boot-time device discovery. Neither an empty list (misconfigured or
+    # unauthorized account, or a location that legitimately returns []) nor a
+    # transient API/network error must crash the process: indexing devices[0]
+    # blindly raised an opaque IndexError with no poll_error, then Docker's
+    # restart policy hot-looped it. Fail loud and retry instead.
+    device_id = None
+    while device_id is None:
+        try:
+            device_id = _discover_device_id(conn, client)
+        except DaikinError as e:
+            # Transient (429, HTTP 5xx, network): log the real cause and retry.
+            # Distinct from the empty-list branch below so we don't tell the
+            # operator to "check credentials" when the API just hiccuped.
+            log.error("could not list Daikin devices (%s); retrying in %ss",
+                      e, cfg.poll_interval_s)
+            time.sleep(max(5, cfg.poll_interval_s))
+            continue
+        if device_id is None:
+            log.error("Daikin account returned no devices; check credentials/"
+                      "authorization. Retrying in %ss.", cfg.poll_interval_s)
+            time.sleep(max(5, cfg.poll_interval_s))
     log.info("polling device %s every %ss", device_id, cfg.poll_interval_s)
     while True:
         started = time.monotonic()

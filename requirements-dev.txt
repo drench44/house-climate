@@ -1,0 +1,5 @@
+# Test-only dependencies — NOT installed into the runtime images (which use
+# requirements.txt), so pytest/httpx never ship to production. CI installs both.
+-r requirements.txt
+pytest==8.*
+httpx==0.27.*

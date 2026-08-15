@@ -4,10 +4,14 @@ from zoneinfo import ZoneInfo
 
 def cooling_degree_days(readings, base_f=65.0, tz="America/Los_Angeles",
                         max_gap_s=600) -> float:
-    """Time-weighted CDD per local day. Each reading is weighted by the
-    (gap-capped) interval it covers — a plain mean of surviving readings
-    would let a poller outage bias a day toward whatever hours survived
-    (e.g. only-afternoon readings reading 17 CDD on a 5 CDD day)."""
+    """Cumulative cooling-degree-days (degF-days) SUMMED over the reading
+    window -- so the value grows with window length; it is not a single-day
+    figure. Each day's CDD is time-weighted: a reading is weighted by the
+    (gap-capped) interval it covers, so a poller outage cannot bias a day
+    toward whatever hours survived (e.g. only-afternoon readings reading 17
+    CDD on a 5 CDD day). Note the weighting corrects INTRA-day bias only: a
+    sparse outage day still contributes a whole day's degree-day, just weighted
+    by the hours it observed."""
     zone = ZoneInfo(tz)
     rows = sorted(readings, key=lambda r: r["ts"])
     by_day = {}

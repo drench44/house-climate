@@ -1,0 +1,19 @@
+# Keep the build context small and keep local-only files out of it. Nothing
+# here is COPY-ed into an image, so this is about build speed + not shipping a
+# local .env / .git into the daemon's context.
+.git
+.gitignore
+.githooks
+.env
+.env.*
+!.env.example
+tests
+docs
+backup
+scripts
+*.md
+__pycache__
+.pytest_cache
+.venv
+.claude
+.superpowers

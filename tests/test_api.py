@@ -21,6 +21,35 @@ CRAWL_CFG = dataclasses.replace(CFG, ecowitt={
     "outdoor_name": "Crawl Space"})
 
 
+# --- _day_is_complete: pure, DB-free. A day anchors the cost average / forecast
+# fit only if it both spans the day AND has no long interior gap. (Runs locally,
+# no Postgres needed.)
+
+def _day_rows(hours, day=10):
+    return [{"ts": datetime(2026, 8, day, h, 0, tzinfo=TZ).astimezone(timezone.utc)}
+            for h in hours]
+
+
+def test_day_is_complete_full_day_every_two_hours():
+    # 0,2,...,22: spans the day, max interior gap 2h < 3h -> complete.
+    assert api._day_is_complete(_day_rows(list(range(0, 24, 2))), TZ) is True
+
+
+def test_day_is_complete_rejects_short_span():
+    # Last reading at 14:00 never reaches ~10pm -> incomplete.
+    assert api._day_is_complete(_day_rows([0, 2, 4, 8, 12, 14]), TZ) is False
+
+
+def test_day_is_complete_rejects_midday_outage():
+    # Spans 00:00..22:00 but an 08:00->14:00 hole is a >3h interior gap: the
+    # exact partial day the endpoint-only check used to pass as complete.
+    assert api._day_is_complete(_day_rows([0, 2, 4, 6, 8, 14, 16, 18, 20, 22]), TZ) is False
+
+
+def test_day_is_complete_empty_is_false():
+    assert api._day_is_complete([], TZ) is False
+
+
 def _seed(conn):
     base = datetime.now(timezone.utc) - timedelta(hours=1)
     for i in range(20):

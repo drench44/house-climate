@@ -38,6 +38,19 @@ FORBIDDEN = [
     # Paired GPS coordinates at house precision: 4+ decimals on BOTH numbers.
     # Examples/docs must use <= 3 decimals (city precision) to stay clear.
     r"-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}",
+    # Single high-precision coordinate FIELD: the app's own config stores lat
+    # and lon on SEPARATE json lines ("latitude": ..., "longitude": ...), the
+    # exact shape the paired-pair rule above misses. 4+ decimals = house
+    # precision; examples use <= 3 (city precision) and pass.
+    r'"(?:latitude|longitude)"\s*:\s*-?\d{1,3}\.\d{4,}',
+    # RFC1918 private IPs (a real LAN address is house data). The two doc
+    # placeholders in the example files are stripped by ALLOWED_LINES first.
+    r"\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b",
+    r"\b192\.168\.\d{1,3}\.\d{1,3}\b",
+    r"\b172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b",
+    # ntfy push topic as a URL (a real topic is a shared secret). A REPLACE
+    # placeholder topic is stripped by ALLOWED_LINES first.
+    r"ntfy\.sh/[\w.-]+",
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----",       # PEM private-key block
 ]
 
@@ -46,6 +59,8 @@ FORBIDDEN = [
 # value that happens to share the line. Generic placeholders ONLY.
 ALLOWED_LINES = [
     r"(?i)AA:BB:CC:DD:EE:FF|00:11:22:33:44:55",  # doc-placeholder MACs
+    r"192\.168\.1\.(?:50|60)",                   # doc-placeholder LAN IPs
+    r"(?i)ntfy\.sh/[\w.-]*replace[\w.-]*",        # doc-placeholder ntfy topic
 ]
 
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
