@@ -1177,3 +1177,14 @@ body {
 .cal-time { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cal-summary { font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
 .cal-empty { color: var(--faint); font-size: 14px; }
+
+/* ---- F2: reminders ---- */
+.reminders-panel { margin-top: 18px; background: var(--panel); border: 1px solid var(--edge); border-radius: 16px; padding: 18px 20px; }
+.reminders-body { display: flex; flex-direction: column; gap: 1px; margin-top: 8px; }
+.rem-item { display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; gap: 10px; padding: 7px 4px; border-radius: 8px; cursor: pointer; }
+.rem-item:hover { background: var(--edge); }
+.rem-item input { accent-color: var(--mint); width: 16px; height: 16px; margin: 0; cursor: pointer; }
+.rem-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mint); }
+.rem-summary { font-size: 14px; color: var(--ink); }
+.rem-item.done .rem-summary { color: var(--faint); text-decoration: line-through; }
+.rem-meta { font-size: 12px; color: var(--faint); white-space: nowrap; }

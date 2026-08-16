@@ -225,6 +225,13 @@ def get_caldav_todo(conn, href):
     return {"href": r[0], "collection_url": r[1], "etag": r[2], "raw_ics": r[3]}
 
 
+def set_todo_status(conn, href, status, raw_ics, etag=None) -> None:
+    conn.execute(
+        "UPDATE caldav_todos SET status=%s, raw_ics=%s,"
+        " etag=COALESCE(%s, etag) WHERE href=%s",
+        (status, raw_ics, etag, href))
+
+
 def record_filter_change(conn, device_id, changed_at=None, note=None):
     """Log a 'filter was changed' event. changed_at defaults to now(); pass an
     explicit timestamp to backfill a change that happened before tracking."""

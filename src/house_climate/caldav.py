@@ -352,3 +352,23 @@ def client_from_env(env):
         return None
     return CalDAVClient(base_url=env.get("ICLOUD_CALDAV_BASE", ICLOUD_BASE),
                         username=email, password=pw)
+
+
+def toggle_todo(conn, client, href, completed: bool) -> bool:
+    """Flip a reminder's completion. Updates the local cache optimistically and,
+    when a client is configured, writes STATUS back to iCloud (native VTODO
+    props, If-Match on the cached ETag). Returns False if the todo is unknown."""
+    from . import db
+    td = db.get_caldav_todo(conn, href)
+    if not td:
+        return False
+    new_ics = set_todo_completed(td["raw_ics"], completed)
+    new_etag = None
+    if client is not None:
+        try:
+            _status, new_etag = client.put(td["href"], new_ics, if_match=td.get("etag"))
+        except Exception:
+            log.exception("todo write-back failed; cache updated optimistically")
+    db.set_todo_status(conn, href, "COMPLETED" if completed else "NEEDS-ACTION",
+                       new_ics, new_etag)
+    return True
