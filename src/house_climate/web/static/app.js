@@ -1330,26 +1330,74 @@ function applyFeatureVisibility(features) {
   }
 }
 
-function renderSettingsList(features) {
+/* F8: pluggable slots — the movable tiles are the full-width sections that are
+   direct children of the wrap (humidity/crawl/ribbon and the FamView tiles);
+   scene/cost live in the hero grid and runtime/health/learning in .cards, which
+   are structural and stay put. */
+function movableSections() {
+  const root = document.getElementById('root');
+  if (!root) return [];
+  return [...root.children].filter((el) => el.matches && el.matches('[data-feature]'));
+}
+
+function applyTileOrder(order) {
+  const root = document.getElementById('root');
+  const movable = movableSections();
+  if (!root || movable.length < 2) return;
+  const rank = new Map((order || []).map((k, i) => [k, i]));
+  const sorted = [...movable].sort((a, b) => {
+    const ra = rank.has(a.dataset.feature) ? rank.get(a.dataset.feature) : 1e6 + movable.indexOf(a);
+    const rb = rank.has(b.dataset.feature) ? rank.get(b.dataset.feature) : 1e6 + movable.indexOf(b);
+    return ra - rb;
+  });
+  const marker = movable[movable.length - 1].nextSibling;   // node just after the movable block
+  for (const el of sorted) root.insertBefore(el, marker);   // re-lay in sorted order
+}
+
+async function moveTile(key, dir) {
+  const keys = movableSections().map((el) => el.dataset.feature);
+  const i = keys.indexOf(key), jdx = i + dir;
+  if (i < 0 || jdx < 0 || jdx >= keys.length) return;
+  [keys[i], keys[jdx]] = [keys[jdx], keys[i]];
+  try {
+    const res = await postJSON('/api/settings/order', { order: keys });
+    applyTileOrder(res.order);
+    renderSettingsList(res.features, res.order);
+  } catch (e) { /* best-effort */ }
+}
+
+function renderSettingsList(features, order) {
   const list = document.getElementById('settings-list');
   if (!list) return;
+  const movable = new Set(movableSections().map((el) => el.dataset.feature));
   list.innerHTML = '';
   for (const f of features) {
-    const row = document.createElement('label');
+    const row = document.createElement('div');
     row.className = 'settings-row';
+    const lab = document.createElement('label');
+    lab.className = 'settings-check';
     const cb = document.createElement('input');
     cb.type = 'checkbox'; cb.checked = !!f.enabled; cb.dataset.key = f.key;
-    const span = document.createElement('span');
-    span.textContent = f.label;
-    row.append(cb, span);
+    const span = document.createElement('span'); span.textContent = f.label;
+    lab.append(cb, span);
     cb.addEventListener('change', async () => {
       try {
         const res = await postJSON('/api/settings', { features: { [f.key]: cb.checked } });
         applyFeatureVisibility(res.features);
-      } catch (e) {
-        cb.checked = !cb.checked;   // revert on failure
-      }
+      } catch (e) { cb.checked = !cb.checked; }   // revert on failure
     });
+    row.append(lab);
+    if (movable.has(f.key)) {                      // reorder controls (F8)
+      const up = document.createElement('button');
+      up.type = 'button'; up.className = 'tile-move'; up.textContent = '▲';
+      up.setAttribute('aria-label', 'Move tile up');
+      const dn = document.createElement('button');
+      dn.type = 'button'; dn.className = 'tile-move'; dn.textContent = '▼';
+      dn.setAttribute('aria-label', 'Move tile down');
+      up.addEventListener('click', () => moveTile(f.key, -1));
+      dn.addEventListener('click', () => moveTile(f.key, 1));
+      row.append(up, dn);
+    }
     list.append(row);
   }
 }
@@ -1371,7 +1419,8 @@ async function initSettings() {
   try {
     const data = await j('/api/settings');
     applyFeatureVisibility(data.features);
-    renderSettingsList(data.features);
+    applyTileOrder(data.order);
+    renderSettingsList(data.features, data.order);
   } catch (e) { /* best-effort: dashboard still renders if settings fail */ }
 }
 
