@@ -1166,3 +1166,53 @@ body {
 @media (prefers-reduced-motion: no-preference) {
   .settings-panel { animation: rise 0.25s cubic-bezier(0.16, 1, 0.3, 1) both; }
 }
+
+/* ================= photos tile (F5) ================= */
+.media-panel {
+  margin-top: 18px;
+  border: 1px solid var(--edge);
+  border-radius: 18px;
+  background: var(--panel);
+  padding: 20px 24px 18px;
+  animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.32s;
+}
+/* "edit" affordance in the panel head — a quiet text button, not a control. */
+.media-cfg-btn {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--faint); background: none; border: 0; padding: 2px 4px; cursor: pointer;
+  transition: color .15s ease;
+}
+.media-cfg-btn:hover { color: var(--ink); }
+.media-cfg-btn:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
+/* config row: URL field + Save, revealed by the edit button */
+.media-cfg { display: flex; gap: 8px; margin: 10px 0 2px; }
+.media-cfg[hidden] { display: none; }
+.media-cfg input {
+  flex: 1; min-width: 0;
+  background: var(--void-top); color: var(--ink);
+  border: 1px solid var(--edge-strong); border-radius: 8px;
+  padding: 8px 11px; font-size: 13px; font-family: inherit;
+}
+.media-cfg input::placeholder { color: var(--faint); }
+.media-cfg input:focus { outline: none; border-color: var(--mint); }
+.media-cfg button {
+  color: var(--mint); background: var(--mint-soft);
+  border: 1px solid transparent; border-radius: 8px;
+  padding: 8px 16px; font-family: var(--mono); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.06em; cursor: pointer; transition: border-color .15s ease;
+}
+.media-cfg button:hover { border-color: var(--mint); }
+.media-cfg button:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
+/* image body */
+.media-body { margin-top: 10px; }
+.media-img {
+  display: block; width: 100%;
+  max-height: 380px; object-fit: cover; border-radius: 12px;
+}
+.media-empty {
+  color: var(--dim); font-size: 13px; text-align: center;
+  padding: 40px 16px;
+  border: 1px dashed var(--edge-strong); border-radius: 12px;
+}
