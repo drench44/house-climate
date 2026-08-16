@@ -120,3 +120,21 @@ def test_settings_merge_accumulates_without_clobber(conn):
     feats = {f["key"]: f["enabled"] for f in client.get("/api/settings").json()["features"]}
     assert feats["cost"] is False and feats["ribbon"] is False
     assert feats["humidity"] is True
+
+
+# --- family calendar (F1, issue #27) ---
+
+def test_calendar_endpoint_empty_is_unconfigured(conn):
+    r = client.get("/api/calendar").json()
+    assert r["configured"] is False and r["days"] == []
+
+
+def test_calendar_configured_after_sync(conn):
+    from test_caldav import _client
+    from house_climate import caldav
+    caldav.sync_events(conn, _client())
+    assert client.get("/api/calendar").json()["configured"] is True
+
+
+def test_calendar_in_feature_registry(conn):
+    assert "calendar" in {f["key"] for f in client.get("/api/settings").json()["features"]}

@@ -300,6 +300,12 @@ def settings_post(body: dict):
     return api.set_dashboard_settings(_db(), features)
 
 
+@app.get("/api/calendar")
+def calendar_get():
+    """Family calendar agenda (F1) from the local CalDAV cache."""
+    return api.build_calendar(_db(), cfg)
+
+
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
 # busters version the css/js, but the HTML that references them has no buster
 # of its own — heuristic caching kept serving stale app.js after the
@@ -316,3 +322,30 @@ app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "st
 
 # alert evaluator wired in Task 11
 threading.Thread(target=alert_loop, args=(cfg, secrets), daemon=True).start()
+
+
+def _caldav_loop():
+    """Poll the bot iCloud account and reconcile the calendar/reminders cache
+    (F1/F2). Inert (just sleeps) until ICLOUD_EMAIL + ICLOUD_APP_PASSWORD are
+    set — so mock-only until the app-specific password is supplied. Uses its own
+    DB connection so it never contends with request handlers on the module one."""
+    import logging
+    import time as _t
+    from .. import caldav
+    log = logging.getLogger("house_climate.caldav")
+    c = None
+    while True:
+        try:
+            client = caldav.client_from_env(os.environ)
+            if client is not None:
+                if c is None or c.closed:
+                    c = db.connect(secrets.db_dsn)
+                caldav.sync_events(c, client)
+                caldav.sync_todos(c, client)
+        except Exception:
+            log.exception("caldav sync failed")
+            c = None
+        _t.sleep(int(os.environ.get("CALDAV_SYNC_INTERVAL_S", "300")))
+
+
+threading.Thread(target=_caldav_loop, daemon=True).start()

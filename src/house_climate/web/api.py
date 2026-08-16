@@ -1081,7 +1081,30 @@ DASHBOARD_FEATURES = [
     ("runtime", "Runtime"),
     ("health", "System health"),
     ("learning", "Learning"),
+    ("calendar", "Calendar"),
 ]
+
+
+def build_calendar(conn, cfg, now=None) -> dict:
+    """Upcoming events (next 14 days) from the local CalDAV cache, grouped by
+    local day for an agenda view. Each event carries its category calendar's
+    color (Strategy B). `configured` is False until the bot account has synced,
+    so the tile can prompt to connect iCloud."""
+    tz = ZoneInfo(cfg.timezone)
+    now = now or datetime.now(timezone.utc)
+    events = db.upcoming_events(conn, now - timedelta(hours=6), now + timedelta(days=14), limit=60)
+    days = {}
+    for e in events:
+        local = e["start_utc"].astimezone(tz)
+        days.setdefault(local.date().isoformat(), []).append({
+            "summary": e["summary"],
+            "time": None if e["all_day"] else local.strftime("%-I:%M%p").lower(),
+            "all_day": e["all_day"],
+            "location": e["location"],
+            "color": e["color"],
+        })
+    return {"configured": bool(db.caldav_collections(conn, kind="VEVENT")),
+            "days": [{"date": k, "events": v} for k, v in sorted(days.items())]}
 _FEATURE_KEYS = {k for k, _ in DASHBOARD_FEATURES}
 
 
