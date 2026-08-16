@@ -300,6 +300,18 @@ def settings_post(body: dict):
     return api.set_dashboard_settings(_db(), features)
 
 
+@app.get("/api/photos/config")
+def photos_config_get():
+    """Photos tile source URL (F5). Server-side (kv-backed) so the wall display
+    and phones show the same image source."""
+    return api.get_photos_config(_db())
+
+
+@app.post("/api/photos/config")
+def photos_config_post(body: dict):
+    return api.set_photos_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
+
+
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
 # busters version the css/js, but the HTML that references them has no buster
 # of its own — heuristic caching kept serving stale app.js after the

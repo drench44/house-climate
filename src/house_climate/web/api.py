@@ -1081,6 +1081,7 @@ DASHBOARD_FEATURES = [
     ("runtime", "Runtime"),
     ("health", "System health"),
     ("learning", "Learning"),
+    ("photos", "Photos"),
 ]
 _FEATURE_KEYS = {k for k, _ in DASHBOARD_FEATURES}
 
@@ -1111,3 +1112,19 @@ def set_dashboard_settings(conn, features: dict) -> dict:
     clean = {k: bool(v) for k, v in features.items() if k in _FEATURE_KEYS}
     db.merge_kv_features(conn, "dashboard_settings", clean)
     return get_dashboard_settings(conn)
+
+
+# --- photos tile (F5, issue #31) -----------------------------------------------
+# The photos tile shows an image from a single operator-set URL, stored
+# server-side (kv "photos_url") so the wall display and phones agree on the
+# source. Read-only, glanceable; the client cache-busts on a timer so a
+# rotating shared-album / "random photo" URL cycles.
+def get_photos_config(conn) -> dict:
+    kv = db.kv_get(conn, "photos_url")
+    url = kv["value"].get("url", "") if kv and isinstance(kv["value"], dict) else ""
+    return {"url": url}
+
+
+def set_photos_config(conn, url) -> dict:
+    db.kv_set(conn, "photos_url", {"url": str(url or "").strip()[:2000]})
+    return get_photos_config(conn)

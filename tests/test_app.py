@@ -120,3 +120,18 @@ def test_settings_merge_accumulates_without_clobber(conn):
     feats = {f["key"]: f["enabled"] for f in client.get("/api/settings").json()["features"]}
     assert feats["cost"] is False and feats["ribbon"] is False
     assert feats["humidity"] is True
+
+
+# --- photos tile (F5, issue #31) ---
+
+def test_photos_config_roundtrip(conn):
+    # Set a source URL, read it back, then clear it.
+    assert client.post("/api/photos/config", json={"url": "https://x/y.jpg"}).status_code == 200
+    assert client.get("/api/photos/config").json() == {"url": "https://x/y.jpg"}
+    assert client.post("/api/photos/config", json={"url": ""}).status_code == 200
+    assert client.get("/api/photos/config").json() == {"url": ""}
+
+
+def test_photos_in_feature_registry(conn):
+    keys = {f["key"] for f in client.get("/api/settings").json()["features"]}
+    assert "photos" in keys

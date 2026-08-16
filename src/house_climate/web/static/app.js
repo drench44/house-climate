@@ -1376,6 +1376,51 @@ async function initSettings() {
 }
 
 /* ---------------------------------------------------------------------- */
+/* F5: photos tile                                                        */
+/* ---------------------------------------------------------------------- */
+async function refreshPhoto() {
+  const body = document.getElementById('photos-body');
+  if (!body) return;
+  try {
+    const cfg = await j('/api/photos/config');
+    const url = cfg && cfg.url;
+    if (url) {
+      // Reuse the same <img> across refreshes so a cache-busted reload swaps
+      // the pixels in place (no flash, no layout jump); only build it once.
+      let img = body.querySelector('.media-img');
+      if (!img) {
+        body.innerHTML = '<img class="media-img" alt="">';
+        img = body.querySelector('.media-img');
+      }
+      img.src = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
+    } else {
+      body.innerHTML = '<p class="media-empty">No photo source set. Click edit to add one.</p>';
+    }
+  } catch (e) { /* best-effort: leave the last good frame on screen */ }
+}
+
+function initPhotos() {
+  const btn = document.getElementById('photos-cfg-btn');
+  const form = document.getElementById('photos-cfg');
+  const input = document.getElementById('photos-url');
+  if (!btn || !form || !input) return;
+  btn.addEventListener('click', () => { form.hidden = !form.hidden; });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await postJSON('/api/photos/config', { url: input.value.trim() });
+    } catch (err) { return; }   // keep the form open so the user can retry
+    form.hidden = true;
+    refreshPhoto();
+  });
+  // Prefill the field from the stored source, then draw the first frame.
+  j('/api/photos/config')
+    .then((cfg) => { if (cfg && cfg.url) input.value = cfg.url; })
+    .catch(() => {})
+    .finally(refreshPhoto);
+}
+
+/* ---------------------------------------------------------------------- */
 /* boot                                                                   */
 /* ---------------------------------------------------------------------- */
 
@@ -1383,7 +1428,9 @@ spawnAmbience();
 initRibbonHover();
 initCrawlHover();
 initSettings();
+initPhotos();
 tickClock();
 setInterval(tickClock, 1000);
 refresh();
 setInterval(refresh, REFRESH_MS);
+setInterval(refreshPhoto, 60000);
