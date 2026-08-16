@@ -92,6 +92,137 @@ def ensure_app_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS air_readings_room_ts"
         " ON air_readings (room, ts DESC)")
+    # CalDAV local-first cache (F1 calendar / F2 reminders). The collections are
+    # the shared category calendars (Strategy B: each carries its own color); the
+    # events/todos are cached so the UI never touches the network on the render
+    # path. iCloud stays the source of truth via the sync engine.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS caldav_collections (
+               url          text PRIMARY KEY,
+               kind         text,
+               display_name text,
+               color        text,
+               ctag         text,
+               sync_token   text,
+               updated_at   timestamptz NOT NULL DEFAULT now()
+           )""")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS caldav_events (
+               href           text PRIMARY KEY,
+               collection_url text NOT NULL,
+               uid            text,
+               etag           text,
+               summary        text,
+               start_utc      timestamptz,
+               end_utc        timestamptz,
+               all_day        boolean NOT NULL DEFAULT false,
+               location       text,
+               color          text,
+               recurrence_id  text,
+               raw_ics        text
+           )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS caldav_events_start ON caldav_events (start_utc)")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS caldav_todos (
+               href           text PRIMARY KEY,
+               collection_url text NOT NULL,
+               uid            text,
+               etag           text,
+               summary        text,
+               due_utc        timestamptz,
+               status         text,
+               priority       int,
+               color          text,
+               list_name      text,
+               raw_ics        text
+           )""")
+
+
+def upsert_caldav_collection(conn, url, kind, display_name, color, ctag, sync_token):
+    conn.execute(
+        """INSERT INTO caldav_collections (url, kind, display_name, color, ctag, sync_token, updated_at)
+           VALUES (%s, %s, %s, %s, %s, %s, now())
+           ON CONFLICT (url) DO UPDATE SET
+             kind=EXCLUDED.kind, display_name=EXCLUDED.display_name, color=EXCLUDED.color,
+             ctag=EXCLUDED.ctag, sync_token=EXCLUDED.sync_token, updated_at=now()""",
+        (url, kind, display_name, color, ctag, sync_token))
+
+
+def caldav_collections(conn, kind=None) -> list[dict]:
+    if kind:
+        cur = conn.execute("SELECT url, kind, display_name, color, ctag, sync_token"
+                           " FROM caldav_collections WHERE kind=%s", (kind,))
+    else:
+        cur = conn.execute("SELECT url, kind, display_name, color, ctag, sync_token"
+                           " FROM caldav_collections")
+    cols = [d.name for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def upsert_caldav_event(conn, collection_url, href, etag, color, ev) -> None:
+    conn.execute(
+        """INSERT INTO caldav_events
+             (href, collection_url, uid, etag, summary, start_utc, end_utc, all_day,
+              location, color, recurrence_id, raw_ics)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT (href) DO UPDATE SET
+             collection_url=EXCLUDED.collection_url, uid=EXCLUDED.uid, etag=EXCLUDED.etag,
+             summary=EXCLUDED.summary, start_utc=EXCLUDED.start_utc, end_utc=EXCLUDED.end_utc,
+             all_day=EXCLUDED.all_day, location=EXCLUDED.location, color=EXCLUDED.color,
+             recurrence_id=EXCLUDED.recurrence_id, raw_ics=EXCLUDED.raw_ics""",
+        (href, collection_url, ev.get("uid"), etag, ev.get("summary"),
+         ev.get("start"), ev.get("end"), bool(ev.get("all_day")), ev.get("location"),
+         color, ev.get("recurrence_id"), ev.get("raw_ics")))
+
+
+def delete_caldav_event(conn, href) -> None:
+    conn.execute("DELETE FROM caldav_events WHERE href=%s", (href,))
+
+
+def upcoming_events(conn, since_utc, until_utc, limit=60) -> list[dict]:
+    cur = conn.execute(
+        "SELECT href, uid, summary, start_utc, end_utc, all_day, location, color"
+        " FROM caldav_events WHERE start_utc IS NOT NULL AND start_utc >= %s AND start_utc < %s"
+        " ORDER BY start_utc LIMIT %s", (since_utc, until_utc, limit))
+    cols = [d.name for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def upsert_caldav_todo(conn, collection_url, href, etag, color, list_name, td) -> None:
+    conn.execute(
+        """INSERT INTO caldav_todos
+             (href, collection_url, uid, etag, summary, due_utc, status, priority, color, list_name, raw_ics)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT (href) DO UPDATE SET
+             collection_url=EXCLUDED.collection_url, uid=EXCLUDED.uid, etag=EXCLUDED.etag,
+             summary=EXCLUDED.summary, due_utc=EXCLUDED.due_utc, status=EXCLUDED.status,
+             priority=EXCLUDED.priority, color=EXCLUDED.color, list_name=EXCLUDED.list_name,
+             raw_ics=EXCLUDED.raw_ics""",
+        (href, collection_url, td.get("uid"), etag, td.get("summary"), td.get("due"),
+         td.get("status"), td.get("priority"), color, list_name, td.get("raw_ics")))
+
+
+def delete_caldav_todo(conn, href) -> None:
+    conn.execute("DELETE FROM caldav_todos WHERE href=%s", (href,))
+
+
+def open_todos(conn, limit=100) -> list[dict]:
+    cur = conn.execute(
+        "SELECT href, uid, summary, due_utc, status, priority, color, list_name"
+        " FROM caldav_todos ORDER BY (status='COMPLETED'),"
+        " (due_utc IS NULL), due_utc, priority NULLS LAST LIMIT %s", (limit,))
+    cols = [d.name for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def get_caldav_todo(conn, href):
+    cur = conn.execute(
+        "SELECT href, collection_url, etag, raw_ics FROM caldav_todos WHERE href=%s", (href,))
+    r = cur.fetchone()
+    if not r:
+        return None
+    return {"href": r[0], "collection_url": r[1], "etag": r[2], "raw_ics": r[3]}
 
 
 def record_filter_change(conn, device_id, changed_at=None, note=None):

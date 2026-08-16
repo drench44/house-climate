@@ -1376,6 +1376,47 @@ async function initSettings() {
 }
 
 /* ---------------------------------------------------------------------- */
+/* F1: family calendar (agenda from the CalDAV cache)                     */
+/* ---------------------------------------------------------------------- */
+function calDate(iso) {
+  try { return new Date(iso + 'T00:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }); }
+  catch (e) { return iso; }
+}
+function calColor(c) {   // apple color is #RRGGBBAA — drop the alpha for CSS
+  return (typeof c === 'string' && c.length === 9 && c[0] === '#') ? c.slice(0, 7) : c;
+}
+
+async function refreshCalendar() {
+  const body = document.getElementById('calendar-body');
+  if (!body) return;
+  try {
+    const data = await j('/api/calendar');
+    if (!data.configured) {
+      body.innerHTML = '<p class="cal-empty">Calendar not connected. Set ICLOUD_EMAIL and ICLOUD_APP_PASSWORD for the family iCloud account.</p>';
+      return;
+    }
+    if (!data.days.length) { body.innerHTML = '<p class="cal-empty">No upcoming events.</p>'; return; }
+    body.innerHTML = '';
+    for (const d of data.days) {
+      const grp = document.createElement('div'); grp.className = 'cal-day';
+      const hd = document.createElement('div'); hd.className = 'cal-date'; hd.textContent = calDate(d.date);
+      grp.append(hd);
+      for (const ev of d.events) {
+        const row = document.createElement('div'); row.className = 'cal-ev';
+        const dot = document.createElement('span'); dot.className = 'cal-dot';
+        if (ev.color) dot.style.background = calColor(ev.color);
+        const t = document.createElement('span'); t.className = 'cal-time';
+        t.textContent = ev.all_day ? 'all day' : (ev.time || '');
+        const s = document.createElement('span'); s.className = 'cal-summary';
+        s.textContent = ev.summary + (ev.location ? ' · ' + ev.location : '');
+        row.append(dot, t, s); grp.append(row);
+      }
+      body.append(grp);
+    }
+  } catch (e) { /* best-effort */ }
+}
+
+/* ---------------------------------------------------------------------- */
 /* boot                                                                   */
 /* ---------------------------------------------------------------------- */
 
@@ -1383,7 +1424,9 @@ spawnAmbience();
 initRibbonHover();
 initCrawlHover();
 initSettings();
+refreshCalendar();
 tickClock();
 setInterval(tickClock, 1000);
 refresh();
 setInterval(refresh, REFRESH_MS);
+setInterval(refreshCalendar, 60000);

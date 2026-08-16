@@ -1166,3 +1166,14 @@ body {
 @media (prefers-reduced-motion: no-preference) {
   .settings-panel { animation: rise 0.25s cubic-bezier(0.16, 1, 0.3, 1) both; }
 }
+
+/* ---- F1: family calendar ---- */
+.calendar-panel { margin-top: 18px; background: var(--panel); border: 1px solid var(--edge); border-radius: 16px; padding: 18px 20px; }
+.calendar-body { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+.cal-day { display: flex; flex-direction: column; gap: 3px; }
+.cal-date { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); padding-bottom: 4px; border-bottom: 1px solid var(--edge); }
+.cal-ev { display: grid; grid-template-columns: auto 70px 1fr; align-items: baseline; gap: 10px; padding: 5px 2px; }
+.cal-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--mint); align-self: center; }
+.cal-time { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cal-summary { font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
+.cal-empty { color: var(--faint); font-size: 14px; }
