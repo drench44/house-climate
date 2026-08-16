@@ -26,8 +26,9 @@
 #   cat climate-YYYY-MM-DD.dump | docker exec -i house-climate-db-1 pg_restore -U climate -d climate --no-owner
 #   docker exec house-climate-db-1 psql -U climate -d climate -c "SELECT timescaledb_post_restore();"
 #
-#   house-climate-backup.sh              # run
-#   house-climate-backup.sh --selftest   # pure logic, no docker, no host mutation
+#   house-climate-backup.sh                   # run
+#   house-climate-backup.sh --selftest        # pure logic, no docker, no host mutation
+#   house-climate-backup.sh --restore-selftest # real dump->restore into a throwaway DB
 
 set -uo pipefail
 
@@ -61,9 +62,52 @@ fi
 
 fail() { echo "house-climate-backup FAIL: $1 $(date -Is)" >&2; exit 1; }
 
-# Optional safety: set HC_REQUIRE_MOUNTPOINT to a path that must be a mounted
-# filesystem (e.g. a NAS or encrypted vault) so a missing mount fails loud
-# instead of silently dumping onto the root disk.
+# --- restore round-trip self-test (real dump -> restore -> verify) -----------
+# The plain --selftest above only checks the size/rc PREDICATE. This actually
+# dumps the live DB and restores it into a THROWAWAY database using the same
+# TimescaleDB pre/post_restore procedure documented at the top, then verifies a
+# table came back and drops the throwaway. An untested restore is a guess; run
+# this periodically (a CI job does, on every push/PR). Needs the DB container.
+if [ "${1:-}" = "--restore-selftest" ]; then
+  docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true \
+    || fail "container $CONTAINER not running"
+  testdb="climate_restore_selftest"
+  tmp="$(mktemp)"
+  # Count the source rows FIRST — a restore that recovers only the schema (a
+  # classic TimescaleDB pre/post_restore failure) leaves readings queryable but
+  # EMPTY, which must be a failure, not a pass. We assert the restored count is
+  # at least the source count (the dump snapshot has >= this many).
+  src_n="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT count(*) FROM readings")" \
+    || fail "cannot count source readings"
+  echo "restore-selftest: dumping $DB_NAME ($src_n readings rows)"
+  docker exec "$CONTAINER" pg_dump -U "$DB_USER" -Fc "$DB_NAME" > "$tmp" || fail "pg_dump failed"
+  bytes=$(wc -c < "$tmp"); [ "$bytes" -ge "$MIN_BYTES" ] || fail "dump undersized ($bytes bytes)"
+  echo "restore-selftest: restoring into throwaway $testdb"
+  docker exec "$CONTAINER" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS $testdb;" -c "CREATE DATABASE $testdb;" || fail "create $testdb failed"
+  docker exec "$CONTAINER" psql -U "$DB_USER" -d "$testdb" -v ON_ERROR_STOP=1 \
+    -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" -c "SELECT timescaledb_pre_restore();" \
+    || fail "pre_restore failed"
+  docker exec -i "$CONTAINER" pg_restore -U "$DB_USER" -d "$testdb" --no-owner < "$tmp"
+  docker exec "$CONTAINER" psql -U "$DB_USER" -d "$testdb" -v ON_ERROR_STOP=1 \
+    -c "SELECT timescaledb_post_restore();" || fail "post_restore failed"
+  n="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$testdb" -tAc "SELECT count(*) FROM readings")" \
+    || fail "readings not queryable after restore"
+  docker exec "$CONTAINER" psql -U "$DB_USER" -d postgres \
+    -c "DROP DATABASE IF EXISTS $testdb;" >/dev/null
+  rm -f "$tmp"
+  # The data must survive, not just the schema.
+  [ "${n:-0}" -ge "${src_n:-0}" ] || fail "restore lost rows: source=$src_n restored=$n (schema-only restore?)"
+  echo "restore-selftest OK: readings rows source=$src_n restored=$n $(date -Is)"
+  exit 0
+fi
+
+# RECOMMENDED: set HC_REQUIRE_MOUNTPOINT to a path that must be a mounted
+# filesystem (a NAS or encrypted vault) so a missing mount fails loud instead of
+# silently dumping onto the root disk — where a disk failure loses the DB volume
+# AND every dump together. Dumps are PLAINTEXT (they encode occupancy patterns);
+# for an off-box target, encrypt (e.g. pipe through age/gpg, or dump onto an
+# encrypted filesystem).
 if [ -n "${HC_REQUIRE_MOUNTPOINT:-}" ]; then
   mountpoint -q "$HC_REQUIRE_MOUNTPOINT" || fail "$HC_REQUIRE_MOUNTPOINT is not a mountpoint"
 fi
