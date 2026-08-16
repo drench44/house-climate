@@ -41,6 +41,7 @@ def conn():
     c = psycopg.connect(TEST_DSN, autocommit=True)
     db.ensure_app_schema(c)  # filter_events may be absent on an older test volume
     c.execute("TRUNCATE readings, poll_errors, devices, filter_events,"
-              " sensor_readings, precip_daily, interventions, kv, air_readings")
+              " sensor_readings, precip_daily, interventions, kv, air_readings,"
+              " messages")
     yield c
     c.close()

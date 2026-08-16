@@ -300,6 +300,39 @@ def settings_post(body: dict):
     return api.set_dashboard_settings(_db(), features)
 
 
+@app.get("/api/messages")
+def messages_get():
+    """Family message board (F4)."""
+    return api.build_messages(_db())
+
+
+@app.post("/api/messages")
+def messages_post(body: dict):
+    from fastapi import HTTPException
+    text = (body.get("body") or "").strip() if isinstance(body, dict) else ""
+    if not text or len(text) > 500:
+        raise HTTPException(422, "body must be a non-empty message under 500 chars")
+    author = (body.get("author") or "").strip()[:40] or None
+    new_id = db.add_message(_db(), text, author)
+    return {"id": new_id}
+
+
+@app.delete("/api/messages/{message_id}")
+def messages_delete(message_id: int):
+    from fastapi import HTTPException
+    if not db.delete_message(_db(), message_id):
+        raise HTTPException(404, "no such message")
+    return {"deleted": message_id}
+
+
+@app.post("/api/messages/{message_id}/pin")
+def messages_pin(message_id: int, body: dict):
+    from fastapi import HTTPException
+    if not db.set_message_pinned(_db(), message_id, bool(body.get("pinned"))):
+        raise HTTPException(404, "no such message")
+    return {"ok": True}
+
+
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
 # busters version the css/js, but the HTML that references them has no buster
 # of its own — heuristic caching kept serving stale app.js after the

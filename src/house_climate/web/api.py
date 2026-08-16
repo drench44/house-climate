@@ -1081,7 +1081,13 @@ DASHBOARD_FEATURES = [
     ("runtime", "Runtime"),
     ("health", "System health"),
     ("learning", "Learning"),
+    ("messageboard", "Message board"),
 ]
+
+
+def build_messages(conn) -> list[dict]:
+    return [{**m, "created_at": m["created_at"].isoformat()}
+            for m in db.list_messages(conn)]
 _FEATURE_KEYS = {k for k, _ in DASHBOARD_FEATURES}
 
 
