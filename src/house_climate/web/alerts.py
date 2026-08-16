@@ -220,6 +220,17 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
                           f"Outdoor air unhealthy (AQI {int(round(aqi))}): keep windows closed, run purifiers"))
     if (latest.get("wx_alert_count") or 0) > 0:
         out.append(Alert("weather_alert", "warning", "Active NWS weather alert for your area"))
+
+    # Equipment-status drift (issue #4): an unrecognized Daikin equipmentStatus
+    # maps to "unknown", which runtime/cost silently treat as idle -> hours and
+    # dollars read LOW with no signal. Warn when unknown dominates the recent
+    # window so the deflation is visible instead of silent.
+    unknown_n = sum(1 for r in rows if r.get("equipment_status") == "unknown")
+    if unknown_n and unknown_n / len(rows) >= a.get("equipment_unknown_frac", 0.2):
+        out.append(Alert("equipment_unknown", "warning",
+                         f"{unknown_n} of {len(rows)} recent readings have an unrecognized"
+                         " equipment status — runtime and cost may read low. Check for a"
+                         " Daikin firmware/API change."))
     return out
 
 
