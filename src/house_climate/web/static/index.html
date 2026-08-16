@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>House Climate</title>
   <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0iZyIgeDE9IjAiIHkxPSIwIiB4Mj0iMCIgeTI9IjEiPjxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzE0YjhhNiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzBmNzY2ZSIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPgo8cmVjdCB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHJ4PSI3IiBmaWxsPSJ1cmwoI2cpIi8+CjxwYXRoIGQ9Ik0xNiA1LjVsOS42IDguM2ExIDEgMCAwIDEtLjY2IDEuNzVIMjMuNFYyNS42YTEgMSAwIDAgMS0xIDFIOS42YTEgMSAwIDAgMS0xLTFWMTUuNTVINy4wNkExIDEgMCAwIDEgNi40IDEzLjh6IiBmaWxsPSIjZmZmZmZmIi8+CjxwYXRoIGQ9Ik0xNiAxNS40Yy0yLjMgMy0zLjQ1IDQuODUtMy40NSA2LjU1YTMuNDUgMy40NSAwIDAgMCA2LjkgMGMwLTEuNy0xLjE1LTMuNTUtMy40NS02LjU1eiIgZmlsbD0iIzBmNzY2ZSIvPgo8L3N2Zz4K">
-  <link rel="stylesheet" href="styles.css?v=5">
+  <link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
   <!-- shared gradients for the airflow "airwaves" — faded at both ends -->
@@ -46,14 +46,24 @@
       <span class="spacer"></span>
       <span class="clock num" id="clock">&mdash;</span>
       <span class="today-chip num" id="chip-today">&mdash;</span>
+      <button type="button" class="gear" id="btn-settings" aria-label="Dashboard settings" aria-expanded="false" title="Show/hide tiles">⚙</button>
     </header>
 
     <!-- ============ alerts (rendered only when non-empty) ============ -->
     <div class="alerts" id="alerts" aria-label="Active alerts"></div>
 
+    <!-- ============ dashboard settings (F0: per-tile toggles) ============ -->
+    <div class="settings-panel" id="settings-panel" role="dialog" aria-label="Dashboard tiles" hidden>
+      <div class="settings-head">
+        <span class="micro" style="color:var(--dim)">Show tiles</span>
+        <button type="button" class="settings-close" id="settings-close" aria-label="Close">×</button>
+      </div>
+      <div class="settings-list" id="settings-list"></div>
+    </div>
+
     <!-- ============ hero: the living house + cost rail ============ -->
     <div class="hero-row">
-      <section class="scene" id="scene" aria-label="The house right now">
+      <section class="scene" id="scene" data-feature="scene" aria-label="The house right now">
         <div class="stars" id="stars" aria-hidden="true"></div>
         <div class="clouds" id="clouds" aria-hidden="true"></div>
         <div class="rain" id="rain" aria-hidden="true"></div>
@@ -73,18 +83,18 @@
         <div class="stat-col" id="scene-stat"></div>
       </section>
 
-      <aside class="rail" id="rail" aria-label="Cost">
+      <aside class="rail" id="rail" data-feature="cost" aria-label="Cost">
         <p class="loading">Loading cost&hellip;</p>
       </aside>
     </div>
 
     <!-- ============ humidity (full width — the headline metric) ============ -->
-    <section class="humidity-panel" id="humidity" aria-label="Humidity and dew point">
+    <section class="humidity-panel" id="humidity" data-feature="humidity" aria-label="Humidity and dew point">
       <p class="loading">Loading humidity&hellip;</p>
     </section>
 
     <!-- ============ crawl space (dedicated chart: highs/lows, mold zones) ============ -->
-    <section class="crawl-panel" id="crawl" aria-label="Crawl space humidity">
+    <section class="crawl-panel" id="crawl" data-feature="crawl" aria-label="Crawl space humidity">
       <div class="panel-head">
         <span class="micro" style="color:var(--dim)">Crawl space</span>
         <div class="range-tabs" id="crawl-tabs" role="tablist" aria-label="Chart range">
@@ -111,7 +121,7 @@
     </section>
 
     <!-- ============ the day ribbon ============ -->
-    <section class="ribbon-panel" aria-label="The last 24 hours">
+    <section class="ribbon-panel" id="ribbon-panel" data-feature="ribbon" aria-label="The last 24 hours">
       <div class="panel-head">
         <span class="micro" style="color:var(--dim)">The last 24 hours</span>
         <span class="micro right" id="ribbon-range">&mdash;</span>
@@ -131,9 +141,9 @@
 
     <!-- ============ quiet band ============ -->
     <div class="cards">
-      <section class="card" id="runtime" aria-label="Runtime"><p class="loading">Loading runtime&hellip;</p></section>
-      <section class="card" id="health" aria-label="System health"><p class="loading">Loading health&hellip;</p></section>
-      <section class="card" id="learning" aria-label="What the system is learning"><p class="loading">Loading&hellip;</p></section>
+      <section class="card" id="runtime" data-feature="runtime" aria-label="Runtime"><p class="loading">Loading runtime&hellip;</p></section>
+      <section class="card" id="health" data-feature="health" aria-label="System health"><p class="loading">Loading health&hellip;</p></section>
+      <section class="card" id="learning" data-feature="learning" aria-label="What the system is learning"><p class="loading">Loading&hellip;</p></section>
     </div>
 
     <footer class="foot">
@@ -145,6 +155,6 @@
   </div>
 
   <script src="common.js?v=4"></script>
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

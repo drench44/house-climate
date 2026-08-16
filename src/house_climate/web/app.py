@@ -284,6 +284,22 @@ def anomalies_ep():
     return [a.__dict__ for a in alerts.evaluate(rows, cfg, errs)]
 
 
+@app.get("/api/settings")
+def settings_get():
+    """Dashboard feature toggles (F0). Every tile can be turned on/off; state is
+    server-side so the wall display and phones agree."""
+    return api.get_dashboard_settings(_db())
+
+
+@app.post("/api/settings")
+def settings_post(body: dict):
+    from fastapi import HTTPException
+    features = body.get("features") if isinstance(body, dict) else None
+    if not isinstance(features, dict):
+        raise HTTPException(422, 'body must be {"features": {"<key>": true|false}}')
+    return api.set_dashboard_settings(_db(), features)
+
+
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
 # busters version the css/js, but the HTML that references them has no buster
 # of its own — heuristic caching kept serving stale app.js after the
