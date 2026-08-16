@@ -120,3 +120,35 @@ def test_settings_merge_accumulates_without_clobber(conn):
     feats = {f["key"]: f["enabled"] for f in client.get("/api/settings").json()["features"]}
     assert feats["cost"] is False and feats["ribbon"] is False
     assert feats["humidity"] is True
+
+
+# --- family message board (F4, issue #30) ---
+
+def test_messages_crud(conn):
+    assert client.get("/api/messages").json() == []
+    r = client.post("/api/messages", json={"body": "  Dinner at 6  ", "author": "Gary"})
+    assert r.status_code == 200
+    mid = r.json()["id"]
+    msgs = client.get("/api/messages").json()
+    assert len(msgs) == 1 and msgs[0]["body"] == "Dinner at 6" and msgs[0]["author"] == "Gary"
+    assert client.delete(f"/api/messages/{mid}").status_code == 200
+    assert client.get("/api/messages").json() == []
+    assert client.delete(f"/api/messages/{mid}").status_code == 404
+
+
+def test_messages_reject_empty_and_too_long(conn):
+    assert client.post("/api/messages", json={"body": "   "}).status_code == 422
+    assert client.post("/api/messages", json={"body": "x" * 501}).status_code == 422
+
+
+def test_messages_pinned_sort_first(conn):
+    a = client.post("/api/messages", json={"body": "first"}).json()["id"]
+    client.post("/api/messages", json={"body": "second"})
+    client.post(f"/api/messages/{a}/pin", json={"pinned": True})
+    msgs = client.get("/api/messages").json()
+    assert msgs[0]["body"] == "first" and msgs[0]["pinned"] is True
+
+
+def test_messageboard_in_feature_registry(conn):
+    keys = {f["key"] for f in client.get("/api/settings").json()["features"]}
+    assert "messageboard" in keys
