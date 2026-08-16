@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 import time
@@ -298,5 +299,18 @@ async def html_no_cache(request, call_next):
 
 app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
 
-# alert evaluator wired in Task 11
-threading.Thread(target=alert_loop, args=(cfg, secrets), daemon=True).start()
+# alert evaluator wired in Task 11. Supervised: if alert_loop ever escapes its
+# own inner try (it shouldn't now that config is validated at load, but a novel
+# failure must not leave the process alertless and silent), log and restart it
+# instead of letting the daemon thread die unnoticed.
+def _supervised_alert_loop(cfg, secrets):
+    while True:
+        try:
+            alert_loop(cfg, secrets)
+        except Exception:
+            logging.getLogger("house_climate.alerts").exception(
+                "alert_loop crashed; restarting in 30s")
+            time.sleep(30)
+
+
+threading.Thread(target=_supervised_alert_loop, args=(cfg, secrets), daemon=True).start()
