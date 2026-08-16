@@ -66,3 +66,24 @@ def test_sensor_reading_roundtrip(conn):
     latest = db.latest_sensor_reading(conn, "ecowitt_ch8")
     assert latest["temp_f"] == 78.9 and latest["humidity"] == 41.0   # newest wins
     assert db.latest_sensor_reading(conn, "ecowitt_ch7") is None      # scoped per sensor
+
+
+def test_ensure_app_schema_heals_missing_continuous_aggregate(conn):
+    """Issue #9: aggregates.sql only ran on a fresh volume, so a new/changed
+    aggregate never reached existing databases. ensure_app_schema must now
+    (re)create it idempotently. Simulate a DB predating the aggregate by
+    dropping it, then prove ensure_app_schema brings it back."""
+    conn.execute("DROP MATERIALIZED VIEW IF EXISTS readings_hourly CASCADE")
+    gone = conn.execute(
+        "SELECT count(*) FROM timescaledb_information.continuous_aggregates"
+        " WHERE view_name = 'readings_hourly'").fetchone()[0]
+    assert gone == 0
+
+    db.ensure_app_schema(conn)
+
+    back = conn.execute(
+        "SELECT count(*) FROM timescaledb_information.continuous_aggregates"
+        " WHERE view_name = 'readings_hourly'").fetchone()[0]
+    assert back == 1
+    # And it's usable (the compression policy re-applied without error too).
+    db.hourly_readings(conn, "dev1", datetime(2026, 8, 10, 0, 0, tzinfo=timezone.utc))
