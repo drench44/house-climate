@@ -73,3 +73,50 @@ def test_ha_air_bad_aqi_returns_422_not_500(conn):
     # nothing stored on the rejected request
     assert db.kv_get(conn, "ha_outdoor_aqi") is None
     assert db.latest_air(conn) == []
+
+
+# --- dashboard feature toggles (F0, issue #26) ---
+
+def test_settings_defaults_all_enabled(conn):
+    r = client.get("/api/settings")
+    assert r.status_code == 200
+    feats = r.json()["features"]
+    assert feats and all(f["enabled"] for f in feats)
+    keys = {f["key"] for f in feats}
+    assert {"scene", "cost", "humidity", "crawl", "ribbon", "runtime", "health", "learning"} <= keys
+
+
+def test_settings_toggle_persists_and_is_isolated(conn):
+    assert client.post("/api/settings", json={"features": {"crawl": False}}).status_code == 200
+    feats = {f["key"]: f["enabled"] for f in client.get("/api/settings").json()["features"]}
+    assert feats["crawl"] is False
+    assert feats["humidity"] is True          # other tiles unaffected
+    client.post("/api/settings", json={"features": {"crawl": True}})
+    again = {f["key"]: f["enabled"] for f in client.get("/api/settings").json()["features"]}
+    assert again["crawl"] is True
+
+
+def test_settings_ignores_unknown_keys(conn):
+    r = client.post("/api/settings", json={"features": {"not_a_tile": False}})
+    assert r.status_code == 200
+    assert "not_a_tile" not in {f["key"] for f in r.json()["features"]}
+
+
+def test_settings_bad_body_422(conn):
+    assert client.post("/api/settings", json={"nope": 1}).status_code == 422
+
+
+def test_dashboard_html_wires_toggles(conn):
+    html = client.get("/").text
+    assert 'data-feature="crawl"' in html
+    assert 'id="btn-settings"' in html and 'id="settings-panel"' in html
+
+
+def test_settings_merge_accumulates_without_clobber(conn):
+    # Two separate patches must both stick (the atomic jsonb merge; the old
+    # read-modify-write path lost updates under concurrency).
+    client.post("/api/settings", json={"features": {"cost": False}})
+    client.post("/api/settings", json={"features": {"ribbon": False}})
+    feats = {f["key"]: f["enabled"] for f in client.get("/api/settings").json()["features"]}
+    assert feats["cost"] is False and feats["ribbon"] is False
+    assert feats["humidity"] is True
