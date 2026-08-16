@@ -300,6 +300,16 @@ def settings_post(body: dict):
     return api.set_dashboard_settings(_db(), features)
 
 
+@app.get("/api/camera/config")
+def camera_config_get():
+    return api.get_camera_config(_db())
+
+
+@app.post("/api/camera/config")
+def camera_config_post(body: dict):
+    return api.set_camera_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
+
+
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
 # busters version the css/js, but the HTML that references them has no buster
 # of its own — heuristic caching kept serving stale app.js after the
