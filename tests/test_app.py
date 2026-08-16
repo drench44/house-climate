@@ -73,3 +73,29 @@ def test_ha_air_bad_aqi_returns_422_not_500(conn):
     # nothing stored on the rejected request
     assert db.kv_get(conn, "ha_outdoor_aqi") is None
     assert db.latest_air(conn) == []
+
+
+# --- deep /health (issue #6) ---
+
+def test_health_ok_reports_db_and_freshness(conn):
+    resp = client.get("/health")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["checks"]["db"] == "ok"
+    assert "latest_reading_age_s" in body["checks"]
+    assert "poller_heartbeat_age_s" in body["checks"]
+
+
+def test_health_503_when_db_unreachable(conn, monkeypatch):
+    # The old /health returned 200 unconditionally even with the DB down, so the
+    # container healthcheck never tripped. Force _db() to fail -> must be 503.
+    from house_climate.web import app as appmod
+
+    def boom():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(appmod, "_db", boom)
+    resp = client.get("/health")
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "error"
