@@ -312,6 +312,18 @@ def reminders_get():
     return api.build_reminders(_db())
 
 
+@app.get("/api/todos/filtered")
+def todos_filtered_get():
+    """Focus list (F7): a filtered subset of the reminders cache."""
+    return api.build_filtered_todos(_db())
+
+
+@app.post("/api/todos/filter")
+def todos_filter_set(body: dict):
+    mode = body.get("mode", "all") if isinstance(body, dict) else "all"
+    return api.set_todos_filter(_db(), mode)
+
+
 @app.post("/api/reminders/toggle")
 def reminders_toggle(body: dict):
     from fastapi import HTTPException

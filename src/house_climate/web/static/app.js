@@ -1445,6 +1445,47 @@ async function refreshReminders() {
 }
 
 /* ---------------------------------------------------------------------- */
+/* F7: focus list (filtered to-dos over the reminders cache)              */
+/* ---------------------------------------------------------------------- */
+async function refreshFocus() {
+  const body = document.getElementById('focus-body');
+  if (!body) return;
+  try {
+    const data = await j('/api/todos/filtered');
+    const sel = document.getElementById('focus-mode');
+    if (sel && sel.value !== data.mode) sel.value = data.mode;
+    if (!data.configured) { body.innerHTML = '<p class="cal-empty">Reminders not connected.</p>'; return; }
+    if (!data.todos.length) { body.innerHTML = '<p class="cal-empty">Nothing here.</p>'; return; }
+    body.innerHTML = '';
+    for (const r of data.todos) {
+      const row = document.createElement('label'); row.className = 'rem-item';
+      const cb = document.createElement('input'); cb.type = 'checkbox';
+      cb.addEventListener('change', async () => {
+        try {
+          await postJSON('/api/reminders/toggle', { href: r.href, done: cb.checked });
+          refreshFocus(); if (typeof refreshReminders === 'function') refreshReminders();
+        } catch (e) { cb.checked = !cb.checked; }
+      });
+      const dot = document.createElement('span'); dot.className = 'rem-dot';
+      if (r.color) dot.style.background = calColor(r.color);
+      const s = document.createElement('span'); s.className = 'rem-summary'; s.textContent = r.summary;
+      const meta = document.createElement('span'); meta.className = 'rem-meta';
+      meta.textContent = r.due ? ('due ' + calDate(r.due.slice(0, 10))) : (r.list || '');
+      row.append(cb, dot, s, meta); body.append(row);
+    }
+  } catch (e) { /* best-effort */ }
+}
+
+function initFocus() {
+  const sel = document.getElementById('focus-mode');
+  if (!sel) return;
+  sel.addEventListener('change', async () => {
+    try { await postJSON('/api/todos/filter', { mode: sel.value }); refreshFocus(); } catch (e) {}
+  });
+  refreshFocus();
+}
+
+/* ---------------------------------------------------------------------- */
 /* boot                                                                   */
 /* ---------------------------------------------------------------------- */
 
@@ -1454,9 +1495,11 @@ initCrawlHover();
 initSettings();
 refreshCalendar();
 refreshReminders();
+initFocus();
 tickClock();
 setInterval(tickClock, 1000);
 refresh();
 setInterval(refresh, REFRESH_MS);
 setInterval(refreshCalendar, 60000);
 setInterval(refreshReminders, 60000);
+setInterval(refreshFocus, 60000);
