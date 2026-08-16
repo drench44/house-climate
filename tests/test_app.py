@@ -120,3 +120,25 @@ def test_settings_merge_accumulates_without_clobber(conn):
     feats = {f["key"]: f["enabled"] for f in client.get("/api/settings").json()["features"]}
     assert feats["cost"] is False and feats["ribbon"] is False
     assert feats["humidity"] is True
+
+
+# --- pluggable slots / tile ordering (F8, issue #34) ---
+
+def test_tile_order_roundtrip(conn):
+    r = client.post("/api/settings/order", json={"order": ["ribbon", "crawl", "humidity"]})
+    assert r.status_code == 200
+    assert r.json()["order"] == ["ribbon", "crawl", "humidity"]
+    assert client.get("/api/settings").json()["order"] == ["ribbon", "crawl", "humidity"]
+
+
+def test_tile_order_drops_unknown_keys(conn):
+    r = client.post("/api/settings/order", json={"order": ["humidity", "nope", "crawl"]})
+    assert r.json()["order"] == ["humidity", "crawl"]
+
+
+def test_tile_order_bad_body_422(conn):
+    assert client.post("/api/settings/order", json={"order": "notalist"}).status_code == 422
+
+
+def test_settings_includes_order_field(conn):
+    assert "order" in client.get("/api/settings").json()

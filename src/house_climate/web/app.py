@@ -300,6 +300,16 @@ def settings_post(body: dict):
     return api.set_dashboard_settings(_db(), features)
 
 
+@app.post("/api/settings/order")
+def settings_order_post(body: dict):
+    """Persist tile display order (F8)."""
+    from fastapi import HTTPException
+    order = body.get("order") if isinstance(body, dict) else None
+    if not isinstance(order, list):
+        raise HTTPException(422, 'body must be {"order": ["<key>", ...]}')
+    return api.set_dashboard_order(_db(), order)
+
+
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
 # busters version the css/js, but the HTML that references them has no buster
 # of its own — heuristic caching kept serving stale app.js after the

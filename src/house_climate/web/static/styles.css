@@ -1166,3 +1166,9 @@ body {
 @media (prefers-reduced-motion: no-preference) {
   .settings-panel { animation: rise 0.25s cubic-bezier(0.16, 1, 0.3, 1) both; }
 }
+
+/* ---- F8: tile reorder controls in the settings panel ---- */
+.settings-row { justify-content: space-between; }
+.settings-check { display: flex; align-items: center; gap: 10px; flex: 1; cursor: pointer; }
+.tile-move { background: none; border: 0; color: var(--faint); font-size: 11px; line-height: 1; cursor: pointer; padding: 2px 3px; }
+.tile-move:hover { color: var(--ink); }
