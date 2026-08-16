@@ -3,6 +3,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 import requests
 
 from .. import db
@@ -220,6 +221,30 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
                           f"Outdoor air unhealthy (AQI {int(round(aqi))}): keep windows closed, run purifiers"))
     if (latest.get("wx_alert_count") or 0) > 0:
         out.append(Alert("weather_alert", "warning", "Active NWS weather alert for your area"))
+
+    # Peak-hour surge (README's promised "peak-hour surge" alert; config key
+    # peak_surge_ratio was previously read by nothing). Single-reading, like
+    # AQI/freeze: actionable the moment it's true. Fires only when the AC is
+    # ACTIVELY running inside an on-peak window whose rate is >= peak_surge_ratio
+    # times the off-peak rate — so it stays quiet on cheap/flat tariffs and only
+    # nags when running now is genuinely expensive.
+    try:
+        now_local = now.astimezone(ZoneInfo(cfg.timezone))
+        if latest.get("equipment_status") in {"cooling", "overcool", "heating"} \
+                and cfg.tou.is_peak(now_local):
+            # Compare against THIS season's off-peak rate, not the global min
+            # across all seasons (a cheaper winter rate would skew the multiple).
+            season = cfg.tou.season(now_local.month)
+            band_rates = sorted({b.rate for b in cfg.tou.bands if b.season == season})
+            ratio = a.get("peak_surge_ratio", 1.5)
+            if len(band_rates) >= 2 and band_rates[0] > 0:
+                cur_rate = cfg.tou.band_for(now_local)[1]
+                if cur_rate >= ratio * band_rates[0]:
+                    out.append(Alert("peak_surge", "warning",
+                        f"AC running during peak — power is ${cur_rate:.2f}/kWh"
+                        f" ({cur_rate / band_rates[0]:.1f}x off-peak). Shift big loads if you can."))
+    except Exception:
+        log.exception("peak-surge check failed")
     return out
 
 

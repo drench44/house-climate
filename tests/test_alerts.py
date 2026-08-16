@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -404,3 +405,37 @@ def test_dispatch_respects_cooldown():
     alerts._dispatch(sink, [alerts.Alert("a", "warning", "x")],
                      last_sent, timedelta(hours=1), now + timedelta(minutes=5))
     assert sink.sent == []             # within cooldown -> not resent
+
+
+# --- peak-hour surge (issue #3: peak_surge_ratio was read by nothing) ---
+
+_LA = ZoneInfo("America/Los_Angeles")
+
+
+def _row_at(now_local, status="cooling"):
+    """A fresh single reading stamped at now_local (UTC), with the given
+    equipment status — for exercising the on-peak surge check."""
+    return {**_row(0), "ts": now_local.astimezone(timezone.utc), "equipment_status": status}
+
+
+def test_peak_surge_fires_when_cooling_on_peak():
+    # Mon 2026-08-10 18:00 PDT is on-peak ($0.40 = 4.4x the $0.09 off-peak).
+    now = datetime(2026, 8, 10, 18, 0, tzinfo=_LA)
+    out = alerts.evaluate([_row_at(now)], CFG, poll_errors_recent=0,
+                          now=now.astimezone(timezone.utc))
+    assert any(a.key == "peak_surge" for a in out)
+
+
+def test_peak_surge_quiet_off_peak():
+    # 10:00 PDT is mid-peak, not the top tier -> no surge even while cooling.
+    now = datetime(2026, 8, 10, 10, 0, tzinfo=_LA)
+    out = alerts.evaluate([_row_at(now)], CFG, poll_errors_recent=0,
+                          now=now.astimezone(timezone.utc))
+    assert not any(a.key == "peak_surge" for a in out)
+
+
+def test_peak_surge_quiet_when_idle_on_peak():
+    now = datetime(2026, 8, 10, 18, 0, tzinfo=_LA)
+    out = alerts.evaluate([_row_at(now, status="idle")], CFG, poll_errors_recent=0,
+                          now=now.astimezone(timezone.utc))
+    assert not any(a.key == "peak_surge" for a in out)
