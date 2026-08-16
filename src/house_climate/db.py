@@ -92,6 +92,74 @@ def ensure_app_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS air_readings_room_ts"
         " ON air_readings (room, ts DESC)")
+    # Chores / routines (F3): a task belongs to a person and is worth points;
+    # a completion is one (task, local day). Weekly payout = points of the
+    # completions in the current ISO week.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS chore_tasks (
+               id         serial PRIMARY KEY,
+               person     text NOT NULL,
+               title      text NOT NULL,
+               points     int  NOT NULL DEFAULT 1,
+               active     boolean NOT NULL DEFAULT true,
+               created_at timestamptz NOT NULL DEFAULT now()
+           )""")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS chore_completions (
+               id      serial PRIMARY KEY,
+               task_id int  NOT NULL REFERENCES chore_tasks(id) ON DELETE CASCADE,
+               done_on date NOT NULL,
+               UNIQUE (task_id, done_on)
+           )""")
+
+
+def add_chore_task(conn, person, title, points=1):
+    cur = conn.execute(
+        "INSERT INTO chore_tasks (person, title, points) VALUES (%s, %s, %s) RETURNING id",
+        (person, title, int(points)))
+    return cur.fetchone()[0]
+
+
+def delete_chore_task(conn, task_id) -> bool:
+    cur = conn.execute("DELETE FROM chore_tasks WHERE id=%s RETURNING id", (task_id,))
+    return cur.fetchone() is not None
+
+
+def toggle_chore_done(conn, task_id, day) -> bool:
+    """Toggle a task's completion for `day` (a date). Returns the new done state.
+    Returns False if the task doesn't exist."""
+    exists = conn.execute("SELECT 1 FROM chore_tasks WHERE id=%s", (task_id,)).fetchone()
+    if not exists:
+        return False
+    deleted = conn.execute(
+        "DELETE FROM chore_completions WHERE task_id=%s AND done_on=%s RETURNING id",
+        (task_id, day)).fetchone()
+    if deleted:
+        return False
+    conn.execute(
+        "INSERT INTO chore_completions (task_id, done_on) VALUES (%s, %s)"
+        " ON CONFLICT DO NOTHING", (task_id, day))
+    return True
+
+
+def chores_overview(conn, today, week_start) -> dict:
+    """Active tasks grouped by person with a done-today flag, plus each person's
+    points earned so far this week."""
+    cur = conn.execute(
+        """SELECT t.id, t.person, t.title, t.points,
+                  EXISTS(SELECT 1 FROM chore_completions c
+                         WHERE c.task_id=t.id AND c.done_on=%s) AS done_today
+           FROM chore_tasks t WHERE t.active ORDER BY t.person, t.id""",
+        (today,))
+    tasks = [{"id": r[0], "person": r[1], "title": r[2], "points": r[3],
+              "done_today": r[4]} for r in cur.fetchall()]
+    cur = conn.execute(
+        """SELECT t.person, COALESCE(SUM(t.points), 0)
+           FROM chore_completions c JOIN chore_tasks t ON t.id=c.task_id
+           WHERE c.done_on >= %s GROUP BY t.person""",
+        (week_start,))
+    week_points = {r[0]: int(r[1]) for r in cur.fetchall()}
+    return {"tasks": tasks, "week_points": week_points}
 
 
 def record_filter_change(conn, device_id, changed_at=None, note=None):

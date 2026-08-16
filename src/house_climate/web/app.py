@@ -300,6 +300,41 @@ def settings_post(body: dict):
     return api.set_dashboard_settings(_db(), features)
 
 
+@app.get("/api/chores")
+def chores_get():
+    """Chores / routines (F3): tasks per person with a done-today flag + weekly points."""
+    return api.build_chores(_db(), cfg)
+
+
+@app.post("/api/chores/tasks")
+def chores_add(body: dict):
+    from fastapi import HTTPException
+    person = (body.get("person") or "").strip()[:40]
+    title = (body.get("title") or "").strip()[:120]
+    if not person or not title:
+        raise HTTPException(422, "person and title are required")
+    try:
+        points = max(0, min(int(body.get("points", 1)), 999))
+    except (TypeError, ValueError):
+        raise HTTPException(422, "points must be an integer")
+    return {"id": db.add_chore_task(_db(), person, title, points)}
+
+
+@app.post("/api/chores/tasks/{task_id}/toggle")
+def chores_toggle(task_id: int):
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(cfg.timezone)).date()
+    return {"id": task_id, "done_today": db.toggle_chore_done(_db(), task_id, today)}
+
+
+@app.delete("/api/chores/tasks/{task_id}")
+def chores_delete(task_id: int):
+    from fastapi import HTTPException
+    if not db.delete_chore_task(_db(), task_id):
+        raise HTTPException(404, "no such task")
+    return {"deleted": task_id}
+
+
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
 # busters version the css/js, but the HTML that references them has no buster
 # of its own — heuristic caching kept serving stale app.js after the
