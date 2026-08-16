@@ -404,3 +404,19 @@ def test_dispatch_respects_cooldown():
     alerts._dispatch(sink, [alerts.Alert("a", "warning", "x")],
                      last_sent, timedelta(hours=1), now + timedelta(minutes=5))
     assert sink.sent == []             # within cooldown -> not resent
+
+
+# --- equipment-status drift (issue #4) ---
+
+def test_equipment_unknown_alert_fires_when_status_drifts():
+    # Half the recent readings carry an unrecognized ("unknown") status.
+    rows = [_row(m, status=("unknown" if (m // 3) % 2 == 0 else "cooling"))
+            for m in range(0, 60, 3)]
+    out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"])
+    assert any(a.key == "equipment_unknown" for a in out)
+
+
+def test_equipment_unknown_quiet_when_status_known():
+    rows = [_row(m, status="cooling") for m in range(0, 60, 3)]
+    out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"])
+    assert not any(a.key == "equipment_unknown" for a in out)
