@@ -1417,6 +1417,34 @@ async function refreshCalendar() {
 }
 
 /* ---------------------------------------------------------------------- */
+/* F2: family reminders (VTODO from the CalDAV cache)                     */
+/* ---------------------------------------------------------------------- */
+async function refreshReminders() {
+  const body = document.getElementById('reminders-body');
+  if (!body) return;
+  try {
+    const data = await j('/api/reminders');
+    if (!data.configured) { body.innerHTML = '<p class="cal-empty">Reminders not connected.</p>'; return; }
+    if (!data.reminders.length) { body.innerHTML = '<p class="cal-empty">No reminders.</p>'; return; }
+    body.innerHTML = '';
+    for (const r of data.reminders) {
+      const row = document.createElement('label'); row.className = 'rem-item' + (r.done ? ' done' : '');
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = r.done;
+      cb.addEventListener('change', async () => {
+        try { await postJSON('/api/reminders/toggle', { href: r.href, done: cb.checked }); refreshReminders(); }
+        catch (e) { cb.checked = !cb.checked; }
+      });
+      const dot = document.createElement('span'); dot.className = 'rem-dot';
+      if (r.color) dot.style.background = calColor(r.color);
+      const s = document.createElement('span'); s.className = 'rem-summary'; s.textContent = r.summary;
+      const meta = document.createElement('span'); meta.className = 'rem-meta';
+      meta.textContent = r.due ? ('due ' + calDate(r.due.slice(0, 10))) : (r.list || '');
+      row.append(cb, dot, s, meta); body.append(row);
+    }
+  } catch (e) { /* best-effort */ }
+}
+
+/* ---------------------------------------------------------------------- */
 /* boot                                                                   */
 /* ---------------------------------------------------------------------- */
 
@@ -1425,8 +1453,10 @@ initRibbonHover();
 initCrawlHover();
 initSettings();
 refreshCalendar();
+refreshReminders();
 tickClock();
 setInterval(tickClock, 1000);
 refresh();
 setInterval(refresh, REFRESH_MS);
 setInterval(refreshCalendar, 60000);
+setInterval(refreshReminders, 60000);

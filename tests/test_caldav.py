@@ -178,3 +178,14 @@ def test_build_calendar_agenda(conn):
     assert out["configured"] is True
     titles = [e["summary"] for d in out["days"] for e in d["events"]]
     assert "Soccer game" in titles
+
+
+def test_sync_todos_and_toggle(conn):
+    c = _client()
+    caldav.sync_todos(conn, c)
+    todos = db.open_todos(conn)
+    assert len(todos) == 1 and todos[0]["summary"] == "Buy milk" and todos[0]["status"] == "NEEDS-ACTION"
+    href = todos[0]["href"]
+    assert caldav.toggle_todo(conn, c, href, True) is True
+    assert db.open_todos(conn)[0]["status"] == "COMPLETED"
+    assert any("STATUS:COMPLETED" in body for _, body in c.session.put_calls)   # wrote back

@@ -1082,7 +1082,24 @@ DASHBOARD_FEATURES = [
     ("health", "System health"),
     ("learning", "Learning"),
     ("calendar", "Calendar"),
+    ("reminders", "Reminders"),
 ]
+
+
+def build_reminders(conn) -> dict:
+    """Open (and recently-completed) reminders from the VTODO cache (F2),
+    completed sinking to the bottom. `configured` is False until a VTODO list
+    has synced."""
+    todos = db.open_todos(conn)
+    return {
+        "configured": bool(db.caldav_collections(conn, kind="VTODO")),
+        "reminders": [{
+            "href": t["href"], "summary": t["summary"],
+            "due": t["due_utc"].isoformat() if t["due_utc"] else None,
+            "priority": t["priority"], "color": t["color"], "list": t["list_name"],
+            "done": t["status"] == "COMPLETED",
+        } for t in todos],
+    }
 
 
 def build_calendar(conn, cfg, now=None) -> dict:

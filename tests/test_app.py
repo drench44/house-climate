@@ -138,3 +138,25 @@ def test_calendar_configured_after_sync(conn):
 
 def test_calendar_in_feature_registry(conn):
     assert "calendar" in {f["key"] for f in client.get("/api/settings").json()["features"]}
+
+
+# --- family reminders (F2, issue #28) ---
+
+def test_reminders_endpoint_and_toggle(conn):
+    from test_caldav import _client
+    from house_climate import caldav
+    assert client.get("/api/reminders").json() == {"configured": False, "reminders": []}
+    caldav.sync_todos(conn, _client())
+    r = client.get("/api/reminders").json()
+    assert r["configured"] is True and r["reminders"][0]["summary"] == "Buy milk"
+    href = r["reminders"][0]["href"]
+    assert client.post("/api/reminders/toggle", json={"href": href, "done": True}).status_code == 200
+    assert client.get("/api/reminders").json()["reminders"][0]["done"] is True
+
+
+def test_reminders_toggle_404(conn):
+    assert client.post("/api/reminders/toggle", json={"href": "/nope"}).status_code == 404
+
+
+def test_reminders_in_feature_registry(conn):
+    assert "reminders" in {f["key"] for f in client.get("/api/settings").json()["features"]}

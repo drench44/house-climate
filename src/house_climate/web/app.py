@@ -306,6 +306,26 @@ def calendar_get():
     return api.build_calendar(_db(), cfg)
 
 
+@app.get("/api/reminders")
+def reminders_get():
+    """Family reminders (F2) from the local VTODO cache."""
+    return api.build_reminders(_db())
+
+
+@app.post("/api/reminders/toggle")
+def reminders_toggle(body: dict):
+    from fastapi import HTTPException
+    from .. import caldav
+    href = body.get("href") if isinstance(body, dict) else None
+    if not href:
+        raise HTTPException(422, 'body must be {"href": "...", "done": true|false}')
+    done = bool(body.get("done"))
+    client = caldav.client_from_env(os.environ)   # None -> cache-only (mock)
+    if not caldav.toggle_todo(_db(), client, href, done):
+        raise HTTPException(404, "no such reminder")
+    return {"href": href, "done": done}
+
+
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
 # busters version the css/js, but the HTML that references them has no buster
 # of its own — heuristic caching kept serving stale app.js after the
