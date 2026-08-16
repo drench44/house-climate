@@ -220,6 +220,19 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
                           f"Outdoor air unhealthy (AQI {int(round(aqi))}): keep windows closed, run purifiers"))
     if (latest.get("wx_alert_count") or 0) > 0:
         out.append(Alert("weather_alert", "warning", "Active NWS weather alert for your area"))
+
+    # Weather-feed staleness (issue #5): when the feed is down, wx_aqi and
+    # wx_alert_count go null, silently suppressing the AQI and NWS alerts above
+    # at exactly the moment (smoke, storms) they matter. Surface the outage
+    # itself — sustained so a brief blip doesn't page — so the suppression is
+    # visible. Skipped when no weather feed is configured.
+    def _wx_down(r):
+        v = r.get("weather_ok")
+        return None if v is None else (v is False)
+    if cfg.weather_url and _sustained(rows, _wx_down, a.get("weather_stale_minutes", 30)):
+        out.append(Alert("weather_feed_stale", "warning",
+                         "Weather feed is down — outdoor AQI and NWS weather alerts are"
+                         " unavailable until it recovers."))
     return out
 
 
