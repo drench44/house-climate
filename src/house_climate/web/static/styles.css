@@ -1188,3 +1188,9 @@ body {
 .rem-summary { font-size: 14px; color: var(--ink); }
 .rem-item.done .rem-summary { color: var(--faint); text-decoration: line-through; }
 .rem-meta { font-size: 12px; color: var(--faint); white-space: nowrap; }
+
+/* ---- F7: focus list (reuses .rem-* rows from F2) ---- */
+.focus-panel { margin-top: 18px; background: var(--panel); border: 1px solid var(--edge); border-radius: 16px; padding: 18px 20px; }
+.focus-mode { background: var(--void-top); border: 1px solid var(--edge-strong); color: var(--ink); border-radius: 8px; padding: 4px 8px; font: inherit; font-size: 13px; cursor: pointer; }
+.focus-mode:focus { outline: none; border-color: var(--mint); }
+.focus-body { display: flex; flex-direction: column; gap: 1px; margin-top: 8px; }

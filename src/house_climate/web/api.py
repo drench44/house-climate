@@ -1083,7 +1083,44 @@ DASHBOARD_FEATURES = [
     ("learning", "Learning"),
     ("calendar", "Calendar"),
     ("reminders", "Reminders"),
+    ("filtered_todos", "Focus list"),
 ]
+
+_TODO_MODES = ("all", "due_soon", "high")
+
+
+def _todos_filter_mode(conn):
+    kv = db.kv_get(conn, "todos_filter")
+    mode = kv["value"].get("mode") if kv and isinstance(kv["value"], dict) else None
+    return mode if mode in _TODO_MODES else "all"
+
+
+def build_filtered_todos(conn, now=None) -> dict:
+    """A focused subset of the reminders cache (F7): open to-dos filtered by the
+    saved mode — all open, due within 3 days, or high priority. Reuses the F2
+    complete-toggle for checking items off."""
+    now = now or datetime.now(timezone.utc)
+    mode = _todos_filter_mode(conn)
+    todos = [t for t in db.open_todos(conn) if t["status"] != "COMPLETED"]
+    if mode == "due_soon":
+        cutoff = now + timedelta(days=3)
+        todos = [t for t in todos if t["due_utc"] is not None and t["due_utc"] <= cutoff]
+    elif mode == "high":
+        todos = [t for t in todos if t["priority"] is not None and 1 <= t["priority"] <= 4]
+    return {
+        "configured": bool(db.caldav_collections(conn, kind="VTODO")),
+        "mode": mode,
+        "todos": [{"href": t["href"], "summary": t["summary"],
+                   "due": t["due_utc"].isoformat() if t["due_utc"] else None,
+                   "priority": t["priority"], "color": t["color"], "list": t["list_name"]}
+                  for t in todos],
+    }
+
+
+def set_todos_filter(conn, mode):
+    mode = mode if mode in _TODO_MODES else "all"
+    db.kv_set(conn, "todos_filter", {"mode": mode})
+    return build_filtered_todos(conn)
 
 
 def build_reminders(conn) -> dict:

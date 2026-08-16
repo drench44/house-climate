@@ -160,3 +160,19 @@ def test_reminders_toggle_404(conn):
 
 def test_reminders_in_feature_registry(conn):
     assert "reminders" in {f["key"] for f in client.get("/api/settings").json()["features"]}
+
+
+# --- filtered to-dos / focus list (F7, issue #33) ---
+
+def test_filtered_todos_all_and_high(conn):
+    from test_caldav import _client
+    from house_climate import caldav
+    caldav.sync_todos(conn, _client())            # Buy milk, priority 1
+    r = client.get("/api/todos/filtered").json()
+    assert r["mode"] == "all" and any(t["summary"] == "Buy milk" for t in r["todos"])
+    client.post("/api/todos/filter", json={"mode": "high"})
+    assert any(t["summary"] == "Buy milk" for t in client.get("/api/todos/filtered").json()["todos"])
+
+
+def test_filtered_todos_registry(conn):
+    assert "filtered_todos" in {f["key"] for f in client.get("/api/settings").json()["features"]}

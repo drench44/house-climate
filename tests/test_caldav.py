@@ -189,3 +189,14 @@ def test_sync_todos_and_toggle(conn):
     assert caldav.toggle_todo(conn, c, href, True) is True
     assert db.open_todos(conn)[0]["status"] == "COMPLETED"
     assert any("STATUS:COMPLETED" in body for _, body in c.session.put_calls)   # wrote back
+
+
+def test_filtered_todos_due_soon(conn):
+    from datetime import datetime, timezone
+    from house_climate.web import api
+    caldav.sync_todos(conn, _client())            # Buy milk, due 2026-08-18
+    api.set_todos_filter(conn, "due_soon")
+    r_in = api.build_filtered_todos(conn, now=datetime(2026, 8, 16, tzinfo=timezone.utc))
+    assert any(t["summary"] == "Buy milk" for t in r_in["todos"])       # within 3 days
+    r_out = api.build_filtered_todos(conn, now=datetime(2026, 8, 10, tzinfo=timezone.utc))
+    assert not any(t["summary"] == "Buy milk" for t in r_out["todos"])  # >3 days out
