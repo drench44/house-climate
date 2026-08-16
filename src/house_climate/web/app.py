@@ -1,9 +1,12 @@
+import ipaddress
 import os
 import threading
 import time
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import db
@@ -294,6 +297,83 @@ async def html_no_cache(request, call_next):
     if resp.headers.get("content-type", "").startswith("text/html"):
         resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Hardening for the no-auth LAN model (issue #10). Reads stay open (that's the
+# wall-display design); three cheap guards close the holes the trust model
+# didn't actually cover:
+#   * Host allowlist -> defeats DNS-rebinding (a public domain pointed at the
+#     LAN IP arrives with an off-LAN Host header). Default allows IP literals,
+#     localhost, dotless single-label LAN names (`climate:8090`), and *.local;
+#     a public-looking multi-label hostname must be added via CLIMATE_ALLOWED_HOSTS.
+#   * Cross-site write block -> a browser drive-by (`fetch(.., {mode:'no-cors'})`
+#     from a page a household member visits) carries Origin / Sec-Fetch-Site
+#     marking it cross-site; those are rejected. NON-browser clients (Home
+#     Assistant, curl, scripts) send neither header, so pushes keep working —
+#     this is why we don't gate on Content-Type, which would 415 HA's text/plain.
+#   * Per-IP write rate limit -> a LAN client can't flood the unbounded write
+#     tables (air_readings, interventions).
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_RATE_LIMIT_WRITES_PER_MIN = int(os.environ.get("CLIMATE_WRITE_RATE_PER_MIN", "60"))
+_write_hits: dict = {}
+_write_hits_lock = threading.Lock()
+
+
+def _host_allowed(host_header: str) -> bool:
+    if not host_header:
+        return False
+    host = host_header.rsplit(":", 1)[0].strip("[]").lower()   # drop port + ipv6 brackets
+    if host == "localhost" or host.endswith(".local"):
+        return True
+    if "." not in host:
+        return True                 # dotless single-label LAN name; can't be a public rebind domain
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    extra = {h.strip().lower() for h in os.environ.get("CLIMATE_ALLOWED_HOSTS", "").split(",") if h.strip()}
+    return host in extra
+
+
+def _is_cross_site(request) -> bool:
+    """True if the request looks like a cross-site browser request (drive-by).
+    Non-browser clients send neither header, so they're never blocked."""
+    sfs = request.headers.get("sec-fetch-site")
+    if sfs in ("cross-site", "same-site"):
+        return True
+    origin = request.headers.get("origin")
+    if origin:
+        oh = (urlparse(origin).hostname or "").lower()
+        host = request.headers.get("host", "").rsplit(":", 1)[0].strip("[]").lower()
+        if oh and host and oh != host:
+            return True
+    return False
+
+
+def _rate_ok(client_ip: str) -> bool:
+    minute = int(time.time() // 60)
+    with _write_hits_lock:
+        window, count = _write_hits.get(client_ip, (minute, 0))
+        if window != minute:
+            window, count = minute, 0
+        count += 1
+        _write_hits[client_ip] = (window, count)
+        return count <= _RATE_LIMIT_WRITES_PER_MIN
+
+
+@app.middleware("http")
+async def security_guard(request, call_next):
+    if not _host_allowed(request.headers.get("host", "")):
+        return JSONResponse({"detail": "host not allowed"}, status_code=400)
+    if request.method in _WRITE_METHODS:
+        client_ip = request.client.host if request.client else "unknown"
+        if not _rate_ok(client_ip):
+            return JSONResponse({"detail": "write rate limit exceeded"}, status_code=429)
+        if _is_cross_site(request):
+            return JSONResponse({"detail": "cross-site write blocked"}, status_code=403)
+    return await call_next(request)
 
 
 app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
