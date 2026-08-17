@@ -152,6 +152,17 @@
         <button type="submit">Add</button>
       </form>
       <div class="chores-people" id="chores-people"></div>
+    <!-- ============ family message board (F4) ============ -->
+    <section class="msgboard-panel" id="messageboard" data-feature="messageboard" aria-label="Family message board">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Message board</span>
+      </div>
+      <form class="msg-compose" id="msg-compose">
+        <input type="text" id="msg-input" maxlength="500" autocomplete="off"
+               placeholder="Leave a note for the family&hellip;" aria-label="New message">
+        <button type="submit">Post</button>
+      </form>
+      <ul class="msg-list" id="msg-list"></ul>
     </section>
 
     <!-- ============ quiet band ============ -->

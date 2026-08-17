@@ -42,6 +42,6 @@ def conn():
     db.ensure_app_schema(c)  # filter_events may be absent on an older test volume
     c.execute("TRUNCATE readings, poll_errors, devices, filter_events,"
               " sensor_readings, precip_daily, interventions, kv, air_readings,"
-              " chore_completions, chore_tasks")
+              " chore_completions, chore_tasks, messages")
     yield c
     c.close()
