@@ -51,6 +51,28 @@ jobs:
           TEST_DB_DSN: postgresql://climate:climate@localhost:5432/climate
       - run: node --test tests/js/*.mjs
 
+  backup-restore:
+    # Exercises the ACTUAL restore path (dump -> restore into a throwaway DB with
+    # the TimescaleDB pre/post_restore wrappers -> verify), so a backup that
+    # can't be restored fails CI instead of being discovered in an emergency.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start TimescaleDB
+        run: |
+          docker run -d --name hc-db \
+            -e POSTGRES_USER=climate -e POSTGRES_PASSWORD=climate -e POSTGRES_DB=climate \
+            timescale/timescaledb:2.29.1-pg16
+          for i in $(seq 1 30); do docker exec hc-db pg_isready -U climate && break; sleep 2; done
+      - name: Load schema + a sample row
+        run: |
+          cat db/init.sql db/aggregates.sql \
+            | docker exec -i hc-db psql -U climate -d climate -v ON_ERROR_STOP=1 -f -
+          docker exec hc-db psql -U climate -d climate \
+            -c "INSERT INTO readings (ts, device_id, indoor_temp_f) VALUES (now(), 'dev1', 72.0);"
+      - name: Restore self-test
+        run: HC_DB_CONTAINER=hc-db bash backup/house-climate-backup.sh --restore-selftest
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

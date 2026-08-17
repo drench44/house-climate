@@ -3,6 +3,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 import requests
 
 from .. import db
@@ -220,6 +221,52 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
                           f"Outdoor air unhealthy (AQI {int(round(aqi))}): keep windows closed, run purifiers"))
     if (latest.get("wx_alert_count") or 0) > 0:
         out.append(Alert("weather_alert", "warning", "Active NWS weather alert for your area"))
+
+    # Peak-hour surge (README's promised "peak-hour surge" alert; config key
+    # peak_surge_ratio was previously read by nothing). Single-reading, like
+    # AQI/freeze: actionable the moment it's true. Fires only when the AC is
+    # ACTIVELY running inside an on-peak window whose rate is >= peak_surge_ratio
+    # times the off-peak rate — so it stays quiet on cheap/flat tariffs and only
+    # nags when running now is genuinely expensive.
+    try:
+        now_local = now.astimezone(ZoneInfo(cfg.timezone))
+        if latest.get("equipment_status") in {"cooling", "overcool", "heating"} \
+                and cfg.tou.is_peak(now_local):
+            # Compare against THIS season's off-peak rate, not the global min
+            # across all seasons (a cheaper winter rate would skew the multiple).
+            season = cfg.tou.season(now_local.month)
+            band_rates = sorted({b.rate for b in cfg.tou.bands if b.season == season})
+            ratio = a.get("peak_surge_ratio", 1.5)
+            if len(band_rates) >= 2 and band_rates[0] > 0:
+                cur_rate = cfg.tou.band_for(now_local)[1]
+                if cur_rate >= ratio * band_rates[0]:
+                    out.append(Alert("peak_surge", "warning",
+                        f"AC running during peak — power is ${cur_rate:.2f}/kWh"
+                        f" ({cur_rate / band_rates[0]:.1f}x off-peak). Shift big loads if you can."))
+    except Exception:
+        log.exception("peak-surge check failed")
+    # Equipment-status drift (issue #4): an unrecognized Daikin equipmentStatus
+    # maps to "unknown", which runtime/cost silently treat as idle -> hours and
+    # dollars read LOW with no signal. Warn when unknown dominates the recent
+    # window so the deflation is visible instead of silent.
+    unknown_n = sum(1 for r in rows if r.get("equipment_status") == "unknown")
+    if unknown_n and unknown_n / len(rows) >= a.get("equipment_unknown_frac", 0.2):
+        out.append(Alert("equipment_unknown", "warning",
+                         f"{unknown_n} of {len(rows)} recent readings have an unrecognized"
+                         " equipment status — runtime and cost may read low. Check for a"
+                         " Daikin firmware/API change."))
+    # Weather-feed staleness (issue #5): when the feed is down, wx_aqi and
+    # wx_alert_count go null, silently suppressing the AQI and NWS alerts above
+    # at exactly the moment (smoke, storms) they matter. Surface the outage
+    # itself — sustained so a brief blip doesn't page — so the suppression is
+    # visible. Skipped when no weather feed is configured.
+    def _wx_down(r):
+        v = r.get("weather_ok")
+        return None if v is None else (v is False)
+    if cfg.weather_url and _sustained(rows, _wx_down, a.get("weather_stale_minutes", 30)):
+        out.append(Alert("weather_feed_stale", "warning",
+                         "Weather feed is down — outdoor AQI and NWS weather alerts are"
+                         " unavailable until it recovers."))
     return out
 
 

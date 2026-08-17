@@ -38,16 +38,41 @@ def _linfit(xs, ys):
     return slope, my - slope * mx
 
 
+def _window_minutes(start, end) -> float:
+    """Length of a [start, end) wall-clock window in minutes, wrap-aware."""
+    s = start.hour * 60 + start.minute
+    e = end.hour * 60 + end.minute
+    if e <= s:
+        e += 24 * 60
+    return float(e - s)
+
+
+def _mid_time(start, end):
+    """The midpoint time of a [start, end) window, wrap-aware."""
+    from datetime import time
+    s = start.hour * 60 + start.minute
+    e = end.hour * 60 + end.minute
+    if e <= s:
+        e += 24 * 60
+    m = (s + (e - s) // 2) % (24 * 60)
+    return time(m // 60, m % 60)
+
+
 def predict_peak_cost(fc_high_f, history, tou, system_kw, tz, target_date=None) -> dict:
-    """Predict tomorrow's cooling and what the 17:00-21:00 window of it costs.
+    """Predict tomorrow's cooling and what its on-peak window costs.
 
     history: [{day_high, cool_minutes, peak_cool_minutes}] per past local day.
-    Peak dollars are computed from predicted PEAK-WINDOW minutes only —
-    pricing the whole day's cooling at the peak rate overstated the figure
-    ~3x (most cooling happens outside 17:00-21:00 even with no shifting).
-    The rate comes from the band actually in force at 17:30 on target_date,
-    so a weekend "peak window" is honestly priced at the off-peak rate.
+    Peak dollars come from predicted PEAK-WINDOW minutes only — pricing the
+    whole day's cooling at the peak rate overstated the figure ~3x (most
+    cooling happens outside the peak window even with no shifting).
+
+    The on-peak window and its rate are derived from the TOU table for
+    target_date's season/day-type (via tou.peak_windows / tou.band_for), NOT a
+    hardcoded 17:00-21:00 — so a utility whose peak is, e.g., 16:00-20:00 is
+    priced over the right hours, and a weekend with no peak band is honestly
+    priced at the off-peak rate.
     """
+    from datetime import datetime, time
     highs = [h["day_high"] for h in history]
     mins = [h["cool_minutes"] for h in history]
     peak_mins = [h["peak_cool_minutes"] for h in history]
@@ -61,15 +86,27 @@ def predict_peak_cost(fc_high_f, history, tou, system_kw, tz, target_date=None) 
         pred = mean(mins) if mins else 0.0
         pred_peak = mean(peak_mins) if peak_mins else 0.0
         basis = "historical mean"
-    # The peak window is 4h and is a subset of the day — enforce both.
-    pred_peak = min(pred_peak, pred, 240.0)
 
-    band = "peak"
-    rate = next((b.rate for b in tou.bands if b.name == "peak"), 0.0)
+    # Peak window length + the rate in force during it, both from the table.
+    win_minutes = 240.0                     # fallback cap (no date -> assume 4h)
+    peak_named = next((b for b in tou.bands if b.name == "peak"), None)
+    band = peak_named.name if peak_named else "peak"
+    rate = peak_named.rate if peak_named else max((b.rate for b in tou.bands), default=0.0)
     if target_date is not None:
-        from datetime import datetime, time
-        probe = datetime.combine(target_date, time(17, 30), tzinfo=ZoneInfo(tz))
-        band, rate = tou.band_for(probe)
+        ref = datetime.combine(target_date, time(0, 0), tzinfo=ZoneInfo(tz))
+        wins = tou.peak_windows(ref)
+        if wins:
+            # Sum every hump (a two-humped peak has two windows), and probe the
+            # rate at the FIRST hump's midpoint — a guaranteed on-peak instant,
+            # so a disjoint peak isn't mispriced at the midday off-peak trough.
+            win_minutes = sum(_window_minutes(s, e) for s, e, _ in wins)
+            probe = _mid_time(wins[0][0], wins[0][1])
+        else:
+            probe = time(12, 0)             # flat season: any midday minute
+        band, rate = tou.band_for(datetime.combine(target_date, probe, tzinfo=ZoneInfo(tz)))
+
+    # Peak minutes are a subset of the day AND cannot exceed the peak window.
+    pred_peak = min(pred_peak, pred, win_minutes)
     dollars = pred_peak / 60.0 * system_kw * rate
     return {"predicted_cool_minutes": pred,
             "predicted_peak_cool_minutes": pred_peak,
