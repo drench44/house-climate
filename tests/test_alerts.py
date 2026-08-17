@@ -453,3 +453,19 @@ def test_equipment_unknown_quiet_when_status_known():
     rows = [_row(m, status="cooling") for m in range(0, 60, 3)]
     out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"])
     assert not any(a.key == "equipment_unknown" for a in out)
+# --- weather-feed staleness (issue #5) ---
+
+def _wx_row(minute, weather_ok):
+    return {**_row(minute), "weather_ok": weather_ok}
+
+
+def test_weather_feed_stale_fires_when_feed_down():
+    rows = [_wx_row(m, False) for m in range(0, 45, 3)]   # >30 min of feed down
+    out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"])
+    assert any(a.key == "weather_feed_stale" for a in out)
+
+
+def test_weather_feed_stale_quiet_when_feed_ok():
+    rows = [_wx_row(m, True) for m in range(0, 45, 3)]
+    out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"])
+    assert not any(a.key == "weather_feed_stale" for a in out)
