@@ -68,6 +68,21 @@ def test_sensor_reading_roundtrip(conn):
     assert db.latest_sensor_reading(conn, "ecowitt_ch7") is None      # scoped per sensor
 
 
+def test_sensor_readings_range_carries_temp_and_dewpoint(conn):
+    # The crawl condensation alert reads temp_f AND dewpoint_f off these rows
+    # (alerts._condense). If this SELECT ever drops dewpoint_f, _condense
+    # silently returns None forever and the alert dies in production with every
+    # pure alert test still green — lock the column contract the alert depends on.
+    ts = datetime(2026, 8, 12, 6, 0, tzinfo=timezone.utc)
+    db.insert_sensor_reading(conn, "ecowitt_crawl", ts,
+                             temp_f=60.0, humidity=95.0, dewpoint_f=58.5)
+    rows = db.sensor_readings_range(conn, "ecowitt_crawl",
+                                    datetime(2026, 8, 12, 0, tzinfo=timezone.utc))
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["temp_f"] == 60.0 and r["humidity"] == 95.0 and r["dewpoint_f"] == 58.5
+
+
 def test_ensure_app_schema_heals_missing_continuous_aggregate(conn):
     """Issue #9: aggregates.sql only ran on a fresh volume, so a new/changed
     aggregate never reached existing databases. ensure_app_schema must now

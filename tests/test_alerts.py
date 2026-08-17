@@ -268,6 +268,218 @@ def test_crawl_mold_skipped_when_no_crawl_rows():
     assert not any(a.key == "crawl_mold" for a in out)
 
 
+def _crawl_full(minute, hum, temp=60.0, dp=None):
+    # A crawl row shaped like db.sensor_readings_range: ts, humidity, temp_f,
+    # dewpoint_f. `dp=None` mirrors a row where dew point was not computed.
+    return {"ts": _BASE + timedelta(minutes=minute), "humidity": hum,
+            "temp_f": temp, "dewpoint_f": dp}
+
+
+# --- Escalated RH tier: sustained >=90% is a distinct, worse regime ---------
+
+def test_crawl_saturated_fires_above_90():
+    crawl = [_crawl(m, 95) for m in range(0, 200, 5)]   # >90% for >180 min
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert any(a.key == "crawl_saturated" for a in out)
+
+
+def test_crawl_saturated_suppresses_mold():
+    # At >=90% the saturated tier fires and the 75% mold alert is suppressed --
+    # one damp crawl must not buzz the phone twice for the same condition.
+    crawl = [_crawl(m, 95) for m in range(0, 200, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert any(a.key == "crawl_saturated" for a in out)
+    assert not any(a.key == "crawl_mold" for a in out)
+
+
+def test_crawl_mold_fires_but_not_saturated_between_75_and_90():
+    crawl = [_crawl(m, 80) for m in range(0, 200, 5)]   # 75<RH<90
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert any(a.key == "crawl_mold" for a in out)
+    assert not any(a.key == "crawl_saturated" for a in out)
+
+
+def test_crawl_saturated_disabled_when_misconfigured_below_mold():
+    # Misconfig: saturated bar transposed BELOW the mold bar. The escalation
+    # must NOT fire (it would mislabel a moldy crawl as "near saturation") and
+    # must NOT suppress the accurate mold alert.
+    import dataclasses
+    cfg = dataclasses.replace(CFG, alerts={**CFG.alerts,
+                                           "crawl_saturated_pct": 70,
+                                           "crawl_mold_pct": 75})
+    crawl = [_crawl(m, 80) for m in range(0, 200, 5)]   # moldy, not saturated
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], cfg, 0, now=now, crawl_rows=crawl)
+    assert not any(a.key == "crawl_saturated" for a in out)
+    assert any(a.key == "crawl_mold" for a in out)
+
+
+def test_crawl_saturated_disabled_when_equal_to_mold_bar():
+    # The guard is strict `sat_pct > mold_pct`. With the bars EQUAL there is no
+    # sensible escalation band, so saturated must stay disabled and mold fire —
+    # pins the boundary against a silent flip to `>=` (which would fire
+    # "near saturation" at the 75% mold level).
+    import dataclasses
+    cfg = dataclasses.replace(CFG, alerts={**CFG.alerts,
+                                           "crawl_saturated_pct": 75,
+                                           "crawl_mold_pct": 75})
+    crawl = [_crawl(m, 95) for m in range(0, 200, 5)]   # well above both bars
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], cfg, 0, now=now, crawl_rows=crawl)
+    assert not any(a.key == "crawl_saturated" for a in out)
+    assert any(a.key == "crawl_mold" for a in out)
+
+
+def test_crawl_mold_fires_at_exactly_75():
+    # `_mold` is `>= mold_pct` (75); exactly the bar must fire. Pins the
+    # inclusive lower boundary against a silent flip to `> mold_pct`, mirroring
+    # the saturated inclusive-boundary test at 90.
+    crawl = [_crawl(m, 75) for m in range(0, 200, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert any(a.key == "crawl_mold" for a in out)
+
+
+def test_crawl_saturated_boundary_at_exactly_90():
+    # sat_pct default is 90 and the test is `>= sat_pct` -- exactly 90 must
+    # escalate (and suppress mold). Pins the inclusive boundary against a
+    # silent flip to `> sat_pct`.
+    crawl = [_crawl(m, 90) for m in range(0, 200, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert any(a.key == "crawl_saturated" for a in out)
+    assert not any(a.key == "crawl_mold" for a in out)
+
+
+# --- Condensation risk: sustained small air-to-dew-point spread -------------
+
+def test_crawl_condensation_fires_on_sustained_small_spread():
+    # temp 55, dew 54 -> spread 1F < 3F, sustained past the window.
+    crawl = [_crawl_full(m, 96, temp=55.0, dp=54.0) for m in range(0, 200, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert any(a.key == "crawl_condensation" for a in out)
+
+
+def test_crawl_condensation_does_not_fire_on_wide_spread():
+    # temp 60, dew 50 -> spread 10F, comfortably above the 3F bar.
+    crawl = [_crawl_full(m, 70, temp=60.0, dp=50.0) for m in range(0, 200, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert not any(a.key == "crawl_condensation" for a in out)
+
+
+def test_crawl_condensation_skipped_when_dewpoint_missing():
+    # dew point null on every row -> not OBSERVED, so the alert can't fire
+    # (must not treat missing data as either safe or condensing).
+    crawl = [_crawl_full(m, 96, temp=55.0, dp=None) for m in range(0, 200, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert not any(a.key == "crawl_condensation" for a in out)
+
+
+def test_crawl_condensation_does_not_fire_when_brief():
+    crawl = [_crawl_full(m, 96, temp=55.0, dp=54.0) for m in range(0, 30, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert not any(a.key == "crawl_condensation" for a in out)
+
+
+def test_crawl_condensation_skipped_when_temp_missing():
+    # temp_f null (dew point present) is also NOT OBSERVED -- guards against a
+    # regression that drops the temp check and reads dewpoint alone.
+    crawl = [_crawl_full(m, 96, temp=None, dp=54.0) for m in range(0, 200, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert not any(a.key == "crawl_condensation" for a in out)
+
+
+def test_crawl_condensation_survives_interior_null_dewpoint():
+    # A genuinely condensing run with one interior row missing dew point: the
+    # None is SKIPPED, not a break, so the run still spans the window and fires.
+    crawl = [_crawl_full(m, 96, temp=55.0, dp=54.0) for m in range(0, 200, 5)]
+    crawl[10]["dewpoint_f"] = None   # a single dropped reading mid-run
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert any(a.key == "crawl_condensation" for a in out)
+
+
+def test_crawl_condensation_boundary_at_exactly_3f_spread():
+    # spread == 3.0 must NOT fire (predicate is strict `< cond_spread`).
+    crawl = [_crawl_full(m, 90, temp=58.0, dp=55.0) for m in range(0, 200, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert not any(a.key == "crawl_condensation" for a in out)
+
+
+def test_crawl_condensation_and_saturated_are_independent():
+    # A cold, near-saturated crawl trips BOTH tiers: condensation is a separate
+    # `if`, not folded into the RH `elif`. Locks that independence in.
+    crawl = [_crawl_full(m, 97, temp=50.0, dp=49.0) for m in range(0, 200, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    keys = {a.key for a in out}
+    assert "crawl_saturated" in keys
+    assert "crawl_condensation" in keys
+
+
+def test_alert_context_window_covers_longest_crawl_sustained(monkeypatch):
+    """The crawl fetch window must span the LONGEST crawl sustained-window, not
+    just mold's -- a condensation window longer than mold's would otherwise be
+    starved of rows the same way the original mold fetch-window bug starved it."""
+    import types
+    monkeypatch.setattr(alerts, "_filter_due_cache", False)
+    monkeypatch.setattr(alerts, "_filter_due_at", 0.0)
+    monkeypatch.setattr(alerts.api, "_crawl_sensor_id", lambda cfg: ("ecowitt_ch1", "crawl"))
+    monkeypatch.setattr(alerts.api, "filter_status", lambda *a, **k: {"due": False})
+    monkeypatch.setattr(alerts.api, "resolve_outdoor_aqi", lambda *a, **k: (None, None))
+    captured = {}
+
+    def fake_range(conn, sensor_id, since):
+        captured["since"] = since
+        return []
+
+    monkeypatch.setattr(alerts.db, "sensor_readings_range", fake_range)
+    cfg = types.SimpleNamespace(alerts={"crawl_mold_sustained_minutes": 180,
+                                        "crawl_condensation_sustained_minutes": 600})
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=3)
+    alerts._alert_context(None, "dev", cfg, since, rows=[])
+    window_min = (now - captured["since"]).total_seconds() / 60.0
+    assert window_min >= 600 * 1.5, \
+        f"crawl fetch window {window_min:.0f}min must span the 600min condensation window"
+
+
+def test_alert_context_window_covers_mold_when_it_is_longer(monkeypatch):
+    """The mirror of the above: when MOLD is the longer window, the fetch must
+    still span it. Without asserting both directions, dropping mold from the
+    max() (span=cond_min) would slip through and starve the mold fetch."""
+    import types
+    monkeypatch.setattr(alerts, "_filter_due_cache", False)
+    monkeypatch.setattr(alerts, "_filter_due_at", 0.0)
+    monkeypatch.setattr(alerts.api, "_crawl_sensor_id", lambda cfg: ("ecowitt_ch1", "crawl"))
+    monkeypatch.setattr(alerts.api, "filter_status", lambda *a, **k: {"due": False})
+    monkeypatch.setattr(alerts.api, "resolve_outdoor_aqi", lambda *a, **k: (None, None))
+    captured = {}
+
+    def fake_range(conn, sensor_id, since):
+        captured["since"] = since
+        return []
+
+    monkeypatch.setattr(alerts.db, "sensor_readings_range", fake_range)
+    cfg = types.SimpleNamespace(alerts={"crawl_mold_sustained_minutes": 600,
+                                        "crawl_condensation_sustained_minutes": 180})
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=3)
+    alerts._alert_context(None, "dev", cfg, since, rows=[])
+    window_min = (now - captured["since"]).total_seconds() / 60.0
+    assert window_min >= 600 * 1.5, \
+        f"crawl fetch window {window_min:.0f}min must span the 600min mold window"
+
+
 def test_alert_context_fetches_crawl_over_window_larger_than_mold(monkeypatch):
     """REGRESSION (fable): _alert_context fetched crawl over the short-cycle
     `since` window (which can be ~= crawl_mold_sustained_minutes), so _sustained
