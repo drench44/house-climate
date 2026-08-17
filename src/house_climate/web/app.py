@@ -404,6 +404,14 @@ def messages_pin(message_id: int, body: dict):
     if not db.set_message_pinned(_db(), message_id, bool(body.get("pinned"))):
         raise HTTPException(404, "no such message")
     return {"ok": True}
+@app.get("/api/camera/config")
+def camera_config_get():
+    return api.get_camera_config(_db())
+
+
+@app.post("/api/camera/config")
+def camera_config_post(body: dict):
+    return api.set_camera_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
 
 
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
