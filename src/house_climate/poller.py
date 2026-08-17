@@ -262,6 +262,12 @@ def run(cfg, secrets):
             precip = update_precip(conn, device_id, cfg)
             if precip != "precip_noop":
                 log.info("precip: %s", precip)
+            # Liveness heartbeat: proves the poller PROCESS is alive and looping,
+            # independent of whether Daikin/weather are erroring (data staleness
+            # is caught separately by /health + the offline alert). The poller
+            # container's healthcheck (house_climate.healthcheck) probes its age.
+            db.kv_set(conn, "poller_heartbeat",
+                      {"ts": datetime.now(timezone.utc).isoformat()})
         except Exception:                       # never let the loop die
             log.exception("poll failed")
             try:                                # replace a broken connection

@@ -1,3 +1,6 @@
+-- Runs via initdb on a FRESH volume only. db.ensure_aggregates() mirrors this
+-- and re-applies it (idempotently) on every app startup, so edits here also
+-- reach already-provisioned databases. Keep the two in sync.
 CREATE MATERIALIZED VIEW IF NOT EXISTS readings_hourly
 WITH (timescaledb.continuous) AS
 SELECT time_bucket('1 hour', ts) AS bucket,

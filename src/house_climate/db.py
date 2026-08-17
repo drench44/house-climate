@@ -92,6 +92,46 @@ def ensure_app_schema(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS air_readings_room_ts"
         " ON air_readings (room, ts DESC)")
+    ensure_aggregates(conn)
+
+
+# The continuous aggregate + policies. This MIRRORS db/aggregates.sql, which the
+# initdb bootstrap runs on a FRESH volume only. Re-applying the same idempotent
+# DDL here (every startup) (re)creates a MISSING aggregate/policy on an
+# already-provisioned database — previously aggregates.sql ran once at volume
+# creation and never again, so a newly-added aggregate never reached existing
+# DBs. Every statement is guarded (IF NOT EXISTS / if_not_exists / ALTER SET), so
+# it's a no-op on an up-to-date DB. NOTE: IF-NOT-EXISTS only heals what's absent;
+# CHANGING an existing aggregate's definition or a policy still needs a real
+# migration (drop + recreate). Keep the two in sync; the test suite asserts the
+# aggregate is recreated after ensure_app_schema runs on a DB missing it.
+def ensure_aggregates(conn) -> None:
+    conn.execute(
+        """CREATE MATERIALIZED VIEW IF NOT EXISTS readings_hourly
+           WITH (timescaledb.continuous) AS
+           SELECT time_bucket('1 hour', ts) AS bucket,
+                  device_id,
+                  avg(indoor_temp_f)  AS avg_indoor_temp_f,
+                  min(indoor_temp_f)  AS min_indoor_temp_f,
+                  max(indoor_temp_f)  AS max_indoor_temp_f,
+                  avg(indoor_humidity) AS avg_indoor_humidity,
+                  avg(wx_outdoor_temp_f) AS avg_outdoor_temp_f,
+                  avg(wx_solar_wm2)   AS avg_solar_wm2,
+                  count(*) FILTER (WHERE equipment_status IN ('cooling','overcool')) AS cool_ticks,
+                  count(*) FILTER (WHERE equipment_status = 'heating') AS heat_ticks,
+                  count(*) FILTER (WHERE equipment_status = 'fan') AS fan_ticks
+           FROM readings
+           GROUP BY bucket, device_id
+           WITH NO DATA""")
+    conn.execute(
+        "SELECT add_continuous_aggregate_policy('readings_hourly',"
+        " start_offset => INTERVAL '3 hours', end_offset => INTERVAL '1 hour',"
+        " schedule_interval => INTERVAL '1 hour', if_not_exists => TRUE)")
+    conn.execute(
+        "ALTER TABLE readings SET (timescaledb.compress,"
+        " timescaledb.compress_segmentby = 'device_id')")
+    conn.execute(
+        "SELECT add_compression_policy('readings', INTERVAL '30 days', if_not_exists => TRUE)")
 
 
 def record_filter_change(conn, device_id, changed_at=None, note=None):

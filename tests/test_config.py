@@ -2,6 +2,8 @@ import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from house_climate.config import load_config, load_secrets
 
 from conftest import CFG_PATH as CFG
@@ -94,6 +96,26 @@ def test_tou_band_weekend_all_day_offpeak(tmp_path):
     c = _fixture_cfg(tmp_path)
     dt = datetime(2026, 8, 8, 18, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
     assert c.tou.band_for(dt) == ("offpeak", 0.09)   # 2026-08-08 is a Saturday
+
+
+def test_missing_required_alert_key_raises_at_load(tmp_path):
+    # A partial alerts block used to load fine, then kill the alert thread at
+    # runtime (silent). It must now fail loud at load.
+    with pytest.raises(ValueError, match="alerts"):
+        _fixture_cfg(tmp_path, lambda d: d["alerts"].pop("cooldown_minutes"))
+
+
+def test_bad_timezone_raises_at_load(tmp_path):
+    with pytest.raises(ValueError, match="timezone"):
+        _fixture_cfg(tmp_path, lambda d: d.update(timezone="Not/AZone"))
+
+
+def test_tou_gap_raises_at_load(tmp_path):
+    # Drop the weekday midpeak band -> 07:00-17:00 weekday is uncovered.
+    def gap(d):
+        d["tou"]["bands"] = [b for b in d["tou"]["bands"] if b["name"] != "midpeak"]
+    with pytest.raises(ValueError, match="no band covering"):
+        _fixture_cfg(tmp_path, mutate=gap)
 
 
 def test_secrets_from_env():

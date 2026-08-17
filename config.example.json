@@ -49,6 +49,8 @@
     "short_cycles_threshold": 3,
     "offline_missed_polls": 5,
     "peak_surge_ratio": 1.5,
+    "equipment_unknown_frac": 0.2,
+    "weather_stale_minutes": 30,
     "aqi_unhealthy": 101
   }
 }

@@ -30,6 +30,8 @@ os.environ.setdefault("DAIKIN_API_KEY", "test-key")
 os.environ.setdefault("DAIKIN_INTEGRATOR_TOKEN", "test-token")
 os.environ.setdefault("DAIKIN_EMAIL", "test@example.com")
 os.environ.setdefault("CONFIG_PATH", CFG_PATH)
+# TestClient sends Host: testserver; allow it past the host-allowlist guard.
+os.environ.setdefault("CLIMATE_ALLOWED_HOSTS", "testserver")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -73,3 +75,100 @@ def test_ha_air_bad_aqi_returns_422_not_500(conn):
     # nothing stored on the rejected request
     assert db.kv_get(conn, "ha_outdoor_aqi") is None
     assert db.latest_air(conn) == []
+
+
+# --- deep /health (issue #6) ---
+
+def test_health_ok_reports_db_and_freshness(conn):
+    resp = client.get("/health")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["checks"]["db"] == "ok"
+    assert "latest_reading_age_s" in body["checks"]
+    assert "poller_heartbeat_age_s" in body["checks"]
+
+
+def test_health_503_when_db_unreachable(conn, monkeypatch):
+    # The old /health returned 200 unconditionally even with the DB down, so the
+    # container healthcheck never tripped. Force _db() to fail -> must be 503.
+    from house_climate.web import app as appmod
+
+    def boom():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(appmod, "_db", boom)
+    resp = client.get("/health")
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "error"
+# --- unauthenticated-write hardening (issue #10) ---
+
+def test_host_not_allowed_returns_400(conn):
+    # A DNS-rebinding request arrives with a public-looking Host header.
+    resp = client.post("/api/ha/air", json={"upstairs": 5},
+                       headers={"host": "evil.example.com"})
+    assert resp.status_code == 400
+
+
+def test_cross_site_write_blocked_via_sec_fetch(conn):
+    # A browser drive-by carries Sec-Fetch-Site: cross-site -> 403.
+    resp = client.post("/api/filter/changed", json={},
+                       headers={"sec-fetch-site": "cross-site"})
+    assert resp.status_code == 403
+
+
+def test_cross_origin_write_blocked_via_origin(conn):
+    resp = client.post("/api/filter/changed", json={},
+                       headers={"origin": "http://evil.example.com"})
+    assert resp.status_code == 403
+
+
+def test_non_browser_write_ok(conn):
+    # Home Assistant / curl send neither Origin nor Sec-Fetch-Site -> allowed,
+    # even with a text/plain body (we do NOT gate on Content-Type).
+    resp = client.post("/api/filter/changed", content="{}",
+                       headers={"content-type": "text/plain"})
+    assert resp.status_code == 200, resp.text
+
+
+def test_write_rate_limit_returns_429(conn, monkeypatch):
+    from house_climate.web import app as appmod
+    monkeypatch.setattr(appmod, "_RATE_LIMIT_WRITES_PER_MIN", 3)
+    appmod._write_hits.clear()
+    codes = [client.post("/api/filter/changed", json={}).status_code for _ in range(6)]
+    assert 429 in codes
+    assert codes.count(200) <= 3
+    appmod._write_hits.clear()
+# --- FastAPI routing-layer coverage (issue #12) ---
+
+def test_ha_precool_valid_and_invalid(conn):
+    assert client.post("/api/ha/precool", json={"enabled": True}).status_code == 200
+    assert client.post("/api/ha/precool", json={"enabled": "yes"}).status_code == 422
+
+
+def test_interventions_crud_and_error_branches(conn):
+    assert client.post("/api/interventions", json={"date": "2026-08-01", "label": ""}).status_code == 422
+    assert client.post("/api/interventions", json={"date": "nope", "label": "x"}).status_code == 422
+    r = client.post("/api/interventions", json={"date": "2026-08-01", "label": "vapor barrier"})
+    assert r.status_code == 200, r.text
+    iid = r.json()["id"]
+    assert any(iv["id"] == iid for iv in client.get("/api/interventions").json())
+    assert client.delete(f"/api/interventions/{iid}").status_code == 200
+    assert client.delete(f"/api/interventions/{iid}").status_code == 404   # already gone
+
+
+def test_anomalies_endpoint_returns_list(conn):
+    r = client.get("/api/anomalies")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+
+def test_read_endpoints_smoke_on_empty_db(conn):
+    # Every read route must serve (fails-soft to available:false), not 500, even
+    # with no device/readings — exercises the route wiring + _device fallback.
+    for path in ["/api/now", "/api/history", "/api/runtime", "/api/cost",
+                 "/api/cost/summary", "/api/forecast", "/api/precool", "/api/humidity",
+                 "/api/rooms", "/api/crawl", "/api/moisture", "/api/air",
+                 "/api/thermal", "/api/timeline", "/api/health"]:
+        r = client.get(path)
+        assert r.status_code == 200, f"{path}: {r.status_code} {r.text}"
