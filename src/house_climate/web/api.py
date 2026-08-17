@@ -1089,6 +1089,7 @@ DASHBOARD_FEATURES = [
     ("learning", "Learning"),
     ("chores", "Chores"),
     ("messageboard", "Message board"),
+    ("camera", "Camera"),
 ]
 
 
@@ -1113,6 +1114,17 @@ def build_messages(conn) -> list[dict]:
 
 
 _FEATURE_KEYS = {k for k, _ in DASHBOARD_FEATURES}
+
+
+def get_camera_config(conn) -> dict:
+    kv = db.kv_get(conn, "camera_url")
+    url = kv["value"].get("url", "") if kv and isinstance(kv["value"], dict) else ""
+    return {"url": url}
+
+
+def set_camera_config(conn, url) -> dict:
+    db.kv_set(conn, "camera_url", {"url": str(url or "").strip()[:2000]})
+    return get_camera_config(conn)
 
 
 def _feature_overrides(conn) -> dict:

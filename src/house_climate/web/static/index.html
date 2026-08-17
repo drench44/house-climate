@@ -163,6 +163,13 @@
         <button type="submit">Post</button>
       </form>
       <ul class="msg-list" id="msg-list"></ul>
+    <section class="camera-panel" id="camera" data-feature="camera" aria-label="Camera">
+      <div class="panel-head"><span class="micro" style="color:var(--dim)">Camera</span>
+        <button type="button" class="camera-cfg-btn" id="camera-cfg-btn">edit</button></div>
+      <form class="camera-cfg" id="camera-cfg" hidden>
+        <input type="url" id="camera-url" placeholder="Snapshot / stream URL" aria-label="Camera URL">
+        <button type="submit">Save</button></form>
+      <div class="camera-body" id="camera-body"></div>
     </section>
 
     <!-- ============ quiet band ============ -->

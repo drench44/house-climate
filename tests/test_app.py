@@ -296,3 +296,17 @@ def test_messages_pinned_sort_first(conn):
 def test_messageboard_in_feature_registry(conn):
     keys = {f["key"] for f in client.get("/api/settings").json()["features"]}
     assert "messageboard" in keys
+# --- camera snapshot tile (F6, issue #32) ---
+
+def test_camera_config_roundtrip(conn):
+    assert client.post("/api/camera/config",
+                       json={"url": "http://cam/snap.jpg"}).status_code == 200
+    assert client.get("/api/camera/config").json() == {"url": "http://cam/snap.jpg"}
+    # An empty URL clears the stored snapshot source.
+    assert client.post("/api/camera/config", json={"url": ""}).status_code == 200
+    assert client.get("/api/camera/config").json() == {"url": ""}
+
+
+def test_camera_in_feature_registry(conn):
+    keys = {f["key"] for f in client.get("/api/settings").json()["features"]}
+    assert "camera" in keys

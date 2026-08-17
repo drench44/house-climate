@@ -1529,6 +1529,47 @@ function initMessageBoard() {
     try { await postJSON('/api/messages', { body: text }); input.value = ''; refreshMessages(); } catch (err) {}
   });
   refreshMessages();
+/* F6: camera snapshot tile                                               */
+/* ---------------------------------------------------------------------- */
+async function refreshCamera() {
+  const body = document.getElementById('camera-body');
+  if (!body) return;
+  try {
+    const { url } = await j('/api/camera/config');
+    if (url) {
+      let img = body.querySelector('img.camera-img');
+      if (!img) {
+        img = document.createElement('img');
+        img.className = 'camera-img';
+        img.alt = 'camera';
+        body.innerHTML = '';
+        body.append(img);
+      }
+      // Cache-buster so the snapshot/MJPEG frame actually advances each tick.
+      img.src = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
+    } else {
+      body.innerHTML = '<p class="camera-empty">No camera set. Click edit to add a snapshot URL.</p>';
+    }
+  } catch (e) { /* best-effort: leave whatever the tile last showed */ }
+}
+
+function initCamera() {
+  const btn = document.getElementById('camera-cfg-btn');
+  const form = document.getElementById('camera-cfg');
+  const input = document.getElementById('camera-url');
+  if (!btn || !form || !input) return;
+  btn.addEventListener('click', () => { form.hidden = !form.hidden; });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await postJSON('/api/camera/config', { url: input.value.trim() });
+      form.hidden = true;
+      refreshCamera();
+    } catch (err) { /* best-effort: keep the form open so the user can retry */ }
+  });
+  // Prefill the input from the stored config so an edit starts from the current URL.
+  j('/api/camera/config').then(({ url }) => { input.value = url || ''; }).catch(() => {});
+  refreshCamera();
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1541,9 +1582,11 @@ initCrawlHover();
 initSettings();
 initChores();
 initMessageBoard();
+initCamera();
 tickClock();
 setInterval(tickClock, 1000);
 refresh();
 setInterval(refresh, REFRESH_MS);
 setInterval(refreshChores, REFRESH_MS);
 setInterval(refreshMessages, REFRESH_MS);
+setInterval(refreshCamera, 5000);
