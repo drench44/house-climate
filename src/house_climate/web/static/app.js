@@ -1376,6 +1376,69 @@ async function initSettings() {
 }
 
 /* ---------------------------------------------------------------------- */
+/* F3: chores / routines                                                  */
+/* ---------------------------------------------------------------------- */
+async function refreshChores() {
+  const wrap = document.getElementById('chores-people');
+  if (!wrap) return;
+  try {
+    const data = await j('/api/chores');
+    wrap.innerHTML = '';
+    if (!data.people.length) { wrap.innerHTML = '<p class="chores-empty">No chores yet.</p>'; return; }
+    for (const p of data.people) {
+      const col = document.createElement('div'); col.className = 'chore-col';
+      const head = document.createElement('div'); head.className = 'chore-col-head';
+      const name = document.createElement('span'); name.className = 'chore-name'; name.textContent = p.person;
+      const pts = document.createElement('span'); pts.className = 'chore-pts';
+      pts.textContent = `${p.points_week} pt${p.points_week === 1 ? '' : 's'} this wk`;
+      head.append(name, pts); col.append(head);
+      for (const t of p.tasks) {
+        const row = document.createElement('label'); row.className = 'chore-task' + (t.done_today ? ' done' : '');
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = t.done_today;
+        cb.addEventListener('change', async () => {
+          try { await postJSON(`/api/chores/tasks/${t.id}/toggle`, {}); refreshChores(); }
+          catch (e) { cb.checked = !cb.checked; }
+        });
+        const title = document.createElement('span'); title.className = 'chore-title'; title.textContent = t.title;
+        const tp = document.createElement('span'); tp.className = 'chore-tpts'; tp.textContent = t.points;
+        const del = document.createElement('button'); del.type = 'button'; del.className = 'chore-del';
+        del.textContent = '×'; del.setAttribute('aria-label', 'Delete task');
+        del.addEventListener('click', async (e) => {
+          e.preventDefault();
+          try { await fetch(`/api/chores/tasks/${t.id}`, { method: 'DELETE' }); refreshChores(); } catch (e) {}
+        });
+        row.append(cb, title, tp, del); col.append(row);
+      }
+      wrap.append(col);
+    }
+  } catch (e) { /* best-effort */ }
+}
+
+function initChores() {
+  const addBtn = document.getElementById('chores-add-btn');
+  const form = document.getElementById('chores-add');
+  if (!form) return;
+  addBtn.addEventListener('click', () => {
+    form.hidden = !form.hidden;
+    if (!form.hidden) document.getElementById('chore-person').focus();
+  });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const person = document.getElementById('chore-person').value.trim();
+    const title = document.getElementById('chore-title').value.trim();
+    const points = Number(document.getElementById('chore-points').value || 1);
+    if (!person || !title) return;
+    try {
+      await postJSON('/api/chores/tasks', { person, title, points });
+      document.getElementById('chore-title').value = '';
+      form.hidden = true;
+      refreshChores();
+    } catch (err) {}
+  });
+  refreshChores();
+}
+
+/* ---------------------------------------------------------------------- */
 /* boot                                                                   */
 /* ---------------------------------------------------------------------- */
 
@@ -1383,7 +1446,9 @@ spawnAmbience();
 initRibbonHover();
 initCrawlHover();
 initSettings();
+initChores();
 tickClock();
 setInterval(tickClock, 1000);
 refresh();
 setInterval(refresh, REFRESH_MS);
+setInterval(refreshChores, REFRESH_MS);

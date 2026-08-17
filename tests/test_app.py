@@ -217,3 +217,32 @@ def test_settings_merge_accumulates_without_clobber(conn):
     feats = {f["key"]: f["enabled"] for f in client.get("/api/settings").json()["features"]}
     assert feats["cost"] is False and feats["ribbon"] is False
     assert feats["humidity"] is True
+
+
+# --- chores (F3, issue #29) ---
+
+def test_chores_add_toggle_and_week_points(conn):
+    tid = client.post("/api/chores/tasks", json={"person": "Ella", "title": "Dishes", "points": 3}).json()["id"]
+    data = client.get("/api/chores").json()
+    ella = next(p for p in data["people"] if p["person"] == "Ella")
+    assert ella["tasks"][0]["title"] == "Dishes" and ella["tasks"][0]["done_today"] is False
+    assert ella["points_week"] == 0
+    # mark done -> week points reflect it
+    assert client.post(f"/api/chores/tasks/{tid}/toggle", json={}).json()["done_today"] is True
+    ella = next(p for p in client.get("/api/chores").json()["people"] if p["person"] == "Ella")
+    assert ella["tasks"][0]["done_today"] is True and ella["points_week"] == 3
+    # toggle off -> points back to 0
+    assert client.post(f"/api/chores/tasks/{tid}/toggle", json={}).json()["done_today"] is False
+    assert next(p for p in client.get("/api/chores").json()["people"] if p["person"] == "Ella")["points_week"] == 0
+
+
+def test_chores_validation_and_delete(conn):
+    assert client.post("/api/chores/tasks", json={"person": "", "title": "x"}).status_code == 422
+    tid = client.post("/api/chores/tasks", json={"person": "Sam", "title": "Trash"}).json()["id"]
+    assert client.delete(f"/api/chores/tasks/{tid}").status_code == 200
+    assert client.delete(f"/api/chores/tasks/{tid}").status_code == 404
+    assert client.get("/api/chores").json()["people"] == []
+
+
+def test_chores_in_feature_registry(conn):
+    assert "chores" in {f["key"] for f in client.get("/api/settings").json()["features"]}
