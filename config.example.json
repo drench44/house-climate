@@ -51,6 +51,11 @@
     "peak_surge_ratio": 1.5,
     "equipment_unknown_frac": 0.2,
     "weather_stale_minutes": 30,
-    "aqi_unhealthy": 101
+    "aqi_unhealthy": 101,
+    "crawl_mold_pct": 75,
+    "crawl_saturated_pct": 90,
+    "crawl_mold_sustained_minutes": 180,
+    "crawl_condensation_spread_f": 3.0,
+    "crawl_condensation_sustained_minutes": 180
   }
 }
