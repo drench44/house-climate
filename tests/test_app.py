@@ -372,3 +372,57 @@ def test_media_tiles_reject_non_http_urls(conn):
         assert client.post(path, json={"url": "http://cam.lan/snapshot.jpg"}).status_code == 200
         assert client.post(path, json={"url": "https://photos.example/album"}).status_code == 200
         assert client.post(path, json={"url": ""}).status_code == 200
+# --- family calendar (F1, issue #27) ---
+
+def test_calendar_endpoint_empty_is_unconfigured(conn):
+    r = client.get("/api/calendar").json()
+    assert r["configured"] is False and r["days"] == []
+
+
+def test_calendar_configured_after_sync(conn):
+    from test_caldav import _client
+    from house_climate import caldav
+    caldav.sync_events(conn, _client())
+    assert client.get("/api/calendar").json()["configured"] is True
+
+
+def test_calendar_in_feature_registry(conn):
+    assert "calendar" in {f["key"] for f in client.get("/api/settings").json()["features"]}
+
+
+# --- family reminders (F2, issue #28) ---
+
+def test_reminders_endpoint_and_toggle(conn):
+    from test_caldav import _client
+    from house_climate import caldav
+    assert client.get("/api/reminders").json() == {"configured": False, "reminders": []}
+    caldav.sync_todos(conn, _client())
+    r = client.get("/api/reminders").json()
+    assert r["configured"] is True and r["reminders"][0]["summary"] == "Buy milk"
+    href = r["reminders"][0]["href"]
+    assert client.post("/api/reminders/toggle", json={"href": href, "done": True}).status_code == 200
+    assert client.get("/api/reminders").json()["reminders"][0]["done"] is True
+
+
+def test_reminders_toggle_404(conn):
+    assert client.post("/api/reminders/toggle", json={"href": "/nope"}).status_code == 404
+
+
+def test_reminders_in_feature_registry(conn):
+    assert "reminders" in {f["key"] for f in client.get("/api/settings").json()["features"]}
+
+
+# --- filtered to-dos / focus list (F7, issue #33) ---
+
+def test_filtered_todos_all_and_high(conn):
+    from test_caldav import _client
+    from house_climate import caldav
+    caldav.sync_todos(conn, _client())            # Buy milk, priority 1
+    r = client.get("/api/todos/filtered").json()
+    assert r["mode"] == "all" and any(t["summary"] == "Buy milk" for t in r["todos"])
+    client.post("/api/todos/filter", json={"mode": "high"})
+    assert any(t["summary"] == "Buy milk" for t in client.get("/api/todos/filtered").json()["todos"])
+
+
+def test_filtered_todos_registry(conn):
+    assert "filtered_todos" in {f["key"] for f in client.get("/api/settings").json()["features"]}

@@ -1592,6 +1592,116 @@ function initPhotos() {
 }
 
 /* ---------------------------------------------------------------------- */
+/* F1: family calendar (agenda from the CalDAV cache)                     */
+/* ---------------------------------------------------------------------- */
+function calDate(iso) {
+  try { return new Date(iso + 'T00:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }); }
+  catch (e) { return iso; }
+}
+function calColor(c) {   // apple color is #RRGGBBAA — drop the alpha for CSS
+  return (typeof c === 'string' && c.length === 9 && c[0] === '#') ? c.slice(0, 7) : c;
+}
+
+async function refreshCalendar() {
+  const body = document.getElementById('calendar-body');
+  if (!body) return;
+  try {
+    const data = await j('/api/calendar');
+    if (!data.configured) {
+      body.innerHTML = '<p class="cal-empty">Calendar not connected. Set ICLOUD_EMAIL and ICLOUD_APP_PASSWORD for the family iCloud account.</p>';
+      return;
+    }
+    if (!data.days.length) { body.innerHTML = '<p class="cal-empty">No upcoming events.</p>'; return; }
+    body.innerHTML = '';
+    for (const d of data.days) {
+      const grp = document.createElement('div'); grp.className = 'cal-day';
+      const hd = document.createElement('div'); hd.className = 'cal-date'; hd.textContent = calDate(d.date);
+      grp.append(hd);
+      for (const ev of d.events) {
+        const row = document.createElement('div'); row.className = 'cal-ev';
+        const dot = document.createElement('span'); dot.className = 'cal-dot';
+        if (ev.color) dot.style.background = calColor(ev.color);
+        const t = document.createElement('span'); t.className = 'cal-time';
+        t.textContent = ev.all_day ? 'all day' : (ev.time || '');
+        const s = document.createElement('span'); s.className = 'cal-summary';
+        s.textContent = ev.summary + (ev.location ? ' · ' + ev.location : '');
+        row.append(dot, t, s); grp.append(row);
+      }
+      body.append(grp);
+    }
+  } catch (e) { /* best-effort */ }
+}
+
+/* ---------------------------------------------------------------------- */
+/* F2: family reminders (VTODO from the CalDAV cache)                     */
+/* ---------------------------------------------------------------------- */
+async function refreshReminders() {
+  const body = document.getElementById('reminders-body');
+  if (!body) return;
+  try {
+    const data = await j('/api/reminders');
+    if (!data.configured) { body.innerHTML = '<p class="cal-empty">Reminders not connected.</p>'; return; }
+    if (!data.reminders.length) { body.innerHTML = '<p class="cal-empty">No reminders.</p>'; return; }
+    body.innerHTML = '';
+    for (const r of data.reminders) {
+      const row = document.createElement('label'); row.className = 'rem-item' + (r.done ? ' done' : '');
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = r.done;
+      cb.addEventListener('change', async () => {
+        try { await postJSON('/api/reminders/toggle', { href: r.href, done: cb.checked }); refreshReminders(); }
+        catch (e) { cb.checked = !cb.checked; }
+      });
+      const dot = document.createElement('span'); dot.className = 'rem-dot';
+      if (r.color) dot.style.background = calColor(r.color);
+      const s = document.createElement('span'); s.className = 'rem-summary'; s.textContent = r.summary;
+      const meta = document.createElement('span'); meta.className = 'rem-meta';
+      meta.textContent = r.due ? ('due ' + calDate(r.due.slice(0, 10))) : (r.list || '');
+      row.append(cb, dot, s, meta); body.append(row);
+    }
+  } catch (e) { /* best-effort */ }
+}
+
+/* ---------------------------------------------------------------------- */
+/* F7: focus list (filtered to-dos over the reminders cache)              */
+/* ---------------------------------------------------------------------- */
+async function refreshFocus() {
+  const body = document.getElementById('focus-body');
+  if (!body) return;
+  try {
+    const data = await j('/api/todos/filtered');
+    const sel = document.getElementById('focus-mode');
+    if (sel && sel.value !== data.mode) sel.value = data.mode;
+    if (!data.configured) { body.innerHTML = '<p class="cal-empty">Reminders not connected.</p>'; return; }
+    if (!data.todos.length) { body.innerHTML = '<p class="cal-empty">Nothing here.</p>'; return; }
+    body.innerHTML = '';
+    for (const r of data.todos) {
+      const row = document.createElement('label'); row.className = 'rem-item';
+      const cb = document.createElement('input'); cb.type = 'checkbox';
+      cb.addEventListener('change', async () => {
+        try {
+          await postJSON('/api/reminders/toggle', { href: r.href, done: cb.checked });
+          refreshFocus(); if (typeof refreshReminders === 'function') refreshReminders();
+        } catch (e) { cb.checked = !cb.checked; }
+      });
+      const dot = document.createElement('span'); dot.className = 'rem-dot';
+      if (r.color) dot.style.background = calColor(r.color);
+      const s = document.createElement('span'); s.className = 'rem-summary'; s.textContent = r.summary;
+      const meta = document.createElement('span'); meta.className = 'rem-meta';
+      meta.textContent = r.due ? ('due ' + calDate(r.due.slice(0, 10))) : (r.list || '');
+      row.append(cb, dot, s, meta); body.append(row);
+    }
+  } catch (e) { /* best-effort */ }
+}
+
+function initFocus() {
+  const sel = document.getElementById('focus-mode');
+  if (!sel) return;
+  sel.addEventListener('change', async () => {
+    try { await postJSON('/api/todos/filter', { mode: sel.value }); refreshFocus(); } catch (e) {}
+  });
+  refreshFocus();
+}
+
+/* ---------------------------------------------------------------------- */
 /* boot                                                                   */
 /* ---------------------------------------------------------------------- */
 
@@ -1603,6 +1713,7 @@ initChores();
 initMessageBoard();
 initCamera();
 initPhotos();
+initFocus();
 tickClock();
 setInterval(tickClock, 1000);
 refresh();
@@ -1611,3 +1722,6 @@ setInterval(refreshChores, REFRESH_MS);
 setInterval(refreshMessages, REFRESH_MS);
 setInterval(refreshCamera, 5000);
 setInterval(refreshPhoto, 60000);
+setInterval(refreshCalendar, 60000);
+setInterval(refreshReminders, 60000);
+setInterval(refreshFocus, 60000);
