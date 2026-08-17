@@ -506,23 +506,41 @@ def sensor_hourly_dp(conn, sensor_id, since_ts) -> list[dict]:
     return [{"bucket": r[0], "dp": r[1]} for r in cur.fetchall()]
 
 
-def outdoor_hourly(conn, device_id, since_ts) -> list[dict]:
-    """Hourly mean OUTDOOR temp / RH / dew point from the weather feed on the
-    readings table. A bucket appears when the feed reported ANY of the three
-    that hour; a field is null when the feed lacked it (avg() skips nulls). One
-    query feeds both the crawl-vs-outdoor attribution (which reads `dp`) and the
-    /api/outdoor series — so the two never diverge."""
+def outdoor_series(conn, device_id, since_ts, bucket_s) -> list[dict]:
+    """Bucketed mean OUTDOOR temp / RH / dew point from the weather feed on the
+    readings table. A bucket appears when the feed reported ANY of the three in
+    it; a field is null when the feed lacked it (avg() skips nulls). `bucket_s`
+    sizes the bucket so the /api/outdoor chart stays bounded at any range, the
+    same way sensor_series does for the crawl chart."""
     cur = conn.execute(
-        "SELECT time_bucket(interval '1 hour', ts) AS bucket,"
+        "SELECT time_bucket(%s * interval '1 second', ts) AS bucket,"
         " avg(wx_outdoor_temp_f) AS temp, avg(wx_humidity) AS rh,"
         " avg(wx_dewpoint_f) AS dp"
         " FROM readings WHERE device_id=%s AND ts >= %s"
         "   AND (wx_outdoor_temp_f IS NOT NULL OR wx_humidity IS NOT NULL"
         "        OR wx_dewpoint_f IS NOT NULL)"
         " GROUP BY bucket ORDER BY bucket",
-        (device_id, since_ts))
+        (bucket_s, device_id, since_ts))
     cols = [d.name for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def outdoor_hourly(conn, device_id, since_ts) -> list[dict]:
+    """Hourly outdoor temp / RH / dew point — the fixed-hour unit the
+    crawl-vs-outdoor attribution (which reads `dp`) and the /api/outdoor
+    coverage counter both work in, so those never drift from the widened
+    query. The display series uses outdoor_series with a range-sized bucket."""
+    return outdoor_series(conn, device_id, since_ts, 3600)
+
+
+def first_reading_ts(conn, device_id):
+    """Timestamp of a device's earliest stored reading — when it began
+    collecting — or None if it has never reported. Lets a caller tell a young
+    install (low coverage because history is short) from a flaky feed (low
+    coverage because of real gaps)."""
+    row = conn.execute(
+        "SELECT min(ts) FROM readings WHERE device_id=%s", (device_id,)).fetchone()
+    return row[0] if row else None
 
 
 def sensor_daily_stats(conn, sensor_id, tz, since_ts=None) -> list[dict]:
