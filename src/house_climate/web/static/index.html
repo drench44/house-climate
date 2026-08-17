@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>House Climate</title>
   <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0iZyIgeDE9IjAiIHkxPSIwIiB4Mj0iMCIgeTI9IjEiPjxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzE0YjhhNiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzBmNzY2ZSIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPgo8cmVjdCB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHJ4PSI3IiBmaWxsPSJ1cmwoI2cpIi8+CjxwYXRoIGQ9Ik0xNiA1LjVsOS42IDguM2ExIDEgMCAwIDEtLjY2IDEuNzVIMjMuNFYyNS42YTEgMSAwIDAgMS0xIDFIOS42YTEgMSAwIDAgMS0xLTFWMTUuNTVINy4wNkExIDEgMCAwIDEgNi40IDEzLjh6IiBmaWxsPSIjZmZmZmZmIi8+CjxwYXRoIGQ9Ik0xNiAxNS40Yy0yLjMgMy0zLjQ1IDQuODUtMy40NSA2LjU1YTMuNDUgMy40NSAwIDAgMCA2LjkgMGMwLTEuNy0xLjE1LTMuNTUtMy40NS02LjU1eiIgZmlsbD0iIzBmNzY2ZSIvPgo8L3N2Zz4K">
-  <link rel="stylesheet" href="styles.css?v=7">
+  <link rel="stylesheet" href="styles.css?v=9">
 </head>
 <body>
   <!-- shared gradients for the airflow "airwaves" — faded at both ends -->
@@ -87,6 +87,30 @@
         <p class="loading">Loading cost&hellip;</p>
       </aside>
     </div>
+
+    <!-- ============ family calendar (F1) ============ -->
+    <section class="calendar-panel" id="calendar" data-feature="calendar" aria-label="Family calendar">
+      <div class="panel-head"><span class="micro" style="color:var(--dim)">Calendar</span></div>
+      <div class="calendar-body" id="calendar-body"><p class="loading">Loading calendar&hellip;</p></div>
+    </section>
+
+    <!-- ============ family reminders (F2) ============ -->
+    <section class="reminders-panel" id="reminders" data-feature="reminders" aria-label="Family reminders">
+      <div class="panel-head"><span class="micro" style="color:var(--dim)">Reminders</span></div>
+      <div class="reminders-body" id="reminders-body"><p class="loading">Loading reminders&hellip;</p></div>
+    </section>
+
+    <!-- ============ focus list / filtered to-dos (F7) ============ -->
+    <section class="focus-panel" id="filtered_todos" data-feature="filtered_todos" aria-label="Focus list">
+      <div class="panel-head"><span class="micro" style="color:var(--dim)">Focus</span>
+        <select class="focus-mode" id="focus-mode" aria-label="Filter">
+          <option value="all">All open</option>
+          <option value="due_soon">Due soon</option>
+          <option value="high">High priority</option>
+        </select>
+      </div>
+      <div class="focus-body" id="focus-body"><p class="loading">Loading&hellip;</p></div>
+    </section>
 
     <!-- ============ humidity (full width — the headline metric) ============ -->
     <section class="humidity-panel" id="humidity" data-feature="humidity" aria-label="Humidity and dew point">
@@ -196,6 +220,6 @@
   </div>
 
   <script src="common.js?v=4"></script>
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>
