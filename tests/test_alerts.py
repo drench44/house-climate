@@ -317,6 +317,32 @@ def test_crawl_saturated_disabled_when_misconfigured_below_mold():
     assert any(a.key == "crawl_mold" for a in out)
 
 
+def test_crawl_saturated_disabled_when_equal_to_mold_bar():
+    # The guard is strict `sat_pct > mold_pct`. With the bars EQUAL there is no
+    # sensible escalation band, so saturated must stay disabled and mold fire —
+    # pins the boundary against a silent flip to `>=` (which would fire
+    # "near saturation" at the 75% mold level).
+    import dataclasses
+    cfg = dataclasses.replace(CFG, alerts={**CFG.alerts,
+                                           "crawl_saturated_pct": 75,
+                                           "crawl_mold_pct": 75})
+    crawl = [_crawl(m, 95) for m in range(0, 200, 5)]   # well above both bars
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], cfg, 0, now=now, crawl_rows=crawl)
+    assert not any(a.key == "crawl_saturated" for a in out)
+    assert any(a.key == "crawl_mold" for a in out)
+
+
+def test_crawl_mold_fires_at_exactly_75():
+    # `_mold` is `>= mold_pct` (75); exactly the bar must fire. Pins the
+    # inclusive lower boundary against a silent flip to `> mold_pct`, mirroring
+    # the saturated inclusive-boundary test at 90.
+    crawl = [_crawl(m, 75) for m in range(0, 200, 5)]
+    now = crawl[-1]["ts"]
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert any(a.key == "crawl_mold" for a in out)
+
+
 def test_crawl_saturated_boundary_at_exactly_90():
     # sat_pct default is 90 and the test is `>= sat_pct` -- exactly 90 must
     # escalate (and suppress mold). Pins the inclusive boundary against a
