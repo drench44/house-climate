@@ -50,6 +50,48 @@ def test_day_is_complete_empty_is_false():
     assert api._day_is_complete([], TZ) is False
 
 
+# --- _extremes / _coverage: pure outdoor-history helpers, DB-free. ---
+
+def _wxrow(minute, **fields):
+    return {"ts": datetime(2026, 8, 12, 0, minute, tzinfo=timezone.utc), **fields}
+
+
+def test_extremes_returns_high_and_low_with_timestamps():
+    rows = [_wxrow(0, t=60.0), _wxrow(3, t=72.0), _wxrow(6, t=55.0)]
+    ex = api._extremes(rows, "t")
+    assert ex["high"]["v"] == 72.0
+    assert ex["high"]["ts"] == "2026-08-12T00:03:00+00:00"
+    assert ex["low"]["v"] == 55.0
+    assert ex["low"]["ts"] == "2026-08-12T00:06:00+00:00"
+
+
+def test_extremes_ignores_rows_missing_the_field():
+    rows = [_wxrow(0, t=None), _wxrow(3, t=64.0), _wxrow(6)]
+    ex = api._extremes(rows, "t")
+    assert ex["high"]["v"] == 64.0 and ex["low"]["v"] == 64.0
+
+
+def test_extremes_none_when_no_row_has_the_field():
+    assert api._extremes([_wxrow(0), _wxrow(3, t=None)], "t") is None
+
+
+def test_coverage_full_window_is_one():
+    assert api._coverage(24, 24) == 1.0
+
+
+def test_coverage_partial_window_is_fraction():
+    assert api._coverage(6, 24) == 0.25
+
+
+def test_coverage_clamps_above_one():
+    # More observed buckets than nominal window hours (DST/rounding) -> capped.
+    assert api._coverage(25, 24) == 1.0
+
+
+def test_coverage_zero_window_is_zero():
+    assert api._coverage(0, 0) == 0.0
+
+
 def _seed(conn):
     base = datetime.now(timezone.utc) - timedelta(hours=1)
     for i in range(20):
@@ -80,6 +122,103 @@ def test_history_filters_by_range(conn):
     hist = api.build_history(conn, "dev1", "24h")
     assert len(hist) == 20
     assert hist[0]["outdoor_temp_f"] == 90
+
+
+# --- build_outdoor: outdoor conditions history for decision-making ---
+
+def _seed_outdoor(conn, n=24, step_min=60, temp=lambda i: 60.0 + i,
+                  rh=lambda i: 90.0 - i, dp=lambda i: 55.0 + i * 0.2,
+                  base=None):
+    """Insert `n` readings spaced `step_min` apart carrying outdoor weather.
+    The lambdas let a test shape the outdoor curve to hit specific extremes."""
+    base = base or (datetime.now(timezone.utc) - timedelta(minutes=step_min * (n - 1)))
+    for i in range(n):
+        db.insert_reading(conn, dict(
+            ts=base + timedelta(minutes=step_min * i), device_id="dev1",
+            indoor_temp_f=72, indoor_humidity=48, heat_setpoint_f=68,
+            cool_setpoint_f=72, equipment_status="idle", mode="cool",
+            daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
+            wx_outdoor_temp_f=temp(i), wx_humidity=rh(i), wx_dewpoint_f=dp(i),
+            wx_solar_wm2=400, wx_uv=4, wx_fc_high_f=80, wx_fc_low_f=55,
+            wx_conditions="Overcast", wx_aqi=31, wx_alert_count=0, weather_ok=True))
+
+
+def test_outdoor_unavailable_when_empty(conn):
+    out = api.build_outdoor(conn, "dev1", "24h")
+    assert out["available"] is False
+
+
+def test_outdoor_now_reports_latest_conditions(conn):
+    _seed_outdoor(conn, n=24)
+    out = api.build_outdoor(conn, "dev1", "24h")
+    assert out["available"] is True
+    assert out["range"] == "24h"
+    now = out["now"]
+    assert now["temp_f"] == 83.0        # temp(23) = 60 + 23
+    assert now["rh"] == 67.0            # rh(23)  = 90 - 23
+    assert now["conditions"] == "Overcast"
+    assert now["aqi"] == 31 and now["stale"] is False
+
+
+def test_outdoor_extremes_span_the_window(conn):
+    _seed_outdoor(conn, n=24)
+    out = api.build_outdoor(conn, "dev1", "24h")
+    assert out["temp"]["high"]["v"] == 83.0 and out["temp"]["low"]["v"] == 60.0
+    assert out["rh"]["high"]["v"] == 90.0 and out["rh"]["low"]["v"] == 67.0
+    assert "ts" in out["rh"]["high"]
+
+
+def test_outdoor_series_carries_temp_rh_dp(conn):
+    _seed_outdoor(conn, n=24)
+    out = api.build_outdoor(conn, "dev1", "24h")
+    assert len(out["series"]) >= 1
+    pt = out["series"][0]
+    assert set(pt) == {"ts", "temp_avg", "rh_avg", "dp_avg"}
+    assert pt["temp_avg"] is not None
+
+
+def test_outdoor_coverage_reports_a_gappy_window(conn):
+    # Only 6 hourly readings inside a 24h window -> coverage ~ 6/24, so a caller
+    # never mistakes a quarter-full window for a complete one.
+    _seed_outdoor(conn, n=6, step_min=60)
+    out = api.build_outdoor(conn, "dev1", "24h")
+    assert out["coverage"] <= 0.3
+    assert 0 < out["coverage"]
+
+
+def test_outdoor_stale_when_latest_reading_is_old(conn):
+    base = datetime.now(timezone.utc) - timedelta(hours=6)
+    _seed_outdoor(conn, n=3, step_min=30, base=base)  # newest ~5h old
+    out = api.build_outdoor(conn, "dev1", "24h")
+    assert out["now"]["stale"] is True
+
+
+def test_moisture_delta_series_carries_outdoor_rh(conn):
+    _seed_crawl_and_outdoor(conn)
+    m = api.build_moisture(conn, "dev1", CRAWL_CFG)
+    assert m["available"] is True
+    assert any("outdoor_rh" in pt for pt in m["delta"]["series"])
+    assert any(pt["outdoor_rh"] is not None for pt in m["delta"]["series"])
+
+
+def _seed_crawl_and_outdoor(conn):
+    """Enough paired crawl-sensor + outdoor-weather history for build_moisture
+    to render a delta series (needs the crawl sensor named per CRAWL_CFG, i.e.
+    the outdoor Ecowitt slot 'Crawl Space', plus a downstairs reference)."""
+    base = datetime.now(timezone.utc) - timedelta(days=2)
+    for i in range(48):
+        ts = base + timedelta(hours=i)
+        db.insert_reading(conn, dict(
+            ts=ts, device_id="dev1", indoor_temp_f=72, indoor_humidity=48,
+            heat_setpoint_f=68, cool_setpoint_f=72, equipment_status="idle",
+            mode="cool", daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
+            wx_outdoor_temp_f=68.0, wx_humidity=80.0 + (i % 5), wx_dewpoint_f=62.0,
+            wx_solar_wm2=400, wx_uv=4, wx_fc_high_f=80, wx_fc_low_f=55,
+            wx_conditions="Overcast", wx_aqi=31, wx_alert_count=0, weather_ok=True))
+        db.insert_sensor_reading(conn, "ecowitt_outdoor", ts,
+                                 temp_f=64.0, humidity=78.0, dewpoint_f=57.0)
+        db.insert_sensor_reading(conn, "ecowitt_ch7", ts,
+                                 temp_f=70.0, humidity=55.0, dewpoint_f=53.0)
 
 
 def test_runtime_has_minutes(conn):
