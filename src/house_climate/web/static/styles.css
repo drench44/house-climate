@@ -1189,11 +1189,13 @@ body {
 .chore-task:hover .chore-del { opacity: 1; }
 .chore-del:hover { color: var(--crit); }
 .chores-empty { color: var(--faint); font-size: 14px; }
+
 /* ---- F8: tile reorder controls in the settings panel ---- */
 .settings-row { justify-content: space-between; }
 .settings-check { display: flex; align-items: center; gap: 10px; flex: 1; cursor: pointer; }
 .tile-move { background: none; border: 0; color: var(--faint); font-size: 11px; line-height: 1; cursor: pointer; padding: 2px 3px; }
 .tile-move:hover { color: var(--ink); }
+
 /* ---- F4: family message board ---- */
 .msgboard-panel {
   margin-top: 18px; background: var(--panel); border: 1px solid var(--edge);
@@ -1227,10 +1229,9 @@ body {
 .msg-item:hover .msg-del { opacity: 1; }
 .msg-del:hover { color: var(--crit); }
 .msg-empty { color: var(--faint); font-size: 14px; padding: 6px; }
+
 /* ================= camera snapshot tile (F6) ================= */
 .camera-panel {
-/* ================= photos tile (F5) ================= */
-.media-panel {
   margin-top: 18px;
   border: 1px solid var(--edge);
   border-radius: 18px;
@@ -1268,6 +1269,14 @@ body {
 .camera-empty {
   margin: 0; padding: 28px 0; text-align: center;
   font-size: 13px; color: var(--faint);
+}
+
+/* ================= photos tile (F5) ================= */
+.media-panel {
+  margin-top: 18px;
+  border: 1px solid var(--edge);
+  border-radius: 18px;
+  background: var(--panel);
   padding: 20px 24px 18px;
   animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
   animation-delay: 0.32s;
