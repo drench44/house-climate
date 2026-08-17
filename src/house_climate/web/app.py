@@ -404,6 +404,8 @@ def messages_pin(message_id: int, body: dict):
     if not db.set_message_pinned(_db(), message_id, bool(body.get("pinned"))):
         raise HTTPException(404, "no such message")
     return {"ok": True}
+
+
 @app.get("/api/camera/config")
 def camera_config_get():
     return api.get_camera_config(_db())
@@ -411,7 +413,13 @@ def camera_config_get():
 
 @app.post("/api/camera/config")
 def camera_config_post(body: dict):
-    return api.set_camera_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
+    from fastapi import HTTPException
+    try:
+        return api.set_camera_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
 @app.get("/api/photos/config")
 def photos_config_get():
     """Photos tile source URL (F5). Server-side (kv-backed) so the wall display
@@ -421,7 +429,11 @@ def photos_config_get():
 
 @app.post("/api/photos/config")
 def photos_config_post(body: dict):
-    return api.set_photos_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
+    from fastapi import HTTPException
+    try:
+        return api.set_photos_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N

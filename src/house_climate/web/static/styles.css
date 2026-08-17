@@ -1228,6 +1228,12 @@ body {
 }
 .msg-item:hover .msg-del { opacity: 1; }
 .msg-del:hover { color: var(--crit); }
+.msg-pin {
+  background: none; border: 0; font-size: 13px; line-height: 1; cursor: pointer;
+  padding: 0 3px; opacity: 0; filter: grayscale(1); transition: opacity .15s, filter .15s;
+}
+.msg-item:hover .msg-pin { opacity: .6; }
+.msg-pin.on, .msg-pin:hover { opacity: 1; filter: none; }
 .msg-empty { color: var(--faint); font-size: 14px; padding: 6px; }
 
 /* ================= camera snapshot tile (F6) ================= */
