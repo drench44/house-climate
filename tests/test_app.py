@@ -219,6 +219,43 @@ def test_settings_merge_accumulates_without_clobber(conn):
     assert feats["humidity"] is True
 
 
+def test_settings_merge_survives_concurrent_writers(conn):
+    # The real race the atomic jsonb merge exists to defeat: many writers, each
+    # on its OWN connection, patch a distinct key at the same instant. A Python
+    # read-modify-write would drop most of them (each reads the old value, adds
+    # its key, last write wins); the single-statement `||` merge keeps them all.
+    # Sequential POSTs (the test above) can't catch that regression — this can.
+    import threading
+    import psycopg
+    from house_climate import db as dbm
+
+    keys = [f"k{i}" for i in range(12)]
+    start = threading.Barrier(len(keys))
+    errors = []
+
+    def writer(k):
+        try:
+            c = psycopg.connect(TEST_DSN, autocommit=True)
+            try:
+                start.wait(timeout=10)          # release all writers together
+                dbm.merge_kv_features(c, "concurrency_probe", {k: True})
+            finally:
+                c.close()
+        except Exception as e:                  # pragma: no cover - surfaced via assert
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=writer, args=(k,)) for k in keys]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not errors, errors
+    stored = dbm.kv_get(conn, "concurrency_probe")["value"]["features"]
+    missing = set(keys) - set(stored)
+    assert not missing, f"lost updates under concurrency: {missing}"
+
+
 # --- chores (F3, issue #29) ---
 
 def test_chores_add_toggle_and_week_points(conn):
@@ -323,3 +360,15 @@ def test_photos_config_roundtrip(conn):
 def test_photos_in_feature_registry(conn):
     keys = {f["key"] for f in client.get("/api/settings").json()["features"]}
     assert "photos" in keys
+
+
+def test_media_tiles_reject_non_http_urls(conn):
+    # The camera/photos URL is written verbatim into every viewer's <img src>,
+    # so only http(s) may be stored — a javascript:/file:/data: URL must 422,
+    # not silently reach the wall display. Empty clears the tile (200).
+    for path in ("/api/camera/config", "/api/photos/config"):
+        assert client.post(path, json={"url": "javascript:alert(1)"}).status_code == 422
+        assert client.post(path, json={"url": "file:///etc/passwd"}).status_code == 422
+        assert client.post(path, json={"url": "http://cam.lan/snapshot.jpg"}).status_code == 200
+        assert client.post(path, json={"url": "https://photos.example/album"}).status_code == 200
+        assert client.post(path, json={"url": ""}).status_code == 200

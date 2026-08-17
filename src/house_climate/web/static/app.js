@@ -1460,13 +1460,21 @@ async function refreshMessages() {
       const body = document.createElement('span'); body.className = 'msg-body'; body.textContent = m.body;
       const meta = document.createElement('span'); meta.className = 'msg-meta';
       meta.textContent = (m.author ? m.author + ' · ' : '') + fmtWhen(m.created_at);
+      const pin = document.createElement('button');
+      pin.className = 'msg-pin' + (m.pinned ? ' on' : ''); pin.type = 'button'; pin.textContent = '📌';
+      pin.setAttribute('aria-label', m.pinned ? 'Unpin message' : 'Pin message');
+      pin.setAttribute('aria-pressed', m.pinned ? 'true' : 'false');
+      pin.addEventListener('click', async () => {
+        try { await postJSON('/api/messages/' + m.id + '/pin', { pinned: !m.pinned }); refreshMessages(); }
+        catch (e) { /* best-effort: leave the list as-is */ }
+      });
       const del = document.createElement('button');
       del.className = 'msg-del'; del.type = 'button'; del.textContent = '×';
       del.setAttribute('aria-label', 'Delete message');
       del.addEventListener('click', async () => {
         try { await fetch('/api/messages/' + m.id, { method: 'DELETE' }); refreshMessages(); } catch (e) {}
       });
-      li.append(body, meta, del);
+      li.append(body, meta, pin, del);
       list.append(li);
     }
   } catch (e) { /* best-effort: dashboard still renders */ }
@@ -1499,6 +1507,11 @@ async function refreshCamera() {
         img = document.createElement('img');
         img.className = 'camera-img';
         img.alt = 'camera';
+        // Surface an unreachable/broken source instead of the browser's broken
+        // -image glyph, so a dead camera reads as a clear message on the wall.
+        img.addEventListener('error', () => {
+          body.innerHTML = '<p class="camera-empty">Camera unreachable.</p>';
+        });
         body.innerHTML = '';
         body.append(img);
       }
@@ -1545,6 +1558,10 @@ async function refreshPhoto() {
       if (!img) {
         body.innerHTML = '<img class="media-img" alt="">';
         img = body.querySelector('.media-img');
+        // Surface a broken/unreachable source instead of the browser glyph.
+        img.addEventListener('error', () => {
+          body.innerHTML = '<p class="media-empty">Photo source unreachable.</p>';
+        });
       }
       img.src = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
     } else {

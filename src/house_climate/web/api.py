@@ -1117,6 +1117,20 @@ def build_messages(conn) -> list[dict]:
 _FEATURE_KEYS = {k for k, _ in DASHBOARD_FEATURES}
 
 
+def _clean_media_url(url) -> str:
+    """Normalize an operator-supplied tile image URL. An empty string clears the
+    tile. Only http(s) is permitted: the value is written verbatim into every
+    viewer's <img src>, so schemes like javascript:/data:/file: must never be
+    stored. Raises ValueError on a non-http(s) URL so the endpoint can 422."""
+    u = str(url or "").strip()[:2000]
+    if not u:
+        return ""
+    from urllib.parse import urlparse
+    if urlparse(u).scheme.lower() not in ("http", "https"):
+        raise ValueError("URL must start with http:// or https://")
+    return u
+
+
 def get_camera_config(conn) -> dict:
     kv = db.kv_get(conn, "camera_url")
     url = kv["value"].get("url", "") if kv and isinstance(kv["value"], dict) else ""
@@ -1124,7 +1138,7 @@ def get_camera_config(conn) -> dict:
 
 
 def set_camera_config(conn, url) -> dict:
-    db.kv_set(conn, "camera_url", {"url": str(url or "").strip()[:2000]})
+    db.kv_set(conn, "camera_url", {"url": _clean_media_url(url)})
     return get_camera_config(conn)
 
 
@@ -1187,5 +1201,5 @@ def get_photos_config(conn) -> dict:
 
 
 def set_photos_config(conn, url) -> dict:
-    db.kv_set(conn, "photos_url", {"url": str(url or "").strip()[:2000]})
+    db.kv_set(conn, "photos_url", {"url": _clean_media_url(url)})
     return get_photos_config(conn)
