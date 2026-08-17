@@ -168,7 +168,7 @@ def test_read_endpoints_smoke_on_empty_db(conn):
     # with no device/readings — exercises the route wiring + _device fallback.
     for path in ["/api/now", "/api/history", "/api/runtime", "/api/cost",
                  "/api/cost/summary", "/api/forecast", "/api/precool", "/api/humidity",
-                 "/api/rooms", "/api/crawl", "/api/moisture", "/api/air",
+                 "/api/rooms", "/api/crawl", "/api/outdoor", "/api/moisture", "/api/air",
                  "/api/thermal", "/api/timeline", "/api/health"]:
         r = client.get(path)
         assert r.status_code == 200, f"{path}: {r.status_code} {r.text}"

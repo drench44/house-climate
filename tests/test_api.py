@@ -1204,7 +1204,7 @@ def test_moisture_payload_shape(conn):
     assert 0 < m["delta"]["now"] < 5
     assert len(m["delta"]["series"]) > 0
     s = m["delta"]["series"][-1]
-    assert set(s) == {"ts", "crawl", "indoor", "outdoor", "delta"}
+    assert set(s) == {"ts", "crawl", "indoor", "outdoor", "outdoor_rh", "delta"}
     # thresholds: crawl RH 70-74 -> h60 accumulates, h80 stays 0
     wk = m["thresholds"]["weeks"]
     assert wk and wk[-1]["h60"] > 0 and wk[-1]["h80"] == 0
