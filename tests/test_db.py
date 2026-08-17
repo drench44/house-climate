@@ -108,6 +108,27 @@ def test_outdoor_hourly_includes_bucket_when_dewpoint_null_but_temp_present(conn
     assert rows[0]["temp"] == 61.0 and rows[0]["rh"] == 78.0 and rows[0]["dp"] is None
 
 
+def test_first_reading_ts_returns_earliest_or_none(conn):
+    assert db.first_reading_ts(conn, "dev1") is None          # never reported
+    early = datetime(2026, 8, 10, 3, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _reading(ts=early + timedelta(hours=5)))
+    db.insert_reading(conn, _reading(ts=early))
+    assert db.first_reading_ts(conn, "dev1") == early         # min, not insert order
+
+
+def test_outdoor_series_buckets_by_bucket_seconds(conn):
+    # The /api/outdoor chart sizes buckets by range so 30d isn't 720 points:
+    # two readings 20 min apart fall in one 3h bucket and are averaged.
+    h = datetime(2026, 8, 12, 6, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _reading(ts=h + timedelta(minutes=10),
+                                     wx_outdoor_temp_f=60.0, wx_humidity=80.0, wx_dewpoint_f=54.0))
+    db.insert_reading(conn, _reading(ts=h + timedelta(minutes=30),
+                                     wx_outdoor_temp_f=64.0, wx_humidity=70.0, wx_dewpoint_f=56.0))
+    rows = db.outdoor_series(conn, "dev1", datetime(2026, 8, 12, tzinfo=timezone.utc), 3 * 3600)
+    assert len(rows) == 1
+    assert rows[0]["temp"] == 62.0 and rows[0]["rh"] == 75.0 and rows[0]["dp"] == 55.0
+
+
 def test_outdoor_hourly_includes_bucket_when_only_rh_present(conn):
     # Exercises the wx_humidity arm of the widened OR independently: an
     # RH-only feed still surfaces the hour, with temp and dp null.

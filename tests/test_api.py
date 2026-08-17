@@ -1,5 +1,6 @@
 import calendar
 import dataclasses
+import math
 import pytest
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -205,6 +206,71 @@ def test_outdoor_coverage_isolates_a_sparse_field(conn):
     out = api.build_outdoor(conn, "dev1", "24h")
     assert out["coverage"]["temp"] < out["coverage"]["rh"]
     assert out["coverage"]["temp"] == round(1 / 24, 3)
+
+
+def test_outdoor_data_start_marks_young_history_not_a_gap(conn):
+    # Only 6h of history in a 24h window: coverage < 1, but data_start sits
+    # INSIDE the window -> the deficit is youth, and a caller can tell.
+    now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    _seed_outdoor(conn, n=6, step_min=60, base=now - timedelta(hours=6))
+    out = api.build_outdoor(conn, "dev1", "24h", now=now)
+    assert out["coverage"]["rh"] < 1.0
+    ds = datetime.fromisoformat(out["data_start"])
+    assert ds == now - timedelta(hours=6)          # exact device-earliest reading
+    assert ds >= now - timedelta(hours=24)         # inside the window -> young
+
+
+def test_outdoor_data_start_predates_window_when_gap_is_real(conn):
+    # Same low coverage, but the device has data from before the window and the
+    # feed only returned for the last 6h -> data_start predates the window, so
+    # the deficit reads as a real feed gap rather than youth.
+    now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _reading_row(now - timedelta(hours=48)))
+    _seed_outdoor(conn, n=6, step_min=60, base=now - timedelta(hours=6))
+    out = api.build_outdoor(conn, "dev1", "24h", now=now)
+    assert out["coverage"]["rh"] < 1.0
+    ds = datetime.fromisoformat(out["data_start"])
+    assert ds < now - timedelta(hours=24)          # predates window -> real gap
+
+
+def _reading_row(ts):
+    return dict(ts=ts, device_id="dev1", indoor_temp_f=72, indoor_humidity=48,
+                heat_setpoint_f=68, cool_setpoint_f=72, equipment_status="idle",
+                mode="cool", daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
+                wx_outdoor_temp_f=60.0, wx_humidity=70.0, wx_dewpoint_f=50.0,
+                wx_solar_wm2=400, wx_uv=4, wx_fc_high_f=80, wx_fc_low_f=55,
+                wx_conditions="Overcast", wx_aqi=31, wx_alert_count=0, weather_ok=True)
+
+
+def test_outdoor_hourly_feeds_attribution_ignoring_dp_null_hours(conn):
+    # Regression lock for the widened WHERE: outdoor_hourly now surfaces hours
+    # that report temp/RH but no dew point. Attribution must ignore those (pair
+    # only dp-present hours), not crash or skew -- the one backward-compat risk
+    # of widening the query, exercised through the real DB path end to end.
+    from house_climate.analytics import moisture
+    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    since = now - timedelta(days=7)
+    for i in range(120):                    # crawl tracks outdoor dew point
+        ts = now - timedelta(hours=120 - i)
+        odp = 50 + 8 * math.sin(i / 12)
+        db.insert_reading(conn, dict(
+            ts=ts, device_id="dev1", indoor_temp_f=72, indoor_humidity=48,
+            heat_setpoint_f=68, cool_setpoint_f=72, equipment_status="idle",
+            mode="cool", daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
+            wx_outdoor_temp_f=60.0, wx_humidity=70.0,
+            wx_dewpoint_f=(None if i % 6 == 0 else odp),  # 20 dp-null hours
+            wx_solar_wm2=400, wx_uv=4, wx_fc_high_f=80, wx_fc_low_f=55,
+            wx_conditions="Overcast", wx_aqi=31, wx_alert_count=0, weather_ok=True))
+        db.insert_sensor_reading(conn, "ecowitt_crawl", ts,
+                                 temp_f=64.0, humidity=80.0,
+                                 dewpoint_f=55 + 8 * math.sin(i / 12))
+    outdoor = db.outdoor_hourly(conn, "dev1", since)
+    crawl = db.sensor_hourly_dp(conn, "ecowitt_crawl", since)
+    assert any(h["dp"] is None and h["temp"] is not None for h in outdoor)
+    w = moisture.attribution_window(crawl, outdoor, now, 7, moisture.ATTR_MIN_HOURS_7D)
+    assert w["ready"] is True          # 100 dp-present pairs >= 96 min
+    assert w["n"] == 100               # the 20 dp-null hours were excluded, not counted
+    assert w["r"] > 0.9                # correlation preserved, not skewed by nulls
 
 
 def test_outdoor_range_7d_selected(conn):

@@ -544,13 +544,22 @@ _CRAWL_TREND_WINDOW_H = 3   # "rising/falling" compares the last 3h vs the 3h be
 # serving nulls under a reassuring stale:false.
 _OUTDOOR_STALE_S = 600
 
+# Display bucket per range, mirroring _CRAWL_BUCKETS_S: keep the /api/outdoor
+# chart ~100-250 points at any range instead of 720 raw hourly points at 30d.
+# Coverage still counts fixed hourly buckets (outdoor_hourly), independent of
+# how coarsely the chart is drawn.
+_OUTDOOR_BUCKETS_S = {"24h": 900, "7d": 3600, "30d": 3 * 3600}
+
 
 def build_outdoor(conn, device_id, range_key, now=None) -> dict:
     """Outdoor conditions over the trailing window — the counterpart to
     build_crawl for the air the crawl trades moisture with. Current reading,
-    exact temp/RH/dew-point extremes, an hourly series, and a `coverage`
-    fraction that flags how much of the window the weather feed actually
-    covered so a decision isn't made on a half-empty average."""
+    exact temp/RH/dew-point extremes, a range-bucketed series, and a per-field
+    `coverage` fraction (fraction of the window's hours that carry each field).
+
+    Coverage is a full-window fraction, so read it alongside `data_start`: when
+    data_start falls inside the window, a coverage below 1 is young history, not
+    a flaky feed; when data_start predates the window, it is real feed gaps."""
     now = now or datetime.now(timezone.utc)
     range_key = range_key if range_key in _RANGES else "24h"
     since = now - _RANGES[range_key]
@@ -562,10 +571,11 @@ def build_outdoor(conn, device_id, range_key, now=None) -> dict:
     if not wx_rows:
         return {"available": False, "reason": "no_data"}
 
-    hourly = db.outdoor_hourly(conn, device_id, since)
     series = [{"ts": h["bucket"].isoformat(),
                "temp_avg": _round1(h["temp"]), "rh_avg": _round1(h["rh"]),
-               "dp_avg": _round1(h["dp"])} for h in hourly]
+               "dp_avg": _round1(h["dp"])}
+              for h in db.outdoor_series(conn, device_id, since,
+                                         _OUTDOOR_BUCKETS_S[range_key])]
 
     # `now` and its staleness track the last row that actually carried weather,
     # so a weather-feed outage (poller alive, wx_* null) reads as stale rather
@@ -575,9 +585,11 @@ def build_outdoor(conn, device_id, range_key, now=None) -> dict:
     aqi, aqi_source = resolve_outdoor_aqi(conn, latest.get("wx_aqi"), now)
     window_h = _RANGES[range_key].total_seconds() / 3600
 
-    # Coverage is per field, not a single any-field scalar: a feed that reports
-    # RH hourly but temp only sporadically must not let a full RH column hide a
-    # half-empty temp column behind one reassuring number.
+    # Coverage counts fixed hourly buckets, per field — not a single any-field
+    # scalar — so a feed that reports RH hourly but temp only sporadically can't
+    # hide a half-empty temp column behind one reassuring number.
+    hourly = db.outdoor_hourly(conn, device_id, since)
+
     def _field_coverage(field):
         return _coverage(sum(1 for h in hourly if h[field] is not None), window_h)
 
@@ -601,7 +613,7 @@ def build_outdoor(conn, device_id, range_key, now=None) -> dict:
         "coverage": {"temp": _field_coverage("temp"),
                      "rh": _field_coverage("rh"),
                      "dew": _field_coverage("dp")},
-        "data_start": wx_rows[0]["ts"].isoformat(),
+        "data_start": (db.first_reading_ts(conn, device_id) or wx_rows[0]["ts"]).isoformat(),
         "series": series,
     }
 
