@@ -506,17 +506,46 @@ def sensor_hourly_dp(conn, sensor_id, since_ts) -> list[dict]:
     return [{"bucket": r[0], "dp": r[1]} for r in cur.fetchall()]
 
 
-def outdoor_hourly_dp(conn, device_id, since_ts) -> list[dict]:
-    """Hourly mean OUTDOOR dew point from the weather feed on the readings
-    table, for the crawl-vs-outdoor source-attribution comparison."""
+def outdoor_series(conn, device_id, since_ts, bucket_s) -> list[dict]:
+    """Bucketed mean OUTDOOR temp / RH / dew point from the weather feed on the
+    readings table. A bucket appears when the feed reported ANY of the three in
+    it; a field is null when the feed lacked it (avg() skips nulls). `bucket_s`
+    sizes the bucket so the /api/outdoor chart stays bounded at any range, the
+    same way sensor_series does for the crawl chart."""
     cur = conn.execute(
-        "SELECT time_bucket(interval '1 hour', ts) AS bucket,"
+        "SELECT time_bucket(%s * interval '1 second', ts) AS bucket,"
+        " avg(wx_outdoor_temp_f) AS temp, avg(wx_humidity) AS rh,"
         " avg(wx_dewpoint_f) AS dp"
         " FROM readings WHERE device_id=%s AND ts >= %s"
-        "   AND wx_dewpoint_f IS NOT NULL"
+        "   AND (wx_outdoor_temp_f IS NOT NULL OR wx_humidity IS NOT NULL"
+        "        OR wx_dewpoint_f IS NOT NULL)"
         " GROUP BY bucket ORDER BY bucket",
-        (device_id, since_ts))
-    return [{"bucket": r[0], "dp": r[1]} for r in cur.fetchall()]
+        (bucket_s, device_id, since_ts))
+    cols = [d.name for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def outdoor_hourly(conn, device_id, since_ts) -> list[dict]:
+    """Hourly outdoor temp / RH / dew point — the fixed-hour unit the
+    crawl-vs-outdoor attribution (which reads `dp`) and the /api/outdoor
+    coverage counter both work in, so those never drift from the widened
+    query. The display series uses outdoor_series with a range-sized bucket."""
+    return outdoor_series(conn, device_id, since_ts, 3600)
+
+
+def first_weather_ts(conn, device_id):
+    """Timestamp of a device's earliest reading that CARRIED weather — when the
+    weather feed began producing data — or None if it never has. /api/outdoor's
+    data_start uses this (not the device's first reading of any kind) so that a
+    low coverage reads correctly: a young feed when data_start sits inside the
+    window, real gaps when it predates it. An old device that only recently
+    gained a weather feed must not look like a gappy one — hence the wx filter,
+    which matches outdoor_series' own 'any wx field present' rule."""
+    row = conn.execute(
+        "SELECT min(ts) FROM readings WHERE device_id=%s"
+        "   AND (wx_outdoor_temp_f IS NOT NULL OR wx_humidity IS NOT NULL"
+        "        OR wx_dewpoint_f IS NOT NULL)", (device_id,)).fetchone()
+    return row[0]
 
 
 def sensor_daily_stats(conn, sensor_id, tz, since_ts=None) -> list[dict]:

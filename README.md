@@ -125,8 +125,12 @@ Point `weather_url` at anything serving a `wx.json` snapshot (outdoor temp,
 solar, AQI, and friends — see `tests/fixtures/wx.json` for the full shape).
 With one configured, the poller snapshots outdoor conditions alongside every
 reading, unlocking the weather-correlated analytics (runtime vs. outdoor
-temp, solar gain, AQI). We feed it from a self-hosted almanac dashboard
-built on
+temp, solar gain, AQI). Because every snapshot is kept, outdoor temperature,
+humidity, and dew point are queryable over time (`/api/outdoor`, ranges
+`24h`/`7d`/`30d`) with a per-field coverage figure that flags feed gaps — and
+the crawl-space view compares the crawl against that same outdoor dew point
+to decide whether venting would dry the crawl or wet it. We feed it from a
+self-hosted almanac dashboard built on
 [**WeatherFlow_PiConsole**](https://github.com/peted-davis/WeatherFlow_PiConsole)
 with a small Open-Meteo adapter behind it. It's optional — everything else
 works without a weather source.
