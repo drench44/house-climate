@@ -1485,6 +1485,50 @@ function initChores() {
     } catch (err) {}
   });
   refreshChores();
+/* F4: family message board                                               */
+/* ---------------------------------------------------------------------- */
+function fmtWhen(iso) {
+  try {
+    return new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  } catch (e) { return ''; }
+}
+
+async function refreshMessages() {
+  const list = document.getElementById('msg-list');
+  if (!list) return;
+  try {
+    const msgs = await j('/api/messages');
+    list.innerHTML = '';
+    if (!msgs.length) { list.innerHTML = '<li class="msg-empty">No messages yet.</li>'; return; }
+    for (const m of msgs) {
+      const li = document.createElement('li');
+      li.className = 'msg-item' + (m.pinned ? ' pinned' : '');
+      const body = document.createElement('span'); body.className = 'msg-body'; body.textContent = m.body;
+      const meta = document.createElement('span'); meta.className = 'msg-meta';
+      meta.textContent = (m.author ? m.author + ' · ' : '') + fmtWhen(m.created_at);
+      const del = document.createElement('button');
+      del.className = 'msg-del'; del.type = 'button'; del.textContent = '×';
+      del.setAttribute('aria-label', 'Delete message');
+      del.addEventListener('click', async () => {
+        try { await fetch('/api/messages/' + m.id, { method: 'DELETE' }); refreshMessages(); } catch (e) {}
+      });
+      li.append(body, meta, del);
+      list.append(li);
+    }
+  } catch (e) { /* best-effort: dashboard still renders */ }
+}
+
+function initMessageBoard() {
+  const form = document.getElementById('msg-compose');
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = document.getElementById('msg-input');
+    const text = input.value.trim();
+    if (!text) return;
+    try { await postJSON('/api/messages', { body: text }); input.value = ''; refreshMessages(); } catch (err) {}
+  });
+  refreshMessages();
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1496,8 +1540,10 @@ initRibbonHover();
 initCrawlHover();
 initSettings();
 initChores();
+initMessageBoard();
 tickClock();
 setInterval(tickClock, 1000);
 refresh();
 setInterval(refresh, REFRESH_MS);
 setInterval(refreshChores, REFRESH_MS);
+setInterval(refreshMessages, REFRESH_MS);

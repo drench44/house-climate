@@ -1088,6 +1088,7 @@ DASHBOARD_FEATURES = [
     ("health", "System health"),
     ("learning", "Learning"),
     ("chores", "Chores"),
+    ("messageboard", "Message board"),
 ]
 
 
@@ -1104,6 +1105,13 @@ def build_chores(conn, cfg) -> dict:
         people.setdefault(person, {"person": person, "tasks": [], "points_week": 0})["points_week"] = pts
     return {"people": sorted(people.values(), key=lambda x: x["person"]),
             "week_start": week_start.isoformat()}
+
+
+def build_messages(conn) -> list[dict]:
+    return [{**m, "created_at": m["created_at"].isoformat()}
+            for m in db.list_messages(conn)]
+
+
 _FEATURE_KEYS = {k for k, _ in DASHBOARD_FEATURES}
 
 

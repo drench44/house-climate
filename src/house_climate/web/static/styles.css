@@ -1194,3 +1194,36 @@ body {
 .settings-check { display: flex; align-items: center; gap: 10px; flex: 1; cursor: pointer; }
 .tile-move { background: none; border: 0; color: var(--faint); font-size: 11px; line-height: 1; cursor: pointer; padding: 2px 3px; }
 .tile-move:hover { color: var(--ink); }
+/* ---- F4: family message board ---- */
+.msgboard-panel {
+  margin-top: 18px; background: var(--panel); border: 1px solid var(--edge);
+  border-radius: 16px; padding: 18px 20px;
+}
+.msg-compose { display: flex; gap: 10px; margin: 6px 0 12px; }
+.msg-compose input {
+  flex: 1; background: var(--void-top); border: 1px solid var(--edge-strong);
+  border-radius: 9px; padding: 9px 12px; color: var(--ink); font: inherit; font-size: 14px;
+}
+.msg-compose input::placeholder { color: var(--faint); }
+.msg-compose input:focus { outline: none; border-color: var(--mint); }
+.msg-compose button {
+  background: var(--mint-soft); border: 1px solid var(--mint); color: var(--mint);
+  border-radius: 9px; padding: 0 16px; font: inherit; font-size: 14px; cursor: pointer;
+}
+.msg-compose button:hover { filter: brightness(1.15); }
+.msg-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.msg-item {
+  display: grid; grid-template-columns: 1fr auto auto; align-items: baseline; gap: 12px;
+  padding: 9px 6px; border-radius: 8px; border-top: 1px solid var(--edge);
+}
+.msg-item:first-child { border-top: 0; }
+.msg-item.pinned { background: var(--warn-soft); }
+.msg-body { color: var(--ink); font-size: 15px; overflow-wrap: anywhere; }
+.msg-meta { color: var(--faint); font-size: 12px; white-space: nowrap; }
+.msg-del {
+  background: none; border: 0; color: var(--faint); font-size: 17px; line-height: 1;
+  cursor: pointer; padding: 0 4px; opacity: 0; transition: opacity .15s, color .15s;
+}
+.msg-item:hover .msg-del { opacity: 1; }
+.msg-del:hover { color: var(--crit); }
+.msg-empty { color: var(--faint); font-size: 14px; padding: 6px; }

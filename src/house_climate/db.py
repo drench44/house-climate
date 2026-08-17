@@ -111,6 +111,15 @@ def ensure_app_schema(conn) -> None:
                done_on date NOT NULL,
                UNIQUE (task_id, done_on)
            )""")
+    # Family message board (F4): short shared notes on the wall display.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS messages (
+               id         serial PRIMARY KEY,
+               author     text,
+               body       text NOT NULL,
+               pinned     boolean NOT NULL DEFAULT false,
+               created_at timestamptz NOT NULL DEFAULT now()
+           )""")
     ensure_aggregates(conn)
 
 
@@ -200,6 +209,35 @@ def chores_overview(conn, today, week_start) -> dict:
         (week_start,))
     week_points = {r[0]: int(r[1]) for r in cur.fetchall()}
     return {"tasks": tasks, "week_points": week_points}
+
+
+def add_message(conn, body, author=None):
+    cur = conn.execute(
+        "INSERT INTO messages (author, body) VALUES (%s, %s) RETURNING id",
+        (author, body))
+    return cur.fetchone()[0]
+
+
+def list_messages(conn, limit=20) -> list[dict]:
+    """Newest first, pinned messages always on top."""
+    cur = conn.execute(
+        "SELECT id, author, body, pinned, created_at FROM messages"
+        " ORDER BY pinned DESC, created_at DESC LIMIT %s", (limit,))
+    return [{"id": r[0], "author": r[1], "body": r[2], "pinned": r[3],
+             "created_at": r[4]} for r in cur.fetchall()]
+
+
+def delete_message(conn, message_id) -> bool:
+    cur = conn.execute(
+        "DELETE FROM messages WHERE id=%s RETURNING id", (message_id,))
+    return cur.fetchone() is not None
+
+
+def set_message_pinned(conn, message_id, pinned) -> bool:
+    cur = conn.execute(
+        "UPDATE messages SET pinned=%s WHERE id=%s RETURNING id",
+        (bool(pinned), message_id))
+    return cur.fetchone() is not None
 
 
 def record_filter_change(conn, device_id, changed_at=None, note=None):
