@@ -34,6 +34,12 @@ class CalDAVError(Exception):
     pass
 
 
+class CalDAVAuthError(CalDAVError):
+    """A 401/403 from iCloud — bad/expired app-specific password. Distinct so the
+    sync fallback re-raises it instead of masking it as 'sync unavailable'."""
+    pass
+
+
 @dataclass
 class Collection:
     url: str
@@ -68,7 +74,9 @@ class CalDAVClient:
         if url.startswith("/"):
             url = self.base_url + url
         resp = self.session.request(method, url, data=body, headers=h, timeout=30)
-        if resp.status_code >= 500 or resp.status_code in (401, 403):
+        if resp.status_code in (401, 403):
+            raise CalDAVAuthError(f"{method} {url} -> HTTP {resp.status_code}")
+        if resp.status_code >= 500:
             raise CalDAVError(f"{method} {url} -> HTTP {resp.status_code}")
         return resp
 
@@ -141,6 +149,12 @@ class CalDAVClient:
         (all current hrefs reported as changed, so the caller re-fetches)."""
         try:
             return self._sync_collection(collection_url, sync_token)
+        except CalDAVAuthError:
+            # Bad/expired credentials are a real, actionable failure — don't
+            # bury them under the "server lacks sync-collection" fallback (which
+            # would just fail again anyway). Surface so the tile can go stale
+            # loudly rather than silently.
+            raise
         except Exception as e:
             log.info("sync-collection unavailable (%s); CTag fallback", e)
             return self._ctag_listing(collection_url)
@@ -208,11 +222,20 @@ class CalDAVClient:
         if if_none_match:
             headers["If-None-Match"] = if_none_match
         resp = self._request("PUT", url, body=ics.encode("utf-8"), headers=headers)
+        # A write must be affirmatively accepted. A 412 (stale If-Match), 409 or
+        # 404 is a FAILED write, not a success — _request only raises on 401/403/
+        # 5xx, so guard the write range here or the caller treats a rejection as
+        # done and corrupts its cache.
+        if not 200 <= resp.status_code < 300:
+            raise CalDAVError(f"PUT {url} -> HTTP {resp.status_code}")
         return resp.status_code, resp.headers.get("ETag")
 
     def delete(self, url, *, if_match=None):
         headers = {"If-Match": if_match} if if_match else None
-        return self._request("DELETE", url, headers=headers).status_code
+        resp = self._request("DELETE", url, headers=headers)
+        if not 200 <= resp.status_code < 300:
+            raise CalDAVError(f"DELETE {url} -> HTTP {resp.status_code}")
+        return resp.status_code
 
 
 # -- iCalendar parsing (icalendar lib) -------------------------------------
@@ -229,7 +252,13 @@ def _to_utc(v):
             v = v.replace(tzinfo=_tz.utc)
         return v.astimezone(_tz.utc).isoformat(), False
     if isinstance(v, date):
-        return v.isoformat(), True
+        # All-day event: anchor at NOON UTC, not midnight. start_utc is a
+        # timestamptz; a bare date lands as 00:00Z, and the dashboard's
+        # .astimezone(local) then rolls it back to the PREVIOUS day for any
+        # timezone behind UTC. Noon UTC keeps the calendar day correct for
+        # every real display zone (±12h). all_day=True lets the UI format it
+        # as a date and ignore the placeholder time.
+        return datetime(v.year, v.month, v.day, 12, 0, tzinfo=_tz.utc).isoformat(), True
     return str(v), False
 
 
@@ -365,10 +394,13 @@ def toggle_todo(conn, client, href, completed: bool) -> bool:
     new_ics = set_todo_completed(td["raw_ics"], completed)
     new_etag = None
     if client is not None:
-        try:
-            _status, new_etag = client.put(td["href"], new_ics, if_match=td.get("etag"))
-        except Exception:
-            log.exception("todo write-back failed; cache updated optimistically")
+        # Write to iCloud FIRST and only touch the local cache if the server
+        # accepted it. A rejected write (stale If-Match/412, auth, network) must
+        # NOT leave the cache asserting a state iCloud doesn't have: the server
+        # ETag never changed, so a later sync won't see it as changed and the
+        # lie would never self-correct. Propagate so the endpoint can report it
+        # and the UI roll its optimistic checkbox back.
+        _status, new_etag = client.put(td["href"], new_ics, if_match=td.get("etag"))
     db.set_todo_status(conn, href, "COMPLETED" if completed else "NEEDS-ACTION",
                        new_ics, new_etag)
     return True
