@@ -434,6 +434,42 @@ def photos_config_post(body: dict):
         return api.set_photos_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
     except ValueError as e:
         raise HTTPException(422, str(e))
+@app.get("/api/calendar")
+def calendar_get():
+    """Family calendar agenda (F1) from the local CalDAV cache."""
+    return api.build_calendar(_db(), cfg)
+
+
+@app.get("/api/reminders")
+def reminders_get():
+    """Family reminders (F2) from the local VTODO cache."""
+    return api.build_reminders(_db())
+
+
+@app.get("/api/todos/filtered")
+def todos_filtered_get():
+    """Focus list (F7): a filtered subset of the reminders cache."""
+    return api.build_filtered_todos(_db())
+
+
+@app.post("/api/todos/filter")
+def todos_filter_set(body: dict):
+    mode = body.get("mode", "all") if isinstance(body, dict) else "all"
+    return api.set_todos_filter(_db(), mode)
+
+
+@app.post("/api/reminders/toggle")
+def reminders_toggle(body: dict):
+    from fastapi import HTTPException
+    from .. import caldav
+    href = body.get("href") if isinstance(body, dict) else None
+    if not href:
+        raise HTTPException(422, 'body must be {"href": "...", "done": true|false}')
+    done = bool(body.get("done"))
+    client = caldav.client_from_env(os.environ)   # None -> cache-only (mock)
+    if not caldav.toggle_todo(_db(), client, href, done):
+        raise HTTPException(404, "no such reminder")
+    return {"href": href, "done": done}
 
 
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
@@ -542,3 +578,32 @@ def _supervised_alert_loop(cfg, secrets):
 
 
 threading.Thread(target=_supervised_alert_loop, args=(cfg, secrets), daemon=True).start()
+# alert evaluator wired in Task 11
+threading.Thread(target=alert_loop, args=(cfg, secrets), daemon=True).start()
+
+
+def _caldav_loop():
+    """Poll the bot iCloud account and reconcile the calendar/reminders cache
+    (F1/F2). Inert (just sleeps) until ICLOUD_EMAIL + ICLOUD_APP_PASSWORD are
+    set — so mock-only until the app-specific password is supplied. Uses its own
+    DB connection so it never contends with request handlers on the module one."""
+    import logging
+    import time as _t
+    from .. import caldav
+    log = logging.getLogger("house_climate.caldav")
+    c = None
+    while True:
+        try:
+            client = caldav.client_from_env(os.environ)
+            if client is not None:
+                if c is None or c.closed:
+                    c = db.connect(secrets.db_dsn)
+                caldav.sync_events(c, client)
+                caldav.sync_todos(c, client)
+        except Exception:
+            log.exception("caldav sync failed")
+            c = None
+        _t.sleep(int(os.environ.get("CALDAV_SYNC_INTERVAL_S", "300")))
+
+
+threading.Thread(target=_caldav_loop, daemon=True).start()
