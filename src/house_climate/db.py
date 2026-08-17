@@ -506,17 +506,23 @@ def sensor_hourly_dp(conn, sensor_id, since_ts) -> list[dict]:
     return [{"bucket": r[0], "dp": r[1]} for r in cur.fetchall()]
 
 
-def outdoor_hourly_dp(conn, device_id, since_ts) -> list[dict]:
-    """Hourly mean OUTDOOR dew point from the weather feed on the readings
-    table, for the crawl-vs-outdoor source-attribution comparison."""
+def outdoor_hourly(conn, device_id, since_ts) -> list[dict]:
+    """Hourly mean OUTDOOR temp / RH / dew point from the weather feed on the
+    readings table. A bucket appears when the feed reported ANY of the three
+    that hour; a field is null when the feed lacked it (avg() skips nulls). One
+    query feeds both the crawl-vs-outdoor attribution (which reads `dp`) and the
+    /api/outdoor series — so the two never diverge."""
     cur = conn.execute(
         "SELECT time_bucket(interval '1 hour', ts) AS bucket,"
+        " avg(wx_outdoor_temp_f) AS temp, avg(wx_humidity) AS rh,"
         " avg(wx_dewpoint_f) AS dp"
         " FROM readings WHERE device_id=%s AND ts >= %s"
-        "   AND wx_dewpoint_f IS NOT NULL"
+        "   AND (wx_outdoor_temp_f IS NOT NULL OR wx_humidity IS NOT NULL"
+        "        OR wx_dewpoint_f IS NOT NULL)"
         " GROUP BY bucket ORDER BY bucket",
         (device_id, since_ts))
-    return [{"bucket": r[0], "dp": r[1]} for r in cur.fetchall()]
+    cols = [d.name for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
 def sensor_daily_stats(conn, sensor_id, tz, since_ts=None) -> list[dict]:

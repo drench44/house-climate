@@ -174,6 +174,12 @@ def crawl_ep(range: str = "24h"):
     return api.build_crawl(c, _device(c), cfg, range)
 
 
+@app.get("/api/outdoor")
+def outdoor_ep(range: str = "24h"):
+    c = _db()
+    return api.build_outdoor(c, _device(c), range)
+
+
 @app.get("/api/moisture")
 def moisture_ep():
     c = _db()

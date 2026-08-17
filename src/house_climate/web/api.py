@@ -21,6 +21,34 @@ def _since(range_key):
     return datetime.now(timezone.utc) - _RANGES.get(range_key, _RANGES["24h"])
 
 
+def _round1(v):
+    return round(v, 1) if v is not None else None
+
+
+def _extremes(rows, field):
+    """{high, low} for a numeric field over raw reading rows, each carrying the
+    value and the ISO timestamp it occurred at. Rows missing the field are
+    skipped; None when no row has it (so a missing weather field draws a blank,
+    not a fake 0)."""
+    have = [r for r in rows if r.get(field) is not None]
+    if not have:
+        return None
+    hi = max(have, key=lambda r: r[field])
+    lo = min(have, key=lambda r: r[field])
+    return {"high": {"v": hi[field], "ts": hi["ts"].isoformat()},
+            "low": {"v": lo[field], "ts": lo["ts"].isoformat()}}
+
+
+def _coverage(present_buckets, window_hours):
+    """Fraction of the window's hourly buckets that actually carry weather
+    data — the reliability signal for the outdoor series, so a caller can tell
+    a clean average from one built over a half-empty window. Clamped to [0, 1];
+    0 for a degenerate window."""
+    if window_hours <= 0:
+        return 0.0
+    return round(min(present_buckets / window_hours, 1.0), 3)
+
+
 # A day counts toward the complete-day cost average / forecast fit only if its
 # readings both span the day (first by ~2am, last by ~10pm) AND have no interior
 # gap longer than this. Endpoint-only spanning let a day with a long mid-day
@@ -509,6 +537,64 @@ _CRAWL_MAX_GAP_S = 600
 _CRAWL_TREND_WINDOW_H = 3   # "rising/falling" compares the last 3h vs the 3h before
 
 
+# Same 600s (10 min) staleness threshold build_now() uses — a dead poller or
+# weather outage makes `now.stale` true instead of quietly serving an old row
+# as if it were current.
+_OUTDOOR_STALE_S = 600
+
+
+def build_outdoor(conn, device_id, range_key, now=None) -> dict:
+    """Outdoor conditions over the trailing window — the counterpart to
+    build_crawl for the air the crawl trades moisture with. Current reading,
+    exact temp/RH/dew-point extremes, an hourly series, and a `coverage`
+    fraction that flags how much of the window the weather feed actually
+    covered so a decision isn't made on a half-empty average."""
+    now = now or datetime.now(timezone.utc)
+    range_key = range_key if range_key in _RANGES else "24h"
+    since = now - _RANGES[range_key]
+    rows = db.recent_readings(conn, device_id, since)
+    wx_rows = [r for r in rows
+               if r.get("wx_outdoor_temp_f") is not None
+               or r.get("wx_humidity") is not None
+               or r.get("wx_dewpoint_f") is not None]
+    if not wx_rows:
+        return {"available": False, "reason": "no_data"}
+
+    hourly = db.outdoor_hourly(conn, device_id, since)
+    series = [{"ts": h["bucket"].isoformat(),
+               "temp_avg": _round1(h["temp"]), "rh_avg": _round1(h["rh"]),
+               "dp_avg": _round1(h["dp"])} for h in hourly]
+
+    latest = rows[-1]
+    age_s = (now - latest["ts"]).total_seconds()
+    aqi, aqi_source = resolve_outdoor_aqi(conn, latest.get("wx_aqi"), now)
+    window_h = _RANGES[range_key].total_seconds() / 3600
+    present = sum(1 for h in hourly if h["temp"] is not None
+                  or h["rh"] is not None or h["dp"] is not None)
+
+    return {
+        "available": True,
+        "range": range_key,
+        "now": {
+            "temp_f": latest.get("wx_outdoor_temp_f"),
+            "rh": latest.get("wx_humidity"),
+            "dew_f": latest.get("wx_dewpoint_f"),
+            "conditions": latest.get("wx_conditions"),
+            "aqi": aqi,
+            "aqi_source": aqi_source,
+            "age_s": int(age_s),
+            "stale": age_s > _OUTDOOR_STALE_S,
+            "weather_ok": latest.get("weather_ok"),
+        },
+        "temp": _extremes(wx_rows, "wx_outdoor_temp_f"),
+        "rh": _extremes(wx_rows, "wx_humidity"),
+        "dew": _extremes(wx_rows, "wx_dewpoint_f"),
+        "coverage": _coverage(present, window_h),
+        "data_start": wx_rows[0]["ts"].isoformat(),
+        "series": series,
+    }
+
+
 def _crawl_sensor_id(cfg):
     """Resolve which Ecowitt sensor is the crawl-space probe by its configured
     NAME, so re-plumbing the crawl onto a WH31 channel later is a config edit,
@@ -682,11 +768,12 @@ def build_moisture(conn, device_id, cfg, now=None) -> dict:
 
     # --- crawl-to-indoor dew point delta, 7d hourly series ---
     crawl_h30 = db.sensor_hourly_dp(conn, sensor_id, now - timedelta(days=30))
-    outdoor_h30 = db.outdoor_hourly_dp(conn, device_id, now - timedelta(days=30))
+    outdoor_h30 = db.outdoor_hourly(conn, device_id, now - timedelta(days=30))
     since7 = now - timedelta(days=7)
     ref_h7 = db.sensor_hourly_dp(conn, ref_id, since7) if ref_id else []
     ref_by_bucket = {r["bucket"]: r["dp"] for r in ref_h7}
     out_by_bucket = {r["bucket"]: r["dp"] for r in outdoor_h30}
+    out_rh_by_bucket = {r["bucket"]: r["rh"] for r in outdoor_h30}
     delta_series = []
     for c in crawl_h30:
         if c["bucket"] < since7:
@@ -696,8 +783,8 @@ def build_moisture(conn, device_id, cfg, now=None) -> dict:
             "ts": c["bucket"].isoformat(),
             "crawl": round(c["dp"], 1) if c["dp"] is not None else None,
             "indoor": round(ref_dp, 1) if ref_dp is not None else None,
-            "outdoor": (lambda v: round(v, 1) if v is not None else None)(
-                out_by_bucket.get(c["bucket"])),
+            "outdoor": _round1(out_by_bucket.get(c["bucket"])),
+            "outdoor_rh": _round1(out_rh_by_bucket.get(c["bucket"])),
             "delta": (round(c["dp"] - ref_dp, 1)
                       if c["dp"] is not None and ref_dp is not None else None),
         })

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from house_climate import db
 
 def _reading(**over):
@@ -81,6 +81,41 @@ def test_sensor_readings_range_carries_temp_and_dewpoint(conn):
     assert len(rows) == 1
     r = rows[0]
     assert r["temp_f"] == 60.0 and r["humidity"] == 95.0 and r["dewpoint_f"] == 58.5
+
+
+def test_outdoor_hourly_carries_temp_rh_dp(conn):
+    # The /api/outdoor series and the crawl-vs-outdoor attribution both read
+    # this one query. It must average outdoor temp, RH and dew point per hour.
+    h = datetime(2026, 8, 12, 5, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _reading(ts=h + timedelta(minutes=5),
+                                     wx_outdoor_temp_f=60.0, wx_humidity=80.0, wx_dewpoint_f=54.0))
+    db.insert_reading(conn, _reading(ts=h + timedelta(minutes=35),
+                                     wx_outdoor_temp_f=64.0, wx_humidity=70.0, wx_dewpoint_f=56.0))
+    rows = db.outdoor_hourly(conn, "dev1", datetime(2026, 8, 12, 0, tzinfo=timezone.utc))
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["temp"] == 62.0 and r["rh"] == 75.0 and r["dp"] == 55.0
+
+
+def test_outdoor_hourly_includes_bucket_when_dewpoint_null_but_temp_present(conn):
+    # A partial weather feed (temp/RH but no dew point) must still surface the
+    # hour with dp=None, not vanish — otherwise the series hides real coverage.
+    h = datetime(2026, 8, 12, 8, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _reading(ts=h + timedelta(minutes=10),
+                                     wx_outdoor_temp_f=61.0, wx_humidity=78.0, wx_dewpoint_f=None))
+    rows = db.outdoor_hourly(conn, "dev1", datetime(2026, 8, 12, 0, tzinfo=timezone.utc))
+    assert len(rows) == 1
+    assert rows[0]["temp"] == 61.0 and rows[0]["rh"] == 78.0 and rows[0]["dp"] is None
+
+
+def test_outdoor_hourly_skips_fully_null_weather_hour(conn):
+    # A feed outage (all wx fields null) contributes no bucket, so coverage can
+    # honestly report the gap instead of a phantom all-null row.
+    h = datetime(2026, 8, 12, 9, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _reading(ts=h + timedelta(minutes=10),
+                                     wx_outdoor_temp_f=None, wx_humidity=None, wx_dewpoint_f=None))
+    rows = db.outdoor_hourly(conn, "dev1", datetime(2026, 8, 12, 0, tzinfo=timezone.utc))
+    assert rows == []
 
 
 def test_ensure_app_schema_heals_missing_continuous_aggregate(conn):
