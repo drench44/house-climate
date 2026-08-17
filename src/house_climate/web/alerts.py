@@ -245,6 +245,16 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
                         f" ({cur_rate / band_rates[0]:.1f}x off-peak). Shift big loads if you can."))
     except Exception:
         log.exception("peak-surge check failed")
+    # Equipment-status drift (issue #4): an unrecognized Daikin equipmentStatus
+    # maps to "unknown", which runtime/cost silently treat as idle -> hours and
+    # dollars read LOW with no signal. Warn when unknown dominates the recent
+    # window so the deflation is visible instead of silent.
+    unknown_n = sum(1 for r in rows if r.get("equipment_status") == "unknown")
+    if unknown_n and unknown_n / len(rows) >= a.get("equipment_unknown_frac", 0.2):
+        out.append(Alert("equipment_unknown", "warning",
+                         f"{unknown_n} of {len(rows)} recent readings have an unrecognized"
+                         " equipment status — runtime and cost may read low. Check for a"
+                         " Daikin firmware/API change."))
     return out
 
 

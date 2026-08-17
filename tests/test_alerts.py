@@ -439,3 +439,17 @@ def test_peak_surge_quiet_when_idle_on_peak():
     out = alerts.evaluate([_row_at(now, status="idle")], CFG, poll_errors_recent=0,
                           now=now.astimezone(timezone.utc))
     assert not any(a.key == "peak_surge" for a in out)
+# --- equipment-status drift (issue #4) ---
+
+def test_equipment_unknown_alert_fires_when_status_drifts():
+    # Half the recent readings carry an unrecognized ("unknown") status.
+    rows = [_row(m, status=("unknown" if (m // 3) % 2 == 0 else "cooling"))
+            for m in range(0, 60, 3)]
+    out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"])
+    assert any(a.key == "equipment_unknown" for a in out)
+
+
+def test_equipment_unknown_quiet_when_status_known():
+    rows = [_row(m, status="cooling") for m in range(0, 60, 3)]
+    out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"])
+    assert not any(a.key == "equipment_unknown" for a in out)
