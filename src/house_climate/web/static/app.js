@@ -1301,12 +1301,88 @@ document.addEventListener('visibilitychange', () => {
 });
 
 /* ---------------------------------------------------------------------- */
+/* F0: dashboard feature toggles                                          */
+/* ---------------------------------------------------------------------- */
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${url} -> HTTP ${r.status}`);
+  return r.json();
+}
+
+function applyFeatureVisibility(features) {
+  for (const f of features) {
+    const el = document.querySelector(`[data-feature="${f.key}"]`);
+    if (el) el.classList.toggle('feat-off', !f.enabled);
+  }
+  // Collapse the hero grid so a hidden scene or cost rail leaves no empty column.
+  const hero = document.querySelector('.hero-row');
+  if (hero) {
+    const on = (k) => {
+      const el = document.querySelector(`[data-feature="${k}"]`);
+      return el ? !el.classList.contains('feat-off') : false;
+    };
+    const scene = on('scene'), cost = on('cost');
+    hero.classList.toggle('hero-solo', scene !== cost);
+    hero.classList.toggle('hero-empty', !scene && !cost);
+  }
+}
+
+function renderSettingsList(features) {
+  const list = document.getElementById('settings-list');
+  if (!list) return;
+  list.innerHTML = '';
+  for (const f of features) {
+    const row = document.createElement('label');
+    row.className = 'settings-row';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = !!f.enabled; cb.dataset.key = f.key;
+    const span = document.createElement('span');
+    span.textContent = f.label;
+    row.append(cb, span);
+    cb.addEventListener('change', async () => {
+      try {
+        const res = await postJSON('/api/settings', { features: { [f.key]: cb.checked } });
+        applyFeatureVisibility(res.features);
+      } catch (e) {
+        cb.checked = !cb.checked;   // revert on failure
+      }
+    });
+    list.append(row);
+  }
+}
+
+async function initSettings() {
+  const btn = document.getElementById('btn-settings');
+  const panel = document.getElementById('settings-panel');
+  const close = document.getElementById('settings-close');
+  if (!btn || !panel) return;
+  const setOpen = (open) => {
+    panel.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  btn.addEventListener('click', () => setOpen(panel.hidden));
+  if (close) close.addEventListener('click', () => setOpen(false));
+  document.addEventListener('click', (e) => {           // click-away closes
+    if (!panel.hidden && !panel.contains(e.target) && e.target !== btn) setOpen(false);
+  });
+  try {
+    const data = await j('/api/settings');
+    applyFeatureVisibility(data.features);
+    renderSettingsList(data.features);
+  } catch (e) { /* best-effort: dashboard still renders if settings fail */ }
+}
+
+/* ---------------------------------------------------------------------- */
 /* boot                                                                   */
 /* ---------------------------------------------------------------------- */
 
 spawnAmbience();
 initRibbonHover();
 initCrawlHover();
+initSettings();
 tickClock();
 setInterval(tickClock, 1000);
 refresh();

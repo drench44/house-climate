@@ -381,6 +381,21 @@ def kv_set(conn, key, value) -> None:
         (key, json.dumps(value)))
 
 
+def merge_kv_features(conn, key, patch: dict) -> None:
+    """Atomically merge a {feature: bool} patch into kv[key]['features'] in ONE
+    statement (jsonb `||`), so concurrent toggles can't clobber each other. The
+    Python read-modify-write path had a lost-update race: two POSTs racing each
+    read the old value, add their own key, and the last write wins."""
+    conn.execute(
+        """INSERT INTO kv (k, v, updated_at)
+           VALUES (%s, jsonb_build_object('features', %s::jsonb), now())
+           ON CONFLICT (k) DO UPDATE SET
+             v = jsonb_build_object('features',
+                   COALESCE(kv.v->'features', '{}'::jsonb) || (EXCLUDED.v->'features')),
+             updated_at = now()""",
+        (key, json.dumps(patch)))
+
+
 def kv_get(conn, key):
     """Returns {"value": ..., "updated_at": datetime} or None."""
     cur = conn.execute("SELECT v, updated_at FROM kv WHERE k=%s", (key,))

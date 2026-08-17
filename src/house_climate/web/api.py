@@ -1072,3 +1072,48 @@ def build_health(conn, device_id, cfg, now=None) -> dict:
         "short_cycles_healthy": short_cycles_healthy,
         "filter": filter_info,
     }
+
+
+# --- dashboard feature toggles (F0, issue #26) ---------------------------------
+# The registry of toggleable dashboard tiles. Existing panels are listed here;
+# new FamView-derived tiles (F1-F8) append their (key, label) as they land. The
+# key must match the section's data-feature attribute in index.html.
+DASHBOARD_FEATURES = [
+    ("scene", "House & rooms"),
+    ("cost", "Cost rail"),
+    ("humidity", "Humidity"),
+    ("crawl", "Crawl space"),
+    ("ribbon", "Last 24 hours"),
+    ("runtime", "Runtime"),
+    ("health", "System health"),
+    ("learning", "Learning"),
+]
+_FEATURE_KEYS = {k for k, _ in DASHBOARD_FEATURES}
+
+
+def _feature_overrides(conn) -> dict:
+    kv = db.kv_get(conn, "dashboard_settings")
+    if kv and isinstance(kv["value"], dict):
+        ov = kv["value"].get("features")
+        if isinstance(ov, dict):
+            return ov
+    return {}
+
+
+def get_dashboard_settings(conn) -> dict:
+    """Every registered feature with its effective enabled state (default on).
+    Server-side (kv-backed) so the wall display and phones agree."""
+    ov = _feature_overrides(conn)
+    return {"features": [
+        {"key": k, "label": label, "enabled": bool(ov.get(k, True))}
+        for k, label in DASHBOARD_FEATURES]}
+
+
+def set_dashboard_settings(conn, features: dict) -> dict:
+    """Merge a {key: bool} patch over the stored overrides. Unknown keys are
+    ignored (so a stale client can't inject junk); values coerce to bool. The
+    merge is atomic in SQL (see db.merge_kv_features) so racing toggles from the
+    same UI don't clobber each other."""
+    clean = {k: bool(v) for k, v in features.items() if k in _FEATURE_KEYS}
+    db.merge_kv_features(conn, "dashboard_settings", clean)
+    return get_dashboard_settings(conn)

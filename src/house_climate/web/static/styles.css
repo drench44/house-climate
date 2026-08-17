@@ -1119,3 +1119,50 @@ body {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------------------------------------------------------------------- */
+/* F0: dashboard feature toggles + reflow                                 */
+/* ---------------------------------------------------------------------- */
+[data-feature].feat-off { display: none !important; }
+
+/* .hero-row is a 2-col grid (scene | rail). Collapse to one column when only
+   one side shows, and remove the row entirely when both are off — so hiding a
+   tile never leaves an empty column. */
+.hero-row.hero-solo { grid-template-columns: 1fr; }
+.hero-row.hero-empty { display: none; }
+
+/* The quiet cards were a fixed 3-col grid; auto-fit lets the survivors expand
+   to fill the row when one or two are hidden. */
+.cards { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+
+.gear {
+  background: none; border: 1px solid var(--edge-strong); color: var(--dim);
+  border-radius: 8px; width: 34px; height: 34px; font-size: 15px; cursor: pointer;
+  line-height: 1; padding: 0; transition: color .15s ease, border-color .15s ease;
+}
+.gear:hover, .gear[aria-expanded="true"] { color: var(--ink); border-color: var(--dim); }
+
+.settings-panel {
+  position: fixed; top: 66px; right: 28px; z-index: 60; width: 236px;
+  background: var(--panel); border: 1px solid var(--edge-strong);
+  border-radius: 12px; padding: 12px 14px 14px;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, .55);
+}
+.settings-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.settings-close {
+  background: none; border: 0; color: var(--dim); font-size: 20px; line-height: 1;
+  cursor: pointer; padding: 0 2px;
+}
+.settings-close:hover { color: var(--ink); }
+.settings-list { display: flex; flex-direction: column; gap: 1px; }
+.settings-row {
+  display: flex; align-items: center; gap: 10px; padding: 7px 4px;
+  border-radius: 8px; cursor: pointer; user-select: none;
+}
+.settings-row:hover { background: var(--edge); }
+.settings-row input { accent-color: var(--mint); width: 16px; height: 16px; cursor: pointer; margin: 0; }
+.settings-row span { font-size: 14px; color: var(--ink); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .settings-panel { animation: rise 0.25s cubic-bezier(0.16, 1, 0.3, 1) both; }
+}
