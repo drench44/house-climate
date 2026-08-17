@@ -183,6 +183,16 @@ alert instead of just sitting in the journal. The restore procedure (Timescale
 needs its pre/post-restore wrappers) is documented at the top of
 `backup/house-climate-backup.sh` — read it *before* you need it.
 
+**Verify the restore, don't assume it.** A backup you've never restored is a
+guess. `house-climate-backup.sh --restore-selftest` does a real dump → restore
+into a throwaway database (using the pre/post-restore wrappers) → verify → drop,
+so you find a broken restore path on your schedule, not during an outage. CI
+runs this on every push/PR. **Store dumps off-box:** point `HC_BACKUP_DIR` at a
+NAS or second disk (the default `/var/backups/house-climate` shares the disk
+with the DB volume, so one disk failure loses both), set `HC_REQUIRE_MOUNTPOINT`
+so a missing mount fails loud, and **encrypt** off-box dumps — they encode your
+household's occupancy patterns.
+
 ## Tests
 
 ```bash
