@@ -31,6 +31,16 @@ services:
     # weather service shares a docker network with this stack), falling back
     # automatically to weather_url_fallback (a LAN URL). Both optional —
     # the poller runs fine with no weather source at all.
+    # Liveness: the poll loop writes a heartbeat each tick; this probe fails
+    # (-> restart) if it goes stale, so a wedged poller or a bad-credentials
+    # boot loop stops masquerading as healthy. start_period covers first-tick
+    # device discovery. Tune POLLER_HEARTBEAT_MAX_AGE_S for slow poll intervals.
+    healthcheck:
+      test: ["CMD-SHELL", "python -m house_climate.healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
     restart: unless-stopped
 
   web:
