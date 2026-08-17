@@ -80,7 +80,35 @@ def _device(c):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    """Liveness/readiness for the container healthcheck. Was an unconditional
+    {"status":"ok"} — it returned healthy even with TimescaleDB unreachable, so
+    Docker's restart-on-unhealthy never fired. Now it actually touches the DB
+    (503 when it can't, which trips the healthcheck) and reports data +
+    poller-heartbeat freshness for monitoring. Data/heartbeat staleness is
+    informational, not a 503: a dead poller can't be fixed by restarting web —
+    that's the poller container's own healthcheck (see house_climate.healthcheck)."""
+    from fastapi.responses import JSONResponse
+    checks = {}
+    try:
+        _db().execute("SELECT 1")
+        checks["db"] = "ok"
+    except Exception:
+        return JSONResponse({"status": "error", "checks": {"db": "unreachable"}},
+                            status_code=503)
+    now = datetime.now(timezone.utc)
+    try:
+        row = _db().execute("SELECT max(ts) FROM readings").fetchone()
+        latest = row[0] if row else None
+        checks["latest_reading_age_s"] = int((now - latest).total_seconds()) if latest else None
+    except Exception:
+        checks["latest_reading_age_s"] = None
+    try:
+        hb = db.kv_get(_db(), "poller_heartbeat")
+        checks["poller_heartbeat_age_s"] = (
+            int((now - hb["updated_at"]).total_seconds()) if hb else None)
+    except Exception:
+        checks["poller_heartbeat_age_s"] = None
+    return {"status": "ok", "checks": checks}
 
 
 @app.get("/api/now")
