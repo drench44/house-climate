@@ -95,7 +95,12 @@ firewall changes, works even if the thermostat sits on an isolated IoT VLAN.
 - **`latitude`/`longitude`** — your rough location, for sun/weather math.
 - **`filter_reminder_hours`** — blower-hours between filter changes.
 - **`alerts`** — thresholds for humidity, setpoint drift, short-cycling,
-  offline, peak-hour surges, and AQI. Set `channel` to `"ntfy"` with your
+  offline, peak-hour surges, AQI, and the crawl-space probe. The crawl gets
+  three tiers: sustained RH over `crawl_mold_pct` (mold watch, 75%), sustained
+  RH over `crawl_saturated_pct` (near-saturation escalation, 90% — suppresses
+  the mold alert so it doesn't double-notify), and sustained air-to-dew-point
+  spread under `crawl_condensation_spread_f` (3°F — liquid water on joists and
+  ducts, independent of the RH number). Set `channel` to `"ntfy"` with your
   own topic on [ntfy.sh](https://ntfy.sh) (free push to your phone, no app
   account), or leave `"noop"`.
 
