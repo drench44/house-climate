@@ -365,6 +365,14 @@ def chores_delete(task_id: int):
     if not db.delete_chore_task(_db(), task_id):
         raise HTTPException(404, "no such task")
     return {"deleted": task_id}
+@app.post("/api/settings/order")
+def settings_order_post(body: dict):
+    """Persist tile display order (F8)."""
+    from fastapi import HTTPException
+    order = body.get("order") if isinstance(body, dict) else None
+    if not isinstance(order, list):
+        raise HTTPException(422, 'body must be {"order": ["<key>", ...]}')
+    return api.set_dashboard_order(_db(), order)
 
 
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N

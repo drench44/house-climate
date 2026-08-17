@@ -1116,13 +1116,32 @@ def _feature_overrides(conn) -> dict:
     return {}
 
 
+def _tile_order(conn) -> list:
+    kv = db.kv_get(conn, "dashboard_order")
+    if kv and isinstance(kv["value"], dict):
+        order = kv["value"].get("order")
+        if isinstance(order, list):
+            return [k for k in order if k in _FEATURE_KEYS]
+    return []
+
+
 def get_dashboard_settings(conn) -> dict:
-    """Every registered feature with its effective enabled state (default on).
-    Server-side (kv-backed) so the wall display and phones agree."""
+    """Every registered feature with its effective enabled state (default on),
+    plus the saved tile order (F8). Server-side (kv-backed) so the wall display
+    and phones agree."""
     ov = _feature_overrides(conn)
     return {"features": [
         {"key": k, "label": label, "enabled": bool(ov.get(k, True))}
-        for k, label in DASHBOARD_FEATURES]}
+        for k, label in DASHBOARD_FEATURES],
+        "order": _tile_order(conn)}
+
+
+def set_dashboard_order(conn, order) -> dict:
+    """Persist the tile display order (F8). Unknown keys are dropped; the client
+    applies it to the movable full-width sections."""
+    clean = [k for k in order if k in _FEATURE_KEYS] if isinstance(order, list) else []
+    db.kv_set(conn, "dashboard_order", {"order": clean})
+    return get_dashboard_settings(conn)
 
 
 def set_dashboard_settings(conn, features: dict) -> dict:

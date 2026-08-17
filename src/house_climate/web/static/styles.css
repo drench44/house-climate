@@ -1189,3 +1189,8 @@ body {
 .chore-task:hover .chore-del { opacity: 1; }
 .chore-del:hover { color: var(--crit); }
 .chores-empty { color: var(--faint); font-size: 14px; }
+/* ---- F8: tile reorder controls in the settings panel ---- */
+.settings-row { justify-content: space-between; }
+.settings-check { display: flex; align-items: center; gap: 10px; flex: 1; cursor: pointer; }
+.tile-move { background: none; border: 0; color: var(--faint); font-size: 11px; line-height: 1; cursor: pointer; padding: 2px 3px; }
+.tile-move:hover { color: var(--ink); }
