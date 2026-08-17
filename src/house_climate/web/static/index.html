@@ -170,6 +170,14 @@
         <input type="url" id="camera-url" placeholder="Snapshot / stream URL" aria-label="Camera URL">
         <button type="submit">Save</button></form>
       <div class="camera-body" id="camera-body"></div>
+    <!-- ============ photos (F5: image from a configurable URL) ============ -->
+    <section class="media-panel" id="photos" data-feature="photos" aria-label="Photos">
+      <div class="panel-head"><span class="micro" style="color:var(--dim)">Photos</span>
+        <button type="button" class="media-cfg-btn" id="photos-cfg-btn">edit</button></div>
+      <form class="media-cfg" id="photos-cfg" hidden>
+        <input type="url" id="photos-url" placeholder="Shared album or photo URL" aria-label="Photos URL">
+        <button type="submit">Save</button></form>
+      <div class="media-body" id="photos-body"></div>
     </section>
 
     <!-- ============ quiet band ============ -->
