@@ -310,3 +310,16 @@ def test_camera_config_roundtrip(conn):
 def test_camera_in_feature_registry(conn):
     keys = {f["key"] for f in client.get("/api/settings").json()["features"]}
     assert "camera" in keys
+# --- photos tile (F5, issue #31) ---
+
+def test_photos_config_roundtrip(conn):
+    # Set a source URL, read it back, then clear it.
+    assert client.post("/api/photos/config", json={"url": "https://x/y.jpg"}).status_code == 200
+    assert client.get("/api/photos/config").json() == {"url": "https://x/y.jpg"}
+    assert client.post("/api/photos/config", json={"url": ""}).status_code == 200
+    assert client.get("/api/photos/config").json() == {"url": ""}
+
+
+def test_photos_in_feature_registry(conn):
+    keys = {f["key"] for f in client.get("/api/settings").json()["features"]}
+    assert "photos" in keys

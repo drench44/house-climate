@@ -412,6 +412,16 @@ def camera_config_get():
 @app.post("/api/camera/config")
 def camera_config_post(body: dict):
     return api.set_camera_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
+@app.get("/api/photos/config")
+def photos_config_get():
+    """Photos tile source URL (F5). Server-side (kv-backed) so the wall display
+    and phones show the same image source."""
+    return api.get_photos_config(_db())
+
+
+@app.post("/api/photos/config")
+def photos_config_post(body: dict):
+    return api.set_photos_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
 
 
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
