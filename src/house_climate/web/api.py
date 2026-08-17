@@ -537,9 +537,11 @@ _CRAWL_MAX_GAP_S = 600
 _CRAWL_TREND_WINDOW_H = 3   # "rising/falling" compares the last 3h vs the 3h before
 
 
-# Same 600s (10 min) staleness threshold build_now() uses — a dead poller or
-# weather outage makes `now.stale` true instead of quietly serving an old row
-# as if it were current.
+# How old the latest WEATHER reading may be before `now.stale` trips — the same
+# 600s (10 min) window build_now() uses. Measured against the last row that
+# actually carried weather (not the newest row of any kind), so a weather-feed
+# outage — poller alive, wx_* going null — correctly reads as stale instead of
+# serving nulls under a reassuring stale:false.
 _OUTDOOR_STALE_S = 600
 
 
@@ -565,12 +567,19 @@ def build_outdoor(conn, device_id, range_key, now=None) -> dict:
                "temp_avg": _round1(h["temp"]), "rh_avg": _round1(h["rh"]),
                "dp_avg": _round1(h["dp"])} for h in hourly]
 
-    latest = rows[-1]
+    # `now` and its staleness track the last row that actually carried weather,
+    # so a weather-feed outage (poller alive, wx_* null) reads as stale rather
+    # than serving nulls behind a reassuring stale:false.
+    latest = wx_rows[-1]
     age_s = (now - latest["ts"]).total_seconds()
     aqi, aqi_source = resolve_outdoor_aqi(conn, latest.get("wx_aqi"), now)
     window_h = _RANGES[range_key].total_seconds() / 3600
-    present = sum(1 for h in hourly if h["temp"] is not None
-                  or h["rh"] is not None or h["dp"] is not None)
+
+    # Coverage is per field, not a single any-field scalar: a feed that reports
+    # RH hourly but temp only sporadically must not let a full RH column hide a
+    # half-empty temp column behind one reassuring number.
+    def _field_coverage(field):
+        return _coverage(sum(1 for h in hourly if h[field] is not None), window_h)
 
     return {
         "available": True,
@@ -589,7 +598,9 @@ def build_outdoor(conn, device_id, range_key, now=None) -> dict:
         "temp": _extremes(wx_rows, "wx_outdoor_temp_f"),
         "rh": _extremes(wx_rows, "wx_humidity"),
         "dew": _extremes(wx_rows, "wx_dewpoint_f"),
-        "coverage": _coverage(present, window_h),
+        "coverage": {"temp": _field_coverage("temp"),
+                     "rh": _field_coverage("rh"),
+                     "dew": _field_coverage("dp")},
         "data_start": wx_rows[0]["ts"].isoformat(),
         "series": series,
     }

@@ -146,6 +146,7 @@ def _seed_outdoor(conn, n=24, step_min=60, temp=lambda i: 60.0 + i,
 def test_outdoor_unavailable_when_empty(conn):
     out = api.build_outdoor(conn, "dev1", "24h")
     assert out["available"] is False
+    assert out["reason"] == "no_data"
 
 
 def test_outdoor_now_reports_latest_conditions(conn):
@@ -153,11 +154,14 @@ def test_outdoor_now_reports_latest_conditions(conn):
     out = api.build_outdoor(conn, "dev1", "24h")
     assert out["available"] is True
     assert out["range"] == "24h"
+    assert "data_start" in out
     now = out["now"]
     assert now["temp_f"] == 83.0        # temp(23) = 60 + 23
     assert now["rh"] == 67.0            # rh(23)  = 90 - 23
+    assert now["dew_f"] == 59.6         # dp(23) = 55 + 23*0.2
     assert now["conditions"] == "Overcast"
-    assert now["aqi"] == 31 and now["stale"] is False
+    assert now["aqi"] == 31 and now["aqi_source"] == "weather"
+    assert now["weather_ok"] is True and now["stale"] is False
 
 
 def test_outdoor_extremes_span_the_window(conn):
@@ -165,6 +169,7 @@ def test_outdoor_extremes_span_the_window(conn):
     out = api.build_outdoor(conn, "dev1", "24h")
     assert out["temp"]["high"]["v"] == 83.0 and out["temp"]["low"]["v"] == 60.0
     assert out["rh"]["high"]["v"] == 90.0 and out["rh"]["low"]["v"] == 67.0
+    assert out["dew"]["high"]["v"] == 59.6 and out["dew"]["low"]["v"] == 55.0
     assert "ts" in out["rh"]["high"]
 
 
@@ -177,13 +182,41 @@ def test_outdoor_series_carries_temp_rh_dp(conn):
     assert pt["temp_avg"] is not None
 
 
-def test_outdoor_coverage_reports_a_gappy_window(conn):
-    # Only 6 hourly readings inside a 24h window -> coverage ~ 6/24, so a caller
-    # never mistakes a quarter-full window for a complete one.
+def test_outdoor_coverage_is_per_field_and_flags_a_gappy_window(conn):
+    # Only 6 hourly readings inside a 24h window -> each field's coverage is
+    # exactly 6/24, so a caller never mistakes a quarter-full window for whole.
     _seed_outdoor(conn, n=6, step_min=60)
     out = api.build_outdoor(conn, "dev1", "24h")
-    assert out["coverage"] <= 0.3
-    assert 0 < out["coverage"]
+    assert out["coverage"] == {"temp": 0.25, "rh": 0.25, "dew": 0.25}
+
+
+def test_outdoor_coverage_full_window_is_one(conn):
+    _seed_outdoor(conn, n=24, step_min=60)  # 24 hourly buckets across 24h
+    out = api.build_outdoor(conn, "dev1", "24h")
+    assert out["coverage"]["rh"] == 1.0
+
+
+def test_outdoor_coverage_isolates_a_sparse_field(conn):
+    # RH every hour, temp only in the first reading: RH coverage stays high
+    # while temp coverage collapses -- the full RH column can't mask the gap.
+    _seed_outdoor(conn, n=6, step_min=60,
+                  temp=lambda i: 60.0 if i == 0 else None,
+                  rh=lambda i: 80.0, dp=lambda i: 55.0)
+    out = api.build_outdoor(conn, "dev1", "24h")
+    assert out["coverage"]["temp"] < out["coverage"]["rh"]
+    assert out["coverage"]["temp"] == round(1 / 24, 3)
+
+
+def test_outdoor_range_7d_selected(conn):
+    _seed_outdoor(conn, n=24)
+    out = api.build_outdoor(conn, "dev1", "7d")
+    assert out["range"] == "7d"
+
+
+def test_outdoor_invalid_range_falls_back_to_24h(conn):
+    _seed_outdoor(conn, n=24)
+    out = api.build_outdoor(conn, "dev1", "bogus")
+    assert out["range"] == "24h"
 
 
 def test_outdoor_stale_when_latest_reading_is_old(conn):
@@ -193,12 +226,37 @@ def test_outdoor_stale_when_latest_reading_is_old(conn):
     assert out["now"]["stale"] is True
 
 
+def test_outdoor_stale_when_weather_feed_drops_but_poller_alive(conn):
+    # The silent-failure case: good weather until 5h ago, then the feed goes
+    # null while the poller keeps writing fresh rows. `now` must track the last
+    # REAL weather reading (stale, last known temp), not the fresh null row that
+    # would falsely read as current.
+    now = datetime.now(timezone.utc)
+    _seed_outdoor(conn, n=3, step_min=30, base=now - timedelta(hours=5),
+                  temp=lambda i: 61.0, rh=lambda i: 78.0, dp=lambda i: 57.0)
+    for j in range(4):  # fresh rows, weather feed dead
+        db.insert_reading(conn, dict(
+            ts=now - timedelta(minutes=30 * (3 - j)), device_id="dev1",
+            indoor_temp_f=72, indoor_humidity=48, heat_setpoint_f=68,
+            cool_setpoint_f=72, equipment_status="idle", mode="cool",
+            daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
+            wx_outdoor_temp_f=None, wx_humidity=None, wx_dewpoint_f=None,
+            wx_solar_wm2=None, wx_uv=None, wx_fc_high_f=None, wx_fc_low_f=None,
+            wx_conditions=None, wx_aqi=None, wx_alert_count=0, weather_ok=False))
+    out = api.build_outdoor(conn, "dev1", "24h")
+    assert out["now"]["stale"] is True
+    assert out["now"]["temp_f"] == 61.0  # last real weather, not the null row
+
+
 def test_moisture_delta_series_carries_outdoor_rh(conn):
     _seed_crawl_and_outdoor(conn)
     m = api.build_moisture(conn, "dev1", CRAWL_CFG)
     assert m["available"] is True
-    assert any("outdoor_rh" in pt for pt in m["delta"]["series"])
-    assert any(pt["outdoor_rh"] is not None for pt in m["delta"]["series"])
+    rh_pts = [pt for pt in m["delta"]["series"] if pt.get("outdoor_rh") is not None]
+    assert rh_pts, "expected at least one non-null outdoor_rh point"
+    # seed sets wx_humidity = 80 + (i % 5) -> one reading per hour, so each
+    # bucket's outdoor_rh must land in [80, 84]; a wrong-bucket mapping wouldn't.
+    assert all(80.0 <= pt["outdoor_rh"] <= 84.0 for pt in rh_pts)
 
 
 def _seed_crawl_and_outdoor(conn):

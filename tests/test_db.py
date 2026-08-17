@@ -108,6 +108,28 @@ def test_outdoor_hourly_includes_bucket_when_dewpoint_null_but_temp_present(conn
     assert rows[0]["temp"] == 61.0 and rows[0]["rh"] == 78.0 and rows[0]["dp"] is None
 
 
+def test_outdoor_hourly_includes_bucket_when_only_rh_present(conn):
+    # Exercises the wx_humidity arm of the widened OR independently: an
+    # RH-only feed still surfaces the hour, with temp and dp null.
+    h = datetime(2026, 8, 12, 7, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _reading(ts=h + timedelta(minutes=10),
+                                     wx_outdoor_temp_f=None, wx_humidity=82.0, wx_dewpoint_f=None))
+    rows = db.outdoor_hourly(conn, "dev1", datetime(2026, 8, 12, 0, tzinfo=timezone.utc))
+    assert len(rows) == 1
+    assert rows[0]["rh"] == 82.0 and rows[0]["temp"] is None and rows[0]["dp"] is None
+
+
+def test_outdoor_hourly_orders_buckets_ascending(conn):
+    # Multi-bucket: the /api/outdoor series depends on ascending bucket order.
+    for hr in (5, 3, 7):
+        db.insert_reading(conn, _reading(
+            ts=datetime(2026, 8, 12, hr, 15, tzinfo=timezone.utc),
+            wx_outdoor_temp_f=60.0 + hr))
+    rows = db.outdoor_hourly(conn, "dev1", datetime(2026, 8, 12, 0, tzinfo=timezone.utc))
+    buckets = [r["bucket"] for r in rows]
+    assert len(rows) == 3 and buckets == sorted(buckets)
+
+
 def test_outdoor_hourly_skips_fully_null_weather_hour(conn):
     # A feed outage (all wx fields null) contributes no bucket, so coverage can
     # honestly report the gap instead of a phantom all-null row.
