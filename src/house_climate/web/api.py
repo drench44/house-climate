@@ -1087,7 +1087,23 @@ DASHBOARD_FEATURES = [
     ("runtime", "Runtime"),
     ("health", "System health"),
     ("learning", "Learning"),
+    ("chores", "Chores"),
 ]
+
+
+def build_chores(conn, cfg) -> dict:
+    today = datetime.now(ZoneInfo(cfg.timezone)).date()
+    week_start = today - timedelta(days=today.weekday())      # Monday of this ISO week
+    ov = db.chores_overview(conn, today, week_start)
+    people = {}
+    for t in ov["tasks"]:
+        p = people.setdefault(t["person"], {"person": t["person"], "tasks": [], "points_week": 0})
+        p["tasks"].append({"id": t["id"], "title": t["title"], "points": t["points"],
+                           "done_today": t["done_today"]})
+    for person, pts in ov["week_points"].items():
+        people.setdefault(person, {"person": person, "tasks": [], "points_week": 0})["points_week"] = pts
+    return {"people": sorted(people.values(), key=lambda x: x["person"]),
+            "week_start": week_start.isoformat()}
 _FEATURE_KEYS = {k for k, _ in DASHBOARD_FEATURES}
 
 

@@ -1166,3 +1166,26 @@ body {
 @media (prefers-reduced-motion: no-preference) {
   .settings-panel { animation: rise 0.25s cubic-bezier(0.16, 1, 0.3, 1) both; }
 }
+
+/* ---- F3: chores / routines ---- */
+.chores-panel { margin-top: 18px; background: var(--panel); border: 1px solid var(--edge); border-radius: 16px; padding: 18px 20px; }
+.chores-add-btn, .chores-add button { background: var(--mint-soft); border: 1px solid var(--mint); color: var(--mint); border-radius: 8px; padding: 3px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+.chores-add { display: flex; gap: 8px; margin: 10px 0 4px; flex-wrap: wrap; }
+.chores-add input { background: var(--void-top); border: 1px solid var(--edge-strong); border-radius: 8px; padding: 7px 10px; color: var(--ink); font: inherit; font-size: 13px; }
+.chores-add input[type=number] { width: 64px; }
+.chores-add input:focus { outline: none; border-color: var(--mint); }
+.chores-people { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-top: 12px; }
+.chore-col { display: flex; flex-direction: column; gap: 1px; }
+.chore-col-head { display: flex; justify-content: space-between; align-items: baseline; padding-bottom: 6px; border-bottom: 1px solid var(--edge); margin-bottom: 4px; }
+.chore-name { font-size: 15px; color: var(--ink); font-weight: 600; }
+.chore-pts { font-size: 12px; color: var(--mint); white-space: nowrap; }
+.chore-task { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 10px; padding: 6px 4px; border-radius: 8px; cursor: pointer; }
+.chore-task:hover { background: var(--edge); }
+.chore-task input { accent-color: var(--mint); width: 16px; height: 16px; margin: 0; cursor: pointer; }
+.chore-title { font-size: 14px; color: var(--ink); }
+.chore-task.done .chore-title { color: var(--faint); text-decoration: line-through; }
+.chore-tpts { font-size: 12px; color: var(--faint); }
+.chore-del { background: none; border: 0; color: var(--faint); font-size: 16px; line-height: 1; cursor: pointer; opacity: 0; padding: 0 4px; }
+.chore-task:hover .chore-del { opacity: 1; }
+.chore-del:hover { color: var(--crit); }
+.chores-empty { color: var(--faint); font-size: 14px; }
