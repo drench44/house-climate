@@ -246,3 +246,23 @@ def test_chores_validation_and_delete(conn):
 
 def test_chores_in_feature_registry(conn):
     assert "chores" in {f["key"] for f in client.get("/api/settings").json()["features"]}
+# --- pluggable slots / tile ordering (F8, issue #34) ---
+
+def test_tile_order_roundtrip(conn):
+    r = client.post("/api/settings/order", json={"order": ["ribbon", "crawl", "humidity"]})
+    assert r.status_code == 200
+    assert r.json()["order"] == ["ribbon", "crawl", "humidity"]
+    assert client.get("/api/settings").json()["order"] == ["ribbon", "crawl", "humidity"]
+
+
+def test_tile_order_drops_unknown_keys(conn):
+    r = client.post("/api/settings/order", json={"order": ["humidity", "nope", "crawl"]})
+    assert r.json()["order"] == ["humidity", "crawl"]
+
+
+def test_tile_order_bad_body_422(conn):
+    assert client.post("/api/settings/order", json={"order": "notalist"}).status_code == 422
+
+
+def test_settings_includes_order_field(conn):
+    assert "order" in client.get("/api/settings").json()
