@@ -34,8 +34,13 @@ def _alert_context(conn, device_id, cfg, since, rows):
             # can be ~= crawl_mold_sustained_minutes) meant _sustained could
             # never find a run spanning mold_min -- the fetched span always fell
             # just short, so the mold alert could never fire (fable's bug).
-            mold_min = cfg.alerts.get("crawl_mold_sustained_minutes", 180)
-            crawl_since = datetime.now(timezone.utc) - timedelta(minutes=mold_min * 2)
+            # Span the LONGEST crawl sustained-window (mold/saturated share
+            # mold_min; condensation has its own) -- a window shorter than any
+            # of them starves _sustained of the rows a run needs, the same bug
+            # the mold fetch once had.
+            span_min = max(cfg.alerts.get("crawl_mold_sustained_minutes", 180),
+                           cfg.alerts.get("crawl_condensation_sustained_minutes", 180))
+            crawl_since = datetime.now(timezone.utc) - timedelta(minutes=span_min * 2)
             crawl_since = min(crawl_since, since)   # never fetch LESS than `since`
             crawl_rows = db.sensor_readings_range(conn, sensor_id, crawl_since)
     except Exception:
@@ -134,8 +139,11 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
 
     Extra context (kept optional so the pure function stays easy to test, and
     absent context simply skips that alert rather than erroring):
-      crawl_rows   -- recent crawl-space sensor rows [{ts, humidity}], for the
-                      sustained mold-risk alert. None -> mold alert skipped.
+      crawl_rows   -- recent crawl-space sensor rows
+                      [{ts, humidity, temp_f, dewpoint_f}], for the sustained
+                      crawl alerts (mold / saturated on humidity; condensation
+                      on the temp-to-dewpoint spread). None -> all three crawl
+                      alerts skipped.
       filter_due   -- precomputed bool from the same runtime-hours logic the
                       dashboard shows. None -> filter alert skipped.
       outdoor_aqi  -- the effective outdoor AQI (AirNow-preferred, resolved by
@@ -195,14 +203,59 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
     if crawl_rows:
         mold_pct = a.get("crawl_mold_pct", 75)
         mold_min = a.get("crawl_mold_sustained_minutes", 180)
+        sat_pct = a.get("crawl_saturated_pct", 90)
+
+        def _sat(r):
+            v = r.get("humidity")
+            return None if v is None else v >= sat_pct
 
         def _mold(r):
             v = r.get("humidity")
             return None if v is None else v >= mold_pct
-        if _sustained(crawl_rows, _mold, mold_min):
+        # Two-tier RH: sustained >=90% is a distinct, worse regime than the 75%
+        # mold watch (wood driven toward the decay-fungi moisture range). When
+        # it holds, fire the escalated alert and SUPPRESS the mold alert -- one
+        # damp crawl must not buzz the phone twice for the same condition. The
+        # two keys have independent cooldowns, so without this suppression a
+        # >=90% crawl sends BOTH every cooldown window.
+        #
+        # The escalation only makes sense when the saturated bar sits ABOVE the
+        # mold bar. If a config transposes them (sat <= mold), escalating would
+        # mislabel a merely-moldy crawl as "near saturation" AND suppress the
+        # accurate mold alert -- so in that case disable the tier and let the
+        # plain mold alert fire, rather than silently corrupting it.
+        sat_active = sat_pct > mold_pct
+        if sat_active and _sustained(crawl_rows, _sat, mold_min):
+            out.append(Alert("crawl_saturated", "warning",
+                             f"Crawl-space humidity sustained above {sat_pct}%: near saturation."
+                             " Structural wood is wetting toward the decay range —"
+                             " vapor barrier / dehumidifier, not just ventilation."))
+        elif _sustained(crawl_rows, _mold, mold_min):
             out.append(Alert("crawl_mold", "warning",
                              f"Crawl-space humidity sustained above {mold_pct}%: mold risk."
                              " Check ventilation/dehumidifier."))
+
+        # Condensation risk: a sustained air-to-dew-point spread below the
+        # threshold means any surface at or below crawl air temp (joists, cold
+        # AC ducts) is at the dew point -- liquid water on structural wood, the
+        # worst crawl failure mode. Independent of the RH tiers above: a cold
+        # winter crawl can condense at an RH reading below the 75% mold bar,
+        # and this fires on the physics (spread) the RH number alone misses.
+        # Needs both temp and dew point; a row missing either is NOT OBSERVED
+        # (None), never treated as safe.
+        cond_spread = a.get("crawl_condensation_spread_f", 3.0)
+        cond_min = a.get("crawl_condensation_sustained_minutes", 180)
+
+        def _condense(r):
+            t, dp = r.get("temp_f"), r.get("dewpoint_f")
+            if t is None or dp is None:
+                return None
+            return (t - dp) < cond_spread
+        if _sustained(crawl_rows, _condense, cond_min):
+            out.append(Alert("crawl_condensation", "warning",
+                             f"Crawl-space condensation risk: air-to-dew-point spread under "
+                             f"{cond_spread:g}°F sustained — water forming on joists/ducts."
+                             " Check for standing water, seal vents, run a dehumidifier."))
 
     # Filter due: the runtime-hours threshold the dashboard already tracks,
     # surfaced as a push so it isn't only visible to someone who opens the page.
