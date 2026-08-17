@@ -84,6 +84,67 @@ class TouTable:
                 return band, cand
         return None, None
 
+    def peak_rate(self, season: str):
+        """The highest rate among bands applicable to `season`, or None when
+        that season has fewer than two distinct rates (a flat season has no
+        meaningful 'peak')."""
+        rates = {b.rate for b in self.bands if b.season == season}
+        if len(rates) < 2:
+            return None
+        return max(rates)
+
+    def is_peak(self, dt_local: datetime) -> bool:
+        """True iff dt_local falls in an on-peak band — the highest-rate tier
+        for its season. Fully generic: weekday/weekend, seasonal, and any tier
+        count are handled by band_for; a flat (single-rate) season is never
+        peak. This is the one on-peak-membership test the timed cost analytics
+        (forecast, pre-cool) share, so none of them hardcode 17:00-21:00."""
+        top = self.peak_rate(self.season(dt_local.month))
+        if top is None:
+            return False
+        try:
+            _, rate = self.band_for(dt_local)
+        except ValueError:
+            return False
+        return rate >= top
+
+    def peak_windows(self, dt_local: datetime):
+        """On-peak windows for dt_local's season as a list of (start, end,
+        weekday_only), one per contiguous run of top-rate bands, sorted by start.
+        Adjacent same-rate bands merge; a two-humped peak (e.g. a morning AND an
+        evening peak at the same top rate — a solar-duck tariff) yields two
+        windows rather than one collapsed envelope. Empty when the season is
+        flat / has no peak. Derived from the rate table so any utility's shape
+        works, not just the example's single weekday 17:00-21:00 window."""
+        season = self.season(dt_local.month)
+        top = self.peak_rate(season)
+        if top is None:
+            return []
+        # The timed analytics operate on weekday/all-days windows; prefer those,
+        # but fall back to whatever peak bands exist (e.g. a weekend-only peak).
+        windowed = [b for b in self.bands
+                    if b.season == season and b.rate == top and b.days in ("weekday", "all")]
+        if not windowed:
+            windowed = [b for b in self.bands if b.season == season and b.rate == top]
+        if not windowed:
+            return []
+        merged = []
+        for b in sorted(windowed, key=lambda b: (b.start, b.end)):
+            if merged and b.start <= merged[-1][1]:          # contiguous/overlapping
+                s, e, wd = merged[-1]
+                merged[-1] = (s, max(e, b.end), wd and b.days == "weekday")
+            else:
+                merged.append((b.start, b.end, b.days == "weekday"))
+        return merged
+
+    def peak_window(self, dt_local: datetime):
+        """The primary (earliest) on-peak window as (start, end, weekday_only),
+        or None. For a multi-humped peak this is the first hump; single-window
+        consumers (the retrospective pre-cool analysis) use it, while
+        predict_peak_cost uses peak_windows() to price every hump."""
+        wins = self.peak_windows(dt_local)
+        return wins[0] if wins else None
+
 
 @dataclass(frozen=True)
 class Config:

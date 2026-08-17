@@ -7,8 +7,6 @@ from ..analytics import runtime, cost, correlation, humidity, moisture, thermal,
 _RANGES = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
 
 _PRECOOL_COOLING = {"cooling", "overcool"}
-_ONPEAK_START = time(17, 0)
-_ONPEAK_END = time(21, 0)
 _PRECOOL_MAX_GAP_S = 600
 _PRECOOL_MIN_FC_HIGH_F = 78
 _PRECOOL_MIN_SHIFTABLE_KWH = 0.2
@@ -374,7 +372,15 @@ def build_thermal(conn, device_id, cfg, now=None) -> dict:
     if not rows:
         return {"available": False}
     hours = (rows[-1]["ts"] - rows[0]["ts"]).total_seconds() / 3600.0
-    pe = precool.effectiveness(rows, cfg.timezone)
+    # Derive the on-peak window from the configured TOU table so the
+    # effectiveness analysis uses the household's real peak hours, not 5-9pm.
+    win = cfg.tou.peak_window(now.astimezone(ZoneInfo(cfg.timezone)))
+    if win is not None:
+        p_start, p_end, weekday_only = win
+        pe = precool.effectiveness(rows, cfg.timezone, peak_start=p_start,
+                                   peak_end=p_end, peak_weekday_only=weekday_only)
+    else:
+        pe = precool.effectiveness(rows, cfg.timezone)
     # Turn the minutes-of-peak-cooling saved into dollars, using the on-peak vs
     # mid-peak rate gap, so "what it saves" reads in money on the dashboard.
     if pe.get("ready") and pe.get("peak_min_saved_per_day"):
@@ -795,7 +801,7 @@ def build_forecast(conn, device_id, cfg, days=14) -> dict:
         if not highs:
             continue
         cool_min = runtime.compute(drows, short_cycle_min=cfg.short_cycle_minutes).minutes["cool"]
-        peak_rows = [x for x in drows if 17 <= x["ts"].astimezone(zone).hour < 21]
+        peak_rows = [x for x in drows if cfg.tou.is_peak(x["ts"].astimezone(zone))]
         peak_min = (runtime.compute(peak_rows, short_cycle_min=cfg.short_cycle_minutes)
                     .minutes["cool"] if peak_rows else 0.0)
         history.append({"day_high": max(highs), "cool_minutes": cool_min,
@@ -831,9 +837,9 @@ def build_precool_advice(conn, device_id, cfg, now=None) -> dict:
     onpeak_cool_kwh = 0.0
     for i, row in enumerate(rows):
         local = row["ts"].astimezone(zone)
-        if local.weekday() >= 5:
-            continue
-        if not (_ONPEAK_START <= local.time() < _ONPEAK_END):
+        # On-peak membership derived from the TOU table (weekday/weekend,
+        # season, tier-count all handled) — not a hardcoded 5-9pm weekday.
+        if not cfg.tou.is_peak(local):
             continue
         onpeak_days.add(local.date())
         if row["equipment_status"] not in _PRECOOL_COOLING:
