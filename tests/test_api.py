@@ -208,38 +208,60 @@ def test_outdoor_coverage_isolates_a_sparse_field(conn):
     assert out["coverage"]["temp"] == round(1 / 24, 3)
 
 
-def test_outdoor_data_start_marks_young_history_not_a_gap(conn):
-    # Only 6h of history in a 24h window: coverage < 1, but data_start sits
-    # INSIDE the window -> the deficit is youth, and a caller can tell.
+def test_outdoor_data_start_is_weather_scoped_not_device_age(conn):
+    # Old device: indoor-only rows for 3 days, but the WEATHER feed only started
+    # 6h ago inside the 24h window. data_start must track the FEED, not the
+    # device -- otherwise a young feed reads as real gaps. This test fails on a
+    # device-earliest data_start (would give now-72h) and passes on weather-
+    # scoped, so it locks the fix, not just the contract.
     now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    for h in range(6, 73, 6):  # indoor-only rows, now-72h .. now-6h, NO weather
+        db.insert_reading(conn, _reading_row(now - timedelta(hours=h),
+                                             wx_outdoor_temp_f=None, wx_humidity=None,
+                                             wx_dewpoint_f=None, weather_ok=False))
     _seed_outdoor(conn, n=6, step_min=60, base=now - timedelta(hours=6))
     out = api.build_outdoor(conn, "dev1", "24h", now=now)
     assert out["coverage"]["rh"] < 1.0
     ds = datetime.fromisoformat(out["data_start"])
-    assert ds == now - timedelta(hours=6)          # exact device-earliest reading
-    assert ds >= now - timedelta(hours=24)         # inside the window -> young
+    assert ds == now - timedelta(hours=6)          # feed start, not the 72h-old indoor row
+    assert ds >= now - timedelta(hours=24)         # inside window -> young feed, not gaps
 
 
 def test_outdoor_data_start_predates_window_when_gap_is_real(conn):
-    # Same low coverage, but the device has data from before the window and the
-    # feed only returned for the last 6h -> data_start predates the window, so
-    # the deficit reads as a real feed gap rather than youth.
+    # Mature feed: weather data from before the window, then a real outage; the
+    # feed only returns for the last 6h -> data_start predates the window, so
+    # the same low coverage reads as a real feed gap rather than youth.
     now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
-    db.insert_reading(conn, _reading_row(now - timedelta(hours=48)))
+    db.insert_reading(conn, _reading_row(now - timedelta(hours=48)))  # weather-bearing
     _seed_outdoor(conn, n=6, step_min=60, base=now - timedelta(hours=6))
     out = api.build_outdoor(conn, "dev1", "24h", now=now)
     assert out["coverage"]["rh"] < 1.0
     ds = datetime.fromisoformat(out["data_start"])
-    assert ds < now - timedelta(hours=24)          # predates window -> real gap
+    assert ds == now - timedelta(hours=48)         # exact earliest weather row -> real gap
 
 
-def _reading_row(ts):
-    return dict(ts=ts, device_id="dev1", indoor_temp_f=72, indoor_humidity=48,
+def test_outdoor_series_granularity_coarsens_with_range(conn):
+    # 12h of readings every 15 min. The chart bucket widens with range
+    # (_OUTDOOR_BUCKETS_S 15m/1h/3h), so the same data yields progressively
+    # fewer points -- proving the range->bucket wiring end to end.
+    now = datetime(2026, 8, 12, 18, 0, tzinfo=timezone.utc)
+    _seed_outdoor(conn, n=48, step_min=15, base=now - timedelta(hours=12))
+    n24 = len(api.build_outdoor(conn, "dev1", "24h", now=now)["series"])   # 15m buckets
+    n7 = len(api.build_outdoor(conn, "dev1", "7d", now=now)["series"])     # 1h buckets
+    n30 = len(api.build_outdoor(conn, "dev1", "30d", now=now)["series"])   # 3h buckets
+    assert n24 > n7 > n30
+    assert n7 == 12 and n30 == 4   # 12h -> 12 hourly, 4 three-hourly buckets
+
+
+def _reading_row(ts, **over):
+    base = dict(ts=ts, device_id="dev1", indoor_temp_f=72, indoor_humidity=48,
                 heat_setpoint_f=68, cool_setpoint_f=72, equipment_status="idle",
                 mode="cool", daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
                 wx_outdoor_temp_f=60.0, wx_humidity=70.0, wx_dewpoint_f=50.0,
                 wx_solar_wm2=400, wx_uv=4, wx_fc_high_f=80, wx_fc_low_f=55,
                 wx_conditions="Overcast", wx_aqi=31, wx_alert_count=0, weather_ok=True)
+    base.update(over)
+    return base
 
 
 def test_outdoor_hourly_feeds_attribution_ignoring_dp_null_hours(conn):
