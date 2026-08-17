@@ -1119,3 +1119,210 @@ body {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------------------------------------------------------------------- */
+/* F0: dashboard feature toggles + reflow                                 */
+/* ---------------------------------------------------------------------- */
+[data-feature].feat-off { display: none !important; }
+
+/* .hero-row is a 2-col grid (scene | rail). Collapse to one column when only
+   one side shows, and remove the row entirely when both are off — so hiding a
+   tile never leaves an empty column. */
+.hero-row.hero-solo { grid-template-columns: 1fr; }
+.hero-row.hero-empty { display: none; }
+
+/* The quiet cards were a fixed 3-col grid; auto-fit lets the survivors expand
+   to fill the row when one or two are hidden. */
+.cards { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+
+.gear {
+  background: none; border: 1px solid var(--edge-strong); color: var(--dim);
+  border-radius: 8px; width: 34px; height: 34px; font-size: 15px; cursor: pointer;
+  line-height: 1; padding: 0; transition: color .15s ease, border-color .15s ease;
+}
+.gear:hover, .gear[aria-expanded="true"] { color: var(--ink); border-color: var(--dim); }
+
+.settings-panel {
+  position: fixed; top: 66px; right: 28px; z-index: 60; width: 236px;
+  background: var(--panel); border: 1px solid var(--edge-strong);
+  border-radius: 12px; padding: 12px 14px 14px;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, .55);
+}
+.settings-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.settings-close {
+  background: none; border: 0; color: var(--dim); font-size: 20px; line-height: 1;
+  cursor: pointer; padding: 0 2px;
+}
+.settings-close:hover { color: var(--ink); }
+.settings-list { display: flex; flex-direction: column; gap: 1px; }
+.settings-row {
+  display: flex; align-items: center; gap: 10px; padding: 7px 4px;
+  border-radius: 8px; cursor: pointer; user-select: none;
+}
+.settings-row:hover { background: var(--edge); }
+.settings-row input { accent-color: var(--mint); width: 16px; height: 16px; cursor: pointer; margin: 0; }
+.settings-row span { font-size: 14px; color: var(--ink); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .settings-panel { animation: rise 0.25s cubic-bezier(0.16, 1, 0.3, 1) both; }
+}
+
+/* ---- F3: chores / routines ---- */
+.chores-panel { margin-top: 18px; background: var(--panel); border: 1px solid var(--edge); border-radius: 16px; padding: 18px 20px; }
+.chores-add-btn, .chores-add button { background: var(--mint-soft); border: 1px solid var(--mint); color: var(--mint); border-radius: 8px; padding: 3px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+.chores-add { display: flex; gap: 8px; margin: 10px 0 4px; flex-wrap: wrap; }
+.chores-add input { background: var(--void-top); border: 1px solid var(--edge-strong); border-radius: 8px; padding: 7px 10px; color: var(--ink); font: inherit; font-size: 13px; }
+.chores-add input[type=number] { width: 64px; }
+.chores-add input:focus { outline: none; border-color: var(--mint); }
+.chores-people { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-top: 12px; }
+.chore-col { display: flex; flex-direction: column; gap: 1px; }
+.chore-col-head { display: flex; justify-content: space-between; align-items: baseline; padding-bottom: 6px; border-bottom: 1px solid var(--edge); margin-bottom: 4px; }
+.chore-name { font-size: 15px; color: var(--ink); font-weight: 600; }
+.chore-pts { font-size: 12px; color: var(--mint); white-space: nowrap; }
+.chore-task { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 10px; padding: 6px 4px; border-radius: 8px; cursor: pointer; }
+.chore-task:hover { background: var(--edge); }
+.chore-task input { accent-color: var(--mint); width: 16px; height: 16px; margin: 0; cursor: pointer; }
+.chore-title { font-size: 14px; color: var(--ink); }
+.chore-task.done .chore-title { color: var(--faint); text-decoration: line-through; }
+.chore-tpts { font-size: 12px; color: var(--faint); }
+.chore-del { background: none; border: 0; color: var(--faint); font-size: 16px; line-height: 1; cursor: pointer; opacity: 0; padding: 0 4px; }
+.chore-task:hover .chore-del { opacity: 1; }
+.chore-del:hover { color: var(--crit); }
+.chores-empty { color: var(--faint); font-size: 14px; }
+
+/* ---- F8: tile reorder controls in the settings panel ---- */
+.settings-row { justify-content: space-between; }
+.settings-check { display: flex; align-items: center; gap: 10px; flex: 1; cursor: pointer; }
+.tile-move { background: none; border: 0; color: var(--faint); font-size: 11px; line-height: 1; cursor: pointer; padding: 2px 3px; }
+.tile-move:hover { color: var(--ink); }
+
+/* ---- F4: family message board ---- */
+.msgboard-panel {
+  margin-top: 18px; background: var(--panel); border: 1px solid var(--edge);
+  border-radius: 16px; padding: 18px 20px;
+}
+.msg-compose { display: flex; gap: 10px; margin: 6px 0 12px; }
+.msg-compose input {
+  flex: 1; background: var(--void-top); border: 1px solid var(--edge-strong);
+  border-radius: 9px; padding: 9px 12px; color: var(--ink); font: inherit; font-size: 14px;
+}
+.msg-compose input::placeholder { color: var(--faint); }
+.msg-compose input:focus { outline: none; border-color: var(--mint); }
+.msg-compose button {
+  background: var(--mint-soft); border: 1px solid var(--mint); color: var(--mint);
+  border-radius: 9px; padding: 0 16px; font: inherit; font-size: 14px; cursor: pointer;
+}
+.msg-compose button:hover { filter: brightness(1.15); }
+.msg-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.msg-item {
+  display: grid; grid-template-columns: 1fr auto auto; align-items: baseline; gap: 12px;
+  padding: 9px 6px; border-radius: 8px; border-top: 1px solid var(--edge);
+}
+.msg-item:first-child { border-top: 0; }
+.msg-item.pinned { background: var(--warn-soft); }
+.msg-body { color: var(--ink); font-size: 15px; overflow-wrap: anywhere; }
+.msg-meta { color: var(--faint); font-size: 12px; white-space: nowrap; }
+.msg-del {
+  background: none; border: 0; color: var(--faint); font-size: 17px; line-height: 1;
+  cursor: pointer; padding: 0 4px; opacity: 0; transition: opacity .15s, color .15s;
+}
+.msg-item:hover .msg-del { opacity: 1; }
+.msg-del:hover { color: var(--crit); }
+.msg-pin {
+  background: none; border: 0; font-size: 13px; line-height: 1; cursor: pointer;
+  padding: 0 3px; opacity: 0; filter: grayscale(1); transition: opacity .15s, filter .15s;
+}
+.msg-item:hover .msg-pin { opacity: .6; }
+.msg-pin.on, .msg-pin:hover { opacity: 1; filter: none; }
+.msg-empty { color: var(--faint); font-size: 14px; padding: 6px; }
+
+/* ================= camera snapshot tile (F6) ================= */
+.camera-panel {
+  margin-top: 18px;
+  border: 1px solid var(--edge);
+  border-radius: 18px;
+  background: var(--panel);
+  padding: 20px 24px 16px;
+}
+.camera-cfg-btn {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--dim); background: none; border: 1px solid var(--edge-strong);
+  border-radius: 6px; padding: 2px 9px; cursor: pointer;
+}
+.camera-cfg-btn:hover { color: var(--ink); border-color: var(--dim); }
+.camera-cfg { display: flex; gap: 8px; margin: 8px 0 10px; }
+.camera-cfg[hidden] { display: none; }
+.camera-cfg input {
+  flex: 1 1 auto; min-width: 0;
+  background: rgba(233, 238, 247, 0.04); border: 1px solid var(--edge-strong);
+  border-radius: 8px; color: var(--ink); padding: 6px 10px;
+  font-family: var(--sans); font-size: 13px;
+}
+.camera-cfg input:focus-visible { outline: 2px solid var(--mint); outline-offset: 1px; }
+.camera-cfg button {
+  font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  color: var(--ink); background: var(--mint-soft); border: 1px solid var(--edge-strong);
+  border-radius: 8px; padding: 6px 14px; cursor: pointer;
+}
+.camera-cfg button:hover { border-color: var(--mint); }
+.camera-body { margin-top: 4px; }
+.camera-img {
+  display: block; width: 100%;
+  max-height: 380px; object-fit: cover;
+  border-radius: 12px; background: var(--void-top);
+}
+.camera-empty {
+  margin: 0; padding: 28px 0; text-align: center;
+  font-size: 13px; color: var(--faint);
+}
+
+/* ================= photos tile (F5) ================= */
+.media-panel {
+  margin-top: 18px;
+  border: 1px solid var(--edge);
+  border-radius: 18px;
+  background: var(--panel);
+  padding: 20px 24px 18px;
+  animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.32s;
+}
+/* "edit" affordance in the panel head — a quiet text button, not a control. */
+.media-cfg-btn {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--faint); background: none; border: 0; padding: 2px 4px; cursor: pointer;
+  transition: color .15s ease;
+}
+.media-cfg-btn:hover { color: var(--ink); }
+.media-cfg-btn:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
+/* config row: URL field + Save, revealed by the edit button */
+.media-cfg { display: flex; gap: 8px; margin: 10px 0 2px; }
+.media-cfg[hidden] { display: none; }
+.media-cfg input {
+  flex: 1; min-width: 0;
+  background: var(--void-top); color: var(--ink);
+  border: 1px solid var(--edge-strong); border-radius: 8px;
+  padding: 8px 11px; font-size: 13px; font-family: inherit;
+}
+.media-cfg input::placeholder { color: var(--faint); }
+.media-cfg input:focus { outline: none; border-color: var(--mint); }
+.media-cfg button {
+  color: var(--mint); background: var(--mint-soft);
+  border: 1px solid transparent; border-radius: 8px;
+  padding: 8px 16px; font-family: var(--mono); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.06em; cursor: pointer; transition: border-color .15s ease;
+}
+.media-cfg button:hover { border-color: var(--mint); }
+.media-cfg button:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
+/* image body */
+.media-body { margin-top: 10px; }
+.media-img {
+  display: block; width: 100%;
+  max-height: 380px; object-fit: cover; border-radius: 12px;
+}
+.media-empty {
+  color: var(--dim); font-size: 13px; text-align: center;
+  padding: 40px 16px;
+  border: 1px dashed var(--edge-strong); border-radius: 12px;
+}

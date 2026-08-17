@@ -316,6 +316,126 @@ def anomalies_ep():
     return [a.__dict__ for a in alerts.evaluate(rows, cfg, errs)]
 
 
+@app.get("/api/settings")
+def settings_get():
+    """Dashboard feature toggles (F0). Every tile can be turned on/off; state is
+    server-side so the wall display and phones agree."""
+    return api.get_dashboard_settings(_db())
+
+
+@app.post("/api/settings")
+def settings_post(body: dict):
+    from fastapi import HTTPException
+    features = body.get("features") if isinstance(body, dict) else None
+    if not isinstance(features, dict):
+        raise HTTPException(422, 'body must be {"features": {"<key>": true|false}}')
+    return api.set_dashboard_settings(_db(), features)
+
+
+@app.get("/api/chores")
+def chores_get():
+    """Chores / routines (F3): tasks per person with a done-today flag + weekly points."""
+    return api.build_chores(_db(), cfg)
+
+
+@app.post("/api/chores/tasks")
+def chores_add(body: dict):
+    from fastapi import HTTPException
+    person = (body.get("person") or "").strip()[:40]
+    title = (body.get("title") or "").strip()[:120]
+    if not person or not title:
+        raise HTTPException(422, "person and title are required")
+    try:
+        points = max(0, min(int(body.get("points", 1)), 999))
+    except (TypeError, ValueError):
+        raise HTTPException(422, "points must be an integer")
+    return {"id": db.add_chore_task(_db(), person, title, points)}
+
+
+@app.post("/api/chores/tasks/{task_id}/toggle")
+def chores_toggle(task_id: int):
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(cfg.timezone)).date()
+    return {"id": task_id, "done_today": db.toggle_chore_done(_db(), task_id, today)}
+
+
+@app.delete("/api/chores/tasks/{task_id}")
+def chores_delete(task_id: int):
+    from fastapi import HTTPException
+    if not db.delete_chore_task(_db(), task_id):
+        raise HTTPException(404, "no such task")
+    return {"deleted": task_id}
+@app.post("/api/settings/order")
+def settings_order_post(body: dict):
+    """Persist tile display order (F8)."""
+    from fastapi import HTTPException
+    order = body.get("order") if isinstance(body, dict) else None
+    if not isinstance(order, list):
+        raise HTTPException(422, 'body must be {"order": ["<key>", ...]}')
+    return api.set_dashboard_order(_db(), order)
+@app.get("/api/messages")
+def messages_get():
+    """Family message board (F4)."""
+    return api.build_messages(_db())
+
+
+@app.post("/api/messages")
+def messages_post(body: dict):
+    from fastapi import HTTPException
+    text = (body.get("body") or "").strip() if isinstance(body, dict) else ""
+    if not text or len(text) > 500:
+        raise HTTPException(422, "body must be a non-empty message under 500 chars")
+    author = (body.get("author") or "").strip()[:40] or None
+    new_id = db.add_message(_db(), text, author)
+    return {"id": new_id}
+
+
+@app.delete("/api/messages/{message_id}")
+def messages_delete(message_id: int):
+    from fastapi import HTTPException
+    if not db.delete_message(_db(), message_id):
+        raise HTTPException(404, "no such message")
+    return {"deleted": message_id}
+
+
+@app.post("/api/messages/{message_id}/pin")
+def messages_pin(message_id: int, body: dict):
+    from fastapi import HTTPException
+    if not db.set_message_pinned(_db(), message_id, bool(body.get("pinned"))):
+        raise HTTPException(404, "no such message")
+    return {"ok": True}
+
+
+@app.get("/api/camera/config")
+def camera_config_get():
+    return api.get_camera_config(_db())
+
+
+@app.post("/api/camera/config")
+def camera_config_post(body: dict):
+    from fastapi import HTTPException
+    try:
+        return api.set_camera_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.get("/api/photos/config")
+def photos_config_get():
+    """Photos tile source URL (F5). Server-side (kv-backed) so the wall display
+    and phones show the same image source."""
+    return api.get_photos_config(_db())
+
+
+@app.post("/api/photos/config")
+def photos_config_post(body: dict):
+    from fastapi import HTTPException
+    try:
+        return api.set_photos_config(_db(), body.get("url", "") if isinstance(body, dict) else "")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
 # busters version the css/js, but the HTML that references them has no buster
 # of its own — heuristic caching kept serving stale app.js after the
