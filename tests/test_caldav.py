@@ -47,6 +47,7 @@ class FakeCalDAV:
             REM: {REM + "td1.ics": ('"t1"', _TODO_ICS)},
         }
         self.put_calls = []
+        self.reject_writes = False   # when True, PUT returns 412 (stale If-Match)
 
     def request(self, method, url, data=None, headers=None, timeout=None):
         path = url.split("caldav.icloud.com", 1)[-1] if "caldav.icloud.com" in url else url
@@ -98,6 +99,8 @@ class FakeCalDAV:
                 return _Resp(207, _ms(rows))
         if method == "PUT":
             self.put_calls.append((path, body))
+            if self.reject_writes:
+                return _Resp(412)          # Precondition Failed (stale If-Match)
             return _Resp(204, headers={"ETag": '"new"'})
         if method == "DELETE":
             return _Resp(204)
@@ -200,3 +203,58 @@ def test_filtered_todos_due_soon(conn):
     assert any(t["summary"] == "Buy milk" for t in r_in["todos"])       # within 3 days
     r_out = api.build_filtered_todos(conn, now=datetime(2026, 8, 10, tzinfo=timezone.utc))
     assert not any(t["summary"] == "Buy milk" for t in r_out["todos"])  # >3 days out
+
+
+def test_filtered_todos_high_excludes_low_priority(conn):
+    # The 'high' filter must EXCLUDE low-priority items, not merely include high
+    # ones — the original test only asserted inclusion, so a filter that let
+    # everything through would have passed.
+    from house_climate.web import api
+    db.upsert_caldav_collection(conn, "r/", "VTODO", "R", "#fff", None, None)
+    db.upsert_caldav_todo(conn, "r/", "r/hi.ics", '"h"', "#fff", "R",
+                          {"uid": "hi", "summary": "Urgent", "due": None,
+                           "status": "NEEDS-ACTION", "priority": 1})
+    db.upsert_caldav_todo(conn, "r/", "r/lo.ics", '"l"', "#fff", "R",
+                          {"uid": "lo", "summary": "Someday", "due": None,
+                           "status": "NEEDS-ACTION", "priority": 9})
+    api.set_todos_filter(conn, "high")
+    summaries = {t["summary"] for t in api.build_filtered_todos(conn)["todos"]}
+    assert "Urgent" in summaries and "Someday" not in summaries
+
+
+def test_todo_toggle_rejected_write_keeps_cache_honest(conn):
+    # The blocker: a rejected iCloud write (412 stale If-Match) must NOT leave
+    # the local cache claiming the item is done — that lie never self-corrects.
+    # The write is surfaced (CalDAVError) and the cached status stays put.
+    import pytest
+    fake = FakeCalDAV()
+    fake.reject_writes = True
+    c = caldav.CalDAVClient(base_url="https://caldav.icloud.com",
+                            username="bot@icloud.com", password="app-pw", session=fake)
+    caldav.sync_todos(conn, c)
+    href = db.open_todos(conn)[0]["href"]
+    with pytest.raises(caldav.CalDAVError):
+        caldav.toggle_todo(conn, c, href, True)
+    assert db.open_todos(conn)[0]["status"] == "NEEDS-ACTION"   # cache stayed honest
+
+
+def test_all_day_event_keeps_its_local_day(conn):
+    # Regression for the day-shift: an all-day event stored at midnight UTC and
+    # rendered in a timezone behind UTC rolled onto the previous day. Anchored
+    # at noon UTC, it stays on its own calendar day.
+    from datetime import datetime, timezone
+    from house_climate.config import load_config
+    from house_climate.web import api
+    from conftest import CFG_PATH
+    cfg = load_config(CFG_PATH)          # America/Los_Angeles — behind UTC
+    ics = ("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:allday1\r\nSUMMARY:Trash day\r\n"
+           "DTSTART;VALUE=DATE:20260820\r\nDTEND;VALUE=DATE:20260821\r\n"
+           "END:VEVENT\r\nEND:VCALENDAR")
+    ev = caldav.parse_events(ics)[0]
+    assert ev["all_day"] is True
+    db.upsert_caldav_collection(conn, "c/", "VEVENT", "Cal", "#fff", None, None)
+    db.upsert_caldav_event(conn, "c/", "c/allday.ics", '"e"', "#fff", ev)
+    out = api.build_calendar(conn, cfg, now=datetime(2026, 8, 19, 12, tzinfo=timezone.utc))
+    assert "2026-08-20" in [d["date"] for d in out["days"]]        # its own day
+    ev_out = next(e for d in out["days"] if d["date"] == "2026-08-20" for e in d["events"])
+    assert ev_out["all_day"] is True and ev_out["time"] is None

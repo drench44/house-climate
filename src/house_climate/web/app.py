@@ -467,7 +467,14 @@ def reminders_toggle(body: dict):
         raise HTTPException(422, 'body must be {"href": "...", "done": true|false}')
     done = bool(body.get("done"))
     client = caldav.client_from_env(os.environ)   # None -> cache-only (mock)
-    if not caldav.toggle_todo(_db(), client, href, done):
+    try:
+        ok = caldav.toggle_todo(_db(), client, href, done)
+    except caldav.CalDAVError:
+        # iCloud rejected the write-back (stale ETag, auth, network). The cache
+        # was deliberately left unchanged, so tell the client it did NOT stick —
+        # the UI rolls its optimistic checkbox back instead of showing a lie.
+        raise HTTPException(502, "reminder change could not be saved to iCloud")
+    if not ok:
         raise HTTPException(404, "no such reminder")
     return {"href": href, "done": done}
 
