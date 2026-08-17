@@ -1072,3 +1072,134 @@ def build_health(conn, device_id, cfg, now=None) -> dict:
         "short_cycles_healthy": short_cycles_healthy,
         "filter": filter_info,
     }
+
+
+# --- dashboard feature toggles (F0, issue #26) ---------------------------------
+# The registry of toggleable dashboard tiles. Existing panels are listed here;
+# new FamView-derived tiles (F1-F8) append their (key, label) as they land. The
+# key must match the section's data-feature attribute in index.html.
+DASHBOARD_FEATURES = [
+    ("scene", "House & rooms"),
+    ("cost", "Cost rail"),
+    ("humidity", "Humidity"),
+    ("crawl", "Crawl space"),
+    ("ribbon", "Last 24 hours"),
+    ("runtime", "Runtime"),
+    ("health", "System health"),
+    ("learning", "Learning"),
+    ("chores", "Chores"),
+    ("messageboard", "Message board"),
+    ("camera", "Camera"),
+    ("photos", "Photos"),
+]
+
+
+def build_chores(conn, cfg) -> dict:
+    today = datetime.now(ZoneInfo(cfg.timezone)).date()
+    week_start = today - timedelta(days=today.weekday())      # Monday of this ISO week
+    ov = db.chores_overview(conn, today, week_start)
+    people = {}
+    for t in ov["tasks"]:
+        p = people.setdefault(t["person"], {"person": t["person"], "tasks": [], "points_week": 0})
+        p["tasks"].append({"id": t["id"], "title": t["title"], "points": t["points"],
+                           "done_today": t["done_today"]})
+    for person, pts in ov["week_points"].items():
+        people.setdefault(person, {"person": person, "tasks": [], "points_week": 0})["points_week"] = pts
+    return {"people": sorted(people.values(), key=lambda x: x["person"]),
+            "week_start": week_start.isoformat()}
+
+
+def build_messages(conn) -> list[dict]:
+    return [{**m, "created_at": m["created_at"].isoformat()}
+            for m in db.list_messages(conn)]
+
+
+_FEATURE_KEYS = {k for k, _ in DASHBOARD_FEATURES}
+
+
+def _clean_media_url(url) -> str:
+    """Normalize an operator-supplied tile image URL. An empty string clears the
+    tile. Only http(s) is permitted: the value is written verbatim into every
+    viewer's <img src>, so schemes like javascript:/data:/file: must never be
+    stored. Raises ValueError on a non-http(s) URL so the endpoint can 422."""
+    u = str(url or "").strip()[:2000]
+    if not u:
+        return ""
+    from urllib.parse import urlparse
+    if urlparse(u).scheme.lower() not in ("http", "https"):
+        raise ValueError("URL must start with http:// or https://")
+    return u
+
+
+def get_camera_config(conn) -> dict:
+    kv = db.kv_get(conn, "camera_url")
+    url = kv["value"].get("url", "") if kv and isinstance(kv["value"], dict) else ""
+    return {"url": url}
+
+
+def set_camera_config(conn, url) -> dict:
+    db.kv_set(conn, "camera_url", {"url": _clean_media_url(url)})
+    return get_camera_config(conn)
+
+
+def _feature_overrides(conn) -> dict:
+    kv = db.kv_get(conn, "dashboard_settings")
+    if kv and isinstance(kv["value"], dict):
+        ov = kv["value"].get("features")
+        if isinstance(ov, dict):
+            return ov
+    return {}
+
+
+def _tile_order(conn) -> list:
+    kv = db.kv_get(conn, "dashboard_order")
+    if kv and isinstance(kv["value"], dict):
+        order = kv["value"].get("order")
+        if isinstance(order, list):
+            return [k for k in order if k in _FEATURE_KEYS]
+    return []
+
+
+def get_dashboard_settings(conn) -> dict:
+    """Every registered feature with its effective enabled state (default on),
+    plus the saved tile order (F8). Server-side (kv-backed) so the wall display
+    and phones agree."""
+    ov = _feature_overrides(conn)
+    return {"features": [
+        {"key": k, "label": label, "enabled": bool(ov.get(k, True))}
+        for k, label in DASHBOARD_FEATURES],
+        "order": _tile_order(conn)}
+
+
+def set_dashboard_order(conn, order) -> dict:
+    """Persist the tile display order (F8). Unknown keys are dropped; the client
+    applies it to the movable full-width sections."""
+    clean = [k for k in order if k in _FEATURE_KEYS] if isinstance(order, list) else []
+    db.kv_set(conn, "dashboard_order", {"order": clean})
+    return get_dashboard_settings(conn)
+
+
+def set_dashboard_settings(conn, features: dict) -> dict:
+    """Merge a {key: bool} patch over the stored overrides. Unknown keys are
+    ignored (so a stale client can't inject junk); values coerce to bool. The
+    merge is atomic in SQL (see db.merge_kv_features) so racing toggles from the
+    same UI don't clobber each other."""
+    clean = {k: bool(v) for k, v in features.items() if k in _FEATURE_KEYS}
+    db.merge_kv_features(conn, "dashboard_settings", clean)
+    return get_dashboard_settings(conn)
+
+
+# --- photos tile (F5, issue #31) -----------------------------------------------
+# The photos tile shows an image from a single operator-set URL, stored
+# server-side (kv "photos_url") so the wall display and phones agree on the
+# source. Read-only, glanceable; the client cache-busts on a timer so a
+# rotating shared-album / "random photo" URL cycles.
+def get_photos_config(conn) -> dict:
+    kv = db.kv_get(conn, "photos_url")
+    url = kv["value"].get("url", "") if kv and isinstance(kv["value"], dict) else ""
+    return {"url": url}
+
+
+def set_photos_config(conn, url) -> dict:
+    db.kv_set(conn, "photos_url", {"url": _clean_media_url(url)})
+    return get_photos_config(conn)
