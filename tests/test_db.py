@@ -108,25 +108,33 @@ def test_outdoor_hourly_includes_bucket_when_dewpoint_null_but_temp_present(conn
     assert rows[0]["temp"] == 61.0 and rows[0]["rh"] == 78.0 and rows[0]["dp"] is None
 
 
-def test_first_reading_ts_returns_earliest_or_none(conn):
-    assert db.first_reading_ts(conn, "dev1") is None          # never reported
-    early = datetime(2026, 8, 10, 3, 0, tzinfo=timezone.utc)
-    db.insert_reading(conn, _reading(ts=early + timedelta(hours=5)))
-    db.insert_reading(conn, _reading(ts=early))
-    assert db.first_reading_ts(conn, "dev1") == early         # min, not insert order
+def test_first_weather_ts_ignores_pre_feed_rows(conn):
+    assert db.first_weather_ts(conn, "dev1") is None          # never reported
+    old = datetime(2026, 8, 10, 3, 0, tzinfo=timezone.utc)
+    # an indoor-only row (no weather) predates the feed and must be ignored
+    db.insert_reading(conn, _reading(ts=old, wx_outdoor_temp_f=None,
+                                     wx_humidity=None, wx_dewpoint_f=None))
+    assert db.first_weather_ts(conn, "dev1") is None          # still no weather
+    feed = old + timedelta(hours=10)
+    db.insert_reading(conn, _reading(ts=feed + timedelta(hours=2)))
+    db.insert_reading(conn, _reading(ts=feed))
+    assert db.first_weather_ts(conn, "dev1") == feed          # earliest WEATHER row, not `old`
 
 
-def test_outdoor_series_buckets_by_bucket_seconds(conn):
-    # The /api/outdoor chart sizes buckets by range so 30d isn't 720 points:
-    # two readings 20 min apart fall in one 3h bucket and are averaged.
-    h = datetime(2026, 8, 12, 6, 0, tzinfo=timezone.utc)
-    db.insert_reading(conn, _reading(ts=h + timedelta(minutes=10),
+def test_outdoor_series_bucket_seconds_actually_widens_the_bucket(conn):
+    # Two readings in DIFFERENT hours but the SAME 3h window: hourly buckets
+    # keep them apart (2 rows), a 3h bucket merges them (1 row). This is what a
+    # no-op that ignored bucket_s could NOT satisfy -- it locks the widening.
+    day = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    db.insert_reading(conn, _reading(ts=day + timedelta(hours=6, minutes=10),
                                      wx_outdoor_temp_f=60.0, wx_humidity=80.0, wx_dewpoint_f=54.0))
-    db.insert_reading(conn, _reading(ts=h + timedelta(minutes=30),
+    db.insert_reading(conn, _reading(ts=day + timedelta(hours=7, minutes=30),
                                      wx_outdoor_temp_f=64.0, wx_humidity=70.0, wx_dewpoint_f=56.0))
-    rows = db.outdoor_series(conn, "dev1", datetime(2026, 8, 12, tzinfo=timezone.utc), 3 * 3600)
-    assert len(rows) == 1
-    assert rows[0]["temp"] == 62.0 and rows[0]["rh"] == 75.0 and rows[0]["dp"] == 55.0
+    hourly = db.outdoor_series(conn, "dev1", day, 3600)
+    assert len(hourly) == 2                                   # distinct hours
+    three_h = db.outdoor_series(conn, "dev1", day, 3 * 3600)
+    assert len(three_h) == 1                                  # merged into one 3h bucket
+    assert three_h[0]["temp"] == 62.0 and three_h[0]["rh"] == 75.0 and three_h[0]["dp"] == 55.0
 
 
 def test_outdoor_hourly_includes_bucket_when_only_rh_present(conn):

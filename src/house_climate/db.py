@@ -533,14 +533,19 @@ def outdoor_hourly(conn, device_id, since_ts) -> list[dict]:
     return outdoor_series(conn, device_id, since_ts, 3600)
 
 
-def first_reading_ts(conn, device_id):
-    """Timestamp of a device's earliest stored reading — when it began
-    collecting — or None if it has never reported. Lets a caller tell a young
-    install (low coverage because history is short) from a flaky feed (low
-    coverage because of real gaps)."""
+def first_weather_ts(conn, device_id):
+    """Timestamp of a device's earliest reading that CARRIED weather — when the
+    weather feed began producing data — or None if it never has. /api/outdoor's
+    data_start uses this (not the device's first reading of any kind) so that a
+    low coverage reads correctly: a young feed when data_start sits inside the
+    window, real gaps when it predates it. An old device that only recently
+    gained a weather feed must not look like a gappy one — hence the wx filter,
+    which matches outdoor_series' own 'any wx field present' rule."""
     row = conn.execute(
-        "SELECT min(ts) FROM readings WHERE device_id=%s", (device_id,)).fetchone()
-    return row[0] if row else None
+        "SELECT min(ts) FROM readings WHERE device_id=%s"
+        "   AND (wx_outdoor_temp_f IS NOT NULL OR wx_humidity IS NOT NULL"
+        "        OR wx_dewpoint_f IS NOT NULL)", (device_id,)).fetchone()
+    return row[0]
 
 
 def sensor_daily_stats(conn, sensor_id, tz, since_ts=None) -> list[dict]:

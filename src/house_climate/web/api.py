@@ -613,7 +613,7 @@ def build_outdoor(conn, device_id, range_key, now=None) -> dict:
         "coverage": {"temp": _field_coverage("temp"),
                      "rh": _field_coverage("rh"),
                      "dew": _field_coverage("dp")},
-        "data_start": (db.first_reading_ts(conn, device_id) or wx_rows[0]["ts"]).isoformat(),
+        "data_start": (db.first_weather_ts(conn, device_id) or wx_rows[0]["ts"]).isoformat(),
         "series": series,
     }
 
