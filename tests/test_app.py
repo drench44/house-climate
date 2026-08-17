@@ -139,3 +139,36 @@ def test_write_rate_limit_returns_429(conn, monkeypatch):
     assert 429 in codes
     assert codes.count(200) <= 3
     appmod._write_hits.clear()
+# --- FastAPI routing-layer coverage (issue #12) ---
+
+def test_ha_precool_valid_and_invalid(conn):
+    assert client.post("/api/ha/precool", json={"enabled": True}).status_code == 200
+    assert client.post("/api/ha/precool", json={"enabled": "yes"}).status_code == 422
+
+
+def test_interventions_crud_and_error_branches(conn):
+    assert client.post("/api/interventions", json={"date": "2026-08-01", "label": ""}).status_code == 422
+    assert client.post("/api/interventions", json={"date": "nope", "label": "x"}).status_code == 422
+    r = client.post("/api/interventions", json={"date": "2026-08-01", "label": "vapor barrier"})
+    assert r.status_code == 200, r.text
+    iid = r.json()["id"]
+    assert any(iv["id"] == iid for iv in client.get("/api/interventions").json())
+    assert client.delete(f"/api/interventions/{iid}").status_code == 200
+    assert client.delete(f"/api/interventions/{iid}").status_code == 404   # already gone
+
+
+def test_anomalies_endpoint_returns_list(conn):
+    r = client.get("/api/anomalies")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+
+def test_read_endpoints_smoke_on_empty_db(conn):
+    # Every read route must serve (fails-soft to available:false), not 500, even
+    # with no device/readings — exercises the route wiring + _device fallback.
+    for path in ["/api/now", "/api/history", "/api/runtime", "/api/cost",
+                 "/api/cost/summary", "/api/forecast", "/api/precool", "/api/humidity",
+                 "/api/rooms", "/api/crawl", "/api/moisture", "/api/air",
+                 "/api/thermal", "/api/timeline", "/api/health"]:
+        r = client.get(path)
+        assert r.status_code == 200, f"{path}: {r.status_code} {r.text}"
