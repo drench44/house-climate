@@ -73,7 +73,15 @@ class CalDAVClient:
         # Relative hrefs from the server resolve against the base host.
         if url.startswith("/"):
             url = self.base_url + url
-        resp = self.session.request(method, url, data=body, headers=h, timeout=30)
+        try:
+            resp = self.session.request(method, url, data=body, headers=h, timeout=30)
+        except requests.exceptions.RequestException as e:
+            # Transport-level failure (connection refused, DNS, timeout, TLS):
+            # convert to CalDAVError at this single choke point so callers that
+            # catch CalDAVError (toggle_todo's write-back, the /reminders/toggle
+            # 502 handler, sync()'s fallback) actually cover the network case —
+            # otherwise a raw requests exception escapes as an unhandled 500.
+            raise CalDAVError(f"{method} {url} -> transport error: {e}") from e
         if resp.status_code in (401, 403):
             raise CalDAVAuthError(f"{method} {url} -> HTTP {resp.status_code}")
         if resp.status_code >= 500:
