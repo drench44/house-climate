@@ -26,9 +26,20 @@ rolls that section to a dated version via `python scripts/release.py`.
 - Static asset cache-busting is unified to the app version (`?v=<version>`), so
   the css/js cache-busts can no longer drift apart or lag a branch.
 
+### Removed
+- The family-hub feature set (F0–F8) that had been built into this engine by
+  mistake: the family calendar, reminders, chores, focus list, message board,
+  photos, camera, dashboard tile-toggles, and slot ordering — plus the
+  CalDAV/iCloud client and the `icalendar` dependency. These belong in the
+  separate family-hub project that embeds this dashboard, not in the public
+  engine. The generic `kv` store is retained (climate features use it).
+
 ### Fixed
 - `release.py` reports honestly when a failed release commit's recovery restore
   also fails, instead of falsely claiming a clean tree.
+- The crawl-space chips and tooltip now format timestamps with the intended
+  range-aware formatter; a duplicate `fmtWhen()` from a removed family tile had
+  been shadowing it.
 
 ## [1.0.0] — 2026-08-17
 
