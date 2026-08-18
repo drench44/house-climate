@@ -1,5 +1,4 @@
 import logging
-import hashlib
 import ipaddress
 import os
 import threading
@@ -16,6 +15,7 @@ from .. import version as hcversion
 from ..config import load_config, load_secrets
 from . import alerts, api
 from .alerts import alert_loop
+from .build import compute_build
 
 cfg = load_config(os.environ.get("CONFIG_PATH", "config.json"))
 secrets = load_secrets(os.environ)
@@ -29,30 +29,11 @@ BACKUP_STALE_S = int(os.environ.get("HC_BACKUP_STALE_SECS", "108000"))
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
-
-def _compute_build() -> str:
-    """A 12-char hex token over the baked static assets — an ops "what bytes are
-    actually running?" fingerprint, distinct from the human SemVer. Changes when
-    any served html/css/js changes; a deploy restarts the process and recomputes
-    it. Never raises: an unreadable asset is skipped so import can't fail."""
-    h = hashlib.sha256()
-    for root, _dirs, files in os.walk(STATIC_DIR):
-        for name in sorted(files):
-            if name.endswith((".html", ".css", ".js")):
-                try:
-                    h.update((os.path.relpath(os.path.join(root, name), STATIC_DIR)).encode())
-                    with open(os.path.join(root, name), "rb") as f:
-                        h.update(f.read())
-                except OSError:
-                    continue
-    return h.hexdigest()[:12]
-
-
-# The human-facing release identity (distinct from BUILD, the asset-content
-# hash): the SemVer from VERSION. Both read once at import — a deploy restarts
-# the process and picks up the new version.
+# The human-facing release identity (the SemVer from VERSION) and the
+# asset-content fingerprint (BUILD, see web/build.py), both read once at import
+# — a deploy restarts the process and picks up the new version/build.
 APP_VERSION = hcversion.read_version()
-BUILD = _compute_build()
+BUILD = compute_build(STATIC_DIR)
 
 _conn_lock = threading.Lock()
 

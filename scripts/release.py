@@ -96,7 +96,7 @@ def stamp_assets(html: str, version: str) -> str:
 
 def _git(*args: str) -> str:
     return subprocess.run(["git", *args], cwd=REPO_ROOT, check=True,
-                          capture_output=True, text=True).stdout.strip()
+                          capture_output=True, text=True, encoding="utf-8").stdout.strip()
 
 
 def _require_clean_tree() -> None:
@@ -153,9 +153,18 @@ def main(argv: list[str] | None = None) -> int:
         # reject it. Skipping the hook here is intentional, not a bypass.
         _git("commit", "--no-verify", "-m", f"release: v{new}")
     except subprocess.CalledProcessError as e:
-        subprocess.run(["git", "checkout", "HEAD", "--", *rel_paths], cwd=REPO_ROOT)
-        print(f"release: commit failed ({e.stderr or e}); restored files to "
-              "HEAD, nothing committed", file=sys.stderr)
+        restore = subprocess.run(["git", "checkout", "HEAD", "--", *rel_paths],
+                                 cwd=REPO_ROOT, capture_output=True, text=True)
+        if restore.returncode == 0:
+            print(f"release: commit failed ({e.stderr or e}); restored files to "
+                  "HEAD, nothing committed", file=sys.stderr)
+        else:
+            # The restore itself failed — DON'T claim a clean tree the operator
+            # would trust and re-run release on top of. Say so plainly.
+            print(f"release: commit failed ({e.stderr or e}) AND the restore also "
+                  f"failed ({restore.stderr.strip() or restore.returncode}) — "
+                  "VERSION/CHANGELOG/index.html may still be modified and staged; "
+                  "check `git status` before re-running.", file=sys.stderr)
         return 1
 
     # Phase 2: the commit is REAL now. If tagging fails, do NOT restore (there's

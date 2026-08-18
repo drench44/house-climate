@@ -26,6 +26,10 @@ rolls that section to a dated version via `python scripts/release.py`.
 - Static asset cache-busting is unified to the app version (`?v=<version>`), so
   the css/js cache-busts can no longer drift apart or lag a branch.
 
+### Fixed
+- `release.py` reports honestly when a failed release commit's recovery restore
+  also fails, instead of falsely claiming a clean tree.
+
 ## [1.0.0] — 2026-08-17
 
 The baseline: house-climate as it runs in production.
