@@ -217,6 +217,15 @@ DB-backed tests skip unless `TEST_DB_DSN` points at a running Postgres (the
 compose `db` service on `postgresql://climate:climate@localhost:5433/climate`
 works). The JS helper tests need Node ≥ 20.
 
+## Versioning
+
+One SemVer in `VERSION` drives `house_climate.__version__`, the `GET
+/api/version` readout, the footer version line, and the asset cache-busts.
+Every code PR adds a `## [Unreleased]` bullet in `CHANGELOG.md` (enforced by a
+CI job + a local pre-commit hook); `python scripts/release.py {major|minor|patch}`
+cuts a release and `git push --follow-tags` publishes a GitHub Release from the
+changelog. See [docs/releasing.md](docs/releasing.md).
+
 ## License
 
 MIT.

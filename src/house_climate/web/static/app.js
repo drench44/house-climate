@@ -1318,10 +1318,27 @@ document.addEventListener('visibilitychange', () => {
 /* boot                                                                   */
 /* ---------------------------------------------------------------------- */
 
+/* Version readout (debug/ops): a quiet "v<version>" in the footer, from
+   /api/version — so you can see what's actually deployed without a shell. Not a
+   feature surface (no changelog, no panel; releases live on GitHub). Fail-soft:
+   a failed fetch just leaves the line blank. */
+let appVersion = null;
+function paintVersion() {
+  const el = document.getElementById('foot-version');
+  if (el) el.textContent = appVersion ? `v${appVersion}` : '';
+}
+function initVersion() {
+  return fetch('/api/version')
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad status'))))
+    .then((d) => { appVersion = d && d.version; paintVersion(); })
+    .catch(() => { /* offline / pre-deploy — line stays blank */ });
+}
+
 spawnAmbience();
 initRibbonHover();
 initCrawlHover();
 tickClock();
 setInterval(tickClock, 1000);
 refresh();
+initVersion();
 setInterval(refresh, REFRESH_MS);

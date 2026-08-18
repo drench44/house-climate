@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Pre-commit changelog guard (generic — contains no private data).
+#
+# Blocks a commit that changes app code under src/ without adding a bullet to
+# CHANGELOG.md's [Unreleased] section. Docs-only and test-only changes are
+# exempt. The same check runs blocking in CI (changelog-guard), so this hook is
+# just the early, local copy — bypass a genuine exception with `git commit
+# --no-verify`.
+#
+# Enabled by scripts/install-hooks.sh (git config core.hooksPath .githooks).
+# Fails OPEN if python3 is unavailable (CI still catches it); the guard itself
+# fails CLOSED on a missing entry.
+set -u
+
+repo_top="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+guard="$repo_top/scripts/check_changelog.py"
+[ -f "$guard" ] || exit 0
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "pre-commit: python3 not found — skipping changelog guard (CI still enforces it)" >&2
+  exit 0
+fi
+
+python3 "$guard" --staged

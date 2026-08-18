@@ -25,7 +25,19 @@ Verify tests genuinely RUN (real DB/services, not silently skipped). This is the
 default gate — it should happen without being asked. Docs-only changes
 (`*.md`, comments) are exempt.
 
+## Versioning & changelog — required
+
+Any PR that changes app code under `src/` must add a bullet under `##
+[Unreleased]` in `CHANGELOG.md` (`### Added/Changed/Fixed`). Docs-only (`*.md`)
+and test-only (`tests/`) diffs are exempt — the same carve-out as the review
+gate. This is enforced by the CI `changelog-guard` job and the local
+`.githooks/pre-commit` hook. Releases are cut with `python scripts/release.py
+{major|minor|patch}` (never hand-edit `VERSION` or the `?v=` asset stamps). See
+`docs/releasing.md`.
+
 ## After cloning
 
 After cloning, run `scripts/install-hooks.sh` — installs the pre-push
-privacy guard (inert without the operator's private scanner).
+privacy guard AND the pre-commit changelog guard (both via
+`core.hooksPath=.githooks`; the privacy guard is inert without the operator's
+private scanner).
