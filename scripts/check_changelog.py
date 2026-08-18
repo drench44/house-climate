@@ -44,6 +44,15 @@ def requires_entry(changed_paths: list[str]) -> bool:
                for p in changed_paths)
 
 
+def is_release(changed_paths: list[str]) -> bool:
+    """True iff this diff is a release cut by scripts/release.py — it bumps
+    VERSION and ROLLS [Unreleased] into a dated section rather than adding a
+    bullet, so it's exempt: it can't satisfy the [Unreleased]-entry rule by
+    design (that's the whole point of a release). VERSION is only ever touched by
+    release.py, so its presence is the tight, unambiguous signal."""
+    return "VERSION" in changed_paths
+
+
 def _unreleased_bullets(changelog: str) -> set[str]:
     m = _UNRELEASED.search(changelog)
     if not m:
@@ -107,6 +116,12 @@ def main(argv: list[str] | None = None) -> int:
     base_changelog = _changelog_at(base_ref)
 
     if not requires_entry(changed):
+        return 0
+    if is_release(changed):
+        # A release rolls [Unreleased] rather than adding a bullet, so it can't
+        # (and shouldn't) satisfy the entry rule. NOTE: this exempts the WHOLE
+        # diff on the VERSION signal, so a release PR must not bundle unrelated
+        # unlogged src/ changes — fine because release.py is VERSION's only writer.
         return 0
     if gained_entry(base_changelog, changelog_now):
         return 0
