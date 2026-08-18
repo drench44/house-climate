@@ -867,6 +867,9 @@ body {
   letter-spacing: 0.06em;
 }
 .foot .r { margin-left: auto; }
+/* Quiet deployed-version line — inherits the footer's faint mono; collapses
+   until /api/version resolves so it never leaves a stray gap. */
+.foot-version:empty { display: none; }
 
 /* ================= moisture case page ================= */
 .mo-wrap { max-width: 1040px; }
