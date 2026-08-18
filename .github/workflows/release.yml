@@ -1,0 +1,27 @@
+name: release
+
+# When a version tag is pushed (release.py creates it), publish a GitHub Release
+# whose notes are that version's CHANGELOG.md section — so the changelog is the
+# single source for the release notes too.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # needed to create the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Publish release from the changelog section
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          python scripts/changelog_notes.py "$TAG" > notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md
