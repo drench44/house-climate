@@ -157,3 +157,58 @@ def test_main_base_fails_LOUD_on_unresolvable_ref(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "REPO_ROOT", repo)
     with pytest.raises(subprocess.CalledProcessError):
         cc.main(["--base", "no-such-ref"])
+
+
+# --- is_release exemption (a release rolls [Unreleased], can't add a bullet) --
+
+def test_release_diff_is_recognized():
+    assert cc.is_release(["VERSION", "CHANGELOG.md",
+                          "src/house_climate/web/static/index.html"]) is True
+
+
+def test_non_release_src_change_is_not_a_release():
+    assert cc.is_release(["src/house_climate/web/app.py", "CHANGELOG.md"]) is False
+
+
+def test_main_staged_EXEMPTS_a_release_that_empties_unreleased(tmp_path, monkeypatch):
+    """A release cut (bumps VERSION, rolls [Unreleased] into a dated section,
+    touches src/index.html) must PASS the guard even though it adds no
+    [Unreleased] bullet — otherwise release PRs are blocked. Without the
+    is_release exemption this diff (src changed, no new bullet) would be BLOCKED."""
+    repo = _repo(tmp_path)
+    _write(repo, "VERSION", "1.0.0\n")
+    _write(repo, "CHANGELOG.md", _SEED)
+    _write(repo, "src/house_climate/web/static/index.html", '<link href="a.css?v=1.0.0">\n')
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "init")
+    # a release: bump VERSION, roll [Unreleased] empty, stamp the asset
+    _write(repo, "VERSION", "1.1.0\n")
+    _write(repo, "CHANGELOG.md",
+           "## [Unreleased]\n\n## [1.1.0] — 2026-08-18\n### Added\n- seed\n\n"
+           "## [1.0.0] — 2026-08-17\n### Added\n- base\n")
+    _write(repo, "src/house_climate/web/static/index.html", '<link href="a.css?v=1.1.0">\n')
+    _git(repo, "add", "-A")
+    monkeypatch.setattr(cc, "REPO_ROOT", repo)
+    assert cc.main(["--staged"]) == 0
+
+
+def test_main_base_EXEMPTS_a_release_pr(tmp_path, monkeypatch):
+    """The bug this fixes is a CI failure — a release PR'd on its own (the
+    blocking `--base` mode CI runs) was BLOCKED because it empties [Unreleased]
+    while touching src/index.html. Prove the exemption lets it through in --base
+    mode too (mirrors test_main_base_BLOCKS_pr_branched_before_a_release)."""
+    repo = _repo(tmp_path)
+    _write(repo, "VERSION", "1.0.0\n")
+    _write(repo, "CHANGELOG.md", _SEED)
+    _write(repo, "src/house_climate/web/static/index.html", '<link href="a.css?v=1.0.0">\n')
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "M")
+    default = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    _git(repo, "checkout", "-q", "-b", "release")
+    # a release commit on the branch: bump VERSION, roll [Unreleased] empty, stamp
+    _write(repo, "VERSION", "1.1.0\n")
+    _write(repo, "CHANGELOG.md",
+           "## [Unreleased]\n\n## [1.1.0] — 2026-08-18\n### Added\n- seed\n\n"
+           "## [1.0.0] — 2026-08-17\n### Added\n- base\n")
+    _write(repo, "src/house_climate/web/static/index.html", '<link href="a.css?v=1.1.0">\n')
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "release 1.1.0")
+    monkeypatch.setattr(cc, "REPO_ROOT", repo)
+    assert cc.main(["--base", default]) == 0
