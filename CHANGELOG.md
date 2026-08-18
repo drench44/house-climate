@@ -10,6 +10,8 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-17
+
 ### Added
 - Versioning system: a single `VERSION` source of truth, this changelog, git
   tags, and a `scripts/release.py` bump-roll-tag ceremony.
