@@ -11,9 +11,11 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import db
+from .. import version as hcversion
 from ..config import load_config, load_secrets
 from . import alerts, api
 from .alerts import alert_loop
+from .build import compute_build
 
 cfg = load_config(os.environ.get("CONFIG_PATH", "config.json"))
 secrets = load_secrets(os.environ)
@@ -24,6 +26,14 @@ db.ensure_app_schema(conn)  # create runtime-added tables (filter_events) if mis
 # this. Default 30h clears the nightly run + its randomized delay, so only a
 # genuinely missed/failed backup trips it.
 BACKUP_STALE_S = int(os.environ.get("HC_BACKUP_STALE_SECS", "108000"))
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+# The human-facing release identity (the SemVer from VERSION) and the
+# asset-content fingerprint (BUILD, see web/build.py), both read once at import
+# — a deploy restarts the process and picks up the new version/build.
+APP_VERSION = hcversion.read_version()
+BUILD = compute_build(STATIC_DIR)
 
 _conn_lock = threading.Lock()
 
@@ -137,6 +147,13 @@ def backup():
     """Backup-health for the header badge: {known, last_success, age_s, stale,
     threshold_s}. Reads the heartbeat the backup script writes on success."""
     return api.build_backup(_db(), stale_s=BACKUP_STALE_S)
+
+
+@app.get("/api/version")
+def api_version():
+    """The deployed version + build hash — a debug/ops readout ("what's actually
+    running?"). The changelog itself lives on GitHub, not here."""
+    return {"version": APP_VERSION, "build": BUILD}
 
 
 @app.get("/api/history")
@@ -429,7 +446,7 @@ async def security_guard(request, call_next):
     return await call_next(request)
 
 
-app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 # alert evaluator wired in Task 11. Supervised: if alert_loop ever escapes its
 # own inner try (it shouldn't now that config is validated at load, but a novel

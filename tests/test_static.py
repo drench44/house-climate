@@ -277,3 +277,41 @@ def test_no_external_resources():
                        ("square.html", SQ_HTML), ("styles.css", CSS)):
         assert not re.search(r'(?:src|href)="https?://', text), f"{name} references the internet"
         assert "@import" not in text, f"{name} pulls a remote stylesheet"
+
+
+# --- versioning guards ------------------------------------------------------
+# The dashboard's (index.html) asset cache-busts are unified to the app version
+# (scripts/release.py is the sole writer). These pin that invariant so a stray
+# hand-edit that reintroduces a drifting ?v= number fails CI. (moisture.html and
+# square.html keep their own independent per-page counters — release.py stamps
+# only index.html, matching where the versioned frontend lives.)
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_version_file_is_clean_semver():
+    v = (ROOT / "VERSION").read_text().strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", v), f"VERSION must be clean SemVer, got {v!r}"
+
+
+def test_every_index_cache_bust_equals_the_version():
+    version = (ROOT / "VERSION").read_text().strip()
+    busts = re.findall(r"\?v=([\w.]+)", INDEX_HTML)
+    assert busts, "index.html should carry ?v= cache-busts on its assets"
+    drifted = sorted({b for b in busts if b != version})
+    assert not drifted, (f"index.html cache-busts must all equal VERSION ({version}); "
+                         f"drifted: {drifted} — run scripts/release.py, don't hand-edit ?v=")
+
+
+def test_dunder_version_matches_the_version_file():
+    import house_climate
+    assert house_climate.__version__ == (ROOT / "VERSION").read_text().strip()
+
+
+def test_dockerfile_ships_version():
+    """The running app reads VERSION at the repo root (=/app in the image) for
+    /api/version + house_climate.__version__. If the Dockerfile doesn't COPY it,
+    the readout silently falls back to '0.0.0+unknown' — fail-soft hiding a real
+    break. Guard so the image always carries it."""
+    dockerfile = (ROOT / "web.Dockerfile").read_text()
+    assert re.search(r"COPY\s+.*\bVERSION\b", dockerfile), \
+        "web.Dockerfile must COPY VERSION into the image"

@@ -5,6 +5,8 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 git config core.hooksPath .githooks
+# .githooks/pre-commit (the changelog guard) is now active for everyone; the
+# pre-push privacy guard below only does work in operator mode.
 if [ -x "$HOME/Documents/garage/privacy/scan-repo.sh" ]; then
   git config guard.operator true
   echo "installed: core.hooksPath=.githooks, guard.operator=true (operator mode — pushes are scanned)"
