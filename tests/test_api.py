@@ -1515,3 +1515,52 @@ def test_sensor_daily_stats_trailing_credit_capped_at_elapsed(conn):
     stats = db.sensor_daily_stats(conn, "ecowitt_outdoor", CFG.timezone)
     total_h = sum(d["obs_h"] for d in stats)
     assert total_h <= 120 / 3600.0   # ~60s elapsed, generous margin, never 600s
+
+
+# --- _backup_status: pure, DB-free. Maps (last-success, now, threshold) to the
+# dashboard /api/backup payload. No Postgres needed. ---
+
+_T0 = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
+
+
+def test_backup_status_unknown_when_no_heartbeat():
+    # No heartbeat recorded yet (fresh deploy before first nightly run): muted
+    # 'unknown', NOT a false alarm.
+    s = api._backup_status(None, _T0, 108000)
+    assert s == {"known": False, "last_success": None, "age_s": None,
+                 "stale": False, "threshold_s": 108000}
+
+
+def test_backup_status_fresh_is_not_stale():
+    s = api._backup_status(_T0 - timedelta(hours=1), _T0, 108000)
+    assert s["known"] is True and s["age_s"] == 3600 and s["stale"] is False
+
+
+def test_backup_status_old_is_stale():
+    s = api._backup_status(_T0 - timedelta(hours=31), _T0, 108000)  # 111600s > 108000
+    assert s["stale"] is True and s["age_s"] == 111600
+
+
+def test_backup_status_boundary_exactly_threshold_not_stale():
+    s = api._backup_status(_T0 - timedelta(seconds=108000), _T0, 108000)
+    assert s["age_s"] == 108000 and s["stale"] is False   # stale is age > threshold
+
+
+def test_backup_status_boundary_one_past_threshold_is_stale():
+    s = api._backup_status(_T0 - timedelta(seconds=108001), _T0, 108000)
+    assert s["age_s"] == 108001 and s["stale"] is True
+
+
+def test_build_backup_reads_kv_heartbeat(conn):
+    # End-to-end against the kv table the backup script upserts into.
+    conn.execute("INSERT INTO kv (k, v, updated_at) VALUES"
+                 " ('backup_heartbeat', '{\"dump\": \"climate-2026-08-17.dump\"}'::jsonb, %s)",
+                 (_T0 - timedelta(hours=2),))
+    s = api.build_backup(conn, now=_T0, stale_s=108000)
+    assert s["known"] is True and s["age_s"] == 7200 and s["stale"] is False
+
+
+def test_build_backup_unknown_when_kv_empty(conn):
+    s = api.build_backup(conn, now=_T0, stale_s=108000)
+    assert s == {"known": False, "last_success": None, "age_s": None,
+                 "stale": False, "threshold_s": 108000}
