@@ -80,6 +80,33 @@ def _peak_mid_weekday_rates(cfg):
     return rates[-1], rates[-2]
 
 
+_BACKUP_STALE_S = 108000   # 30h: past the nightly run + its randomized delay,
+                           # so it fires only on a genuinely missed/failed backup.
+
+
+def _backup_status(last_success, now, stale_s):
+    """Pure: map (last-success datetime or None, now, staleness threshold) to
+    the /api/backup payload. Factored out of build_backup so the verdict is
+    unit-testable without a DB. 'known' is False before any heartbeat exists,
+    so a fresh deploy shows a muted 'unknown', never a false alarm."""
+    if last_success is None:
+        return {"known": False, "last_success": None, "age_s": None,
+                "stale": False, "threshold_s": stale_s}
+    age = int((now - last_success).total_seconds())
+    return {"known": True, "last_success": last_success.isoformat(), "age_s": age,
+            "stale": age > stale_s, "threshold_s": stale_s}
+
+
+def build_backup(conn, now=None, stale_s=_BACKUP_STALE_S) -> dict:
+    """Dashboard backup-health signal. Reads the 'backup_heartbeat' kv row the
+    backup script upserts on every successful dump; a STALE heartbeat also
+    catches 'the backup stopped running at all' (timer disabled, box asleep),
+    which the OnFailure ntfy can't -- a unit that never runs never fails."""
+    now = now or datetime.now(timezone.utc)
+    hb = db.kv_get(conn, "backup_heartbeat")
+    return _backup_status(hb["updated_at"] if hb else None, now, stale_s)
+
+
 def build_now(conn, device_id) -> dict:
     rows = db.recent_readings(conn, device_id, datetime.now(timezone.utc) - timedelta(hours=1))
     if not rows:

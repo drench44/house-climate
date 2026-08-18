@@ -28,6 +28,20 @@ function fmtAge(ageS) {
   return `${Math.round(ageS / 3600)}h`;
 }
 
+function backupBadge(status) {
+  // Pure: /api/backup payload -> header-badge descriptor. Hidden when the
+  // backup is healthy, still 'unknown' (no heartbeat recorded yet), or the
+  // payload is missing/errored; amber only once a KNOWN backup has gone stale.
+  if (!status || !status.known || !status.stale) return { show: false };
+  const age = fmtAge(status.age_s);
+  return {
+    show: true,
+    level: 'warn',
+    text: `⚠ Backup stale (${age})`,
+    title: `No successful backup in ${age} (warns past ${fmtAge(status.threshold_s)})`,
+  };
+}
+
 function fmtHour(h) {
   const ap = h < 12 || h === 24 ? 'am' : 'pm';
   let hh = h % 12;

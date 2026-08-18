@@ -30,3 +30,14 @@ restore point immediately before touching the box and **refuses to proceed if
 that snapshot fails**. A bad rebuild, a failed migration, or a TimescaleDB
 major-version bump can wreck the volume; this guarantees a current restore
 point exists first.
+
+## Seeing it on the dashboard
+
+A successful backup also records a `backup_heartbeat` row in the app's `kv`
+table. The dashboard polls `/api/backup` and shows an amber "Backup stale"
+badge in the header once that heartbeat is older than `HC_BACKUP_STALE_SECS`
+(default 30h) — invisible while backups are healthy. Because it keys off the
+heartbeat's age, it also surfaces the case the failure notifier can't: a backup
+that stopped running entirely (timer disabled, box asleep) never *fails*, but
+its heartbeat still goes stale. The heartbeat write is best-effort — a good
+dump is never reported failed because the telemetry write hiccuped.

@@ -1244,6 +1244,7 @@ async function refresh() {
     runtime: j('/api/runtime?days=1'),
     health: j('/api/health'),
     thermal: j('/api/thermal'),
+    backup: j('/api/backup'),
   };
   const keys = Object.keys(jobs);
   const settled = await Promise.allSettled(keys.map((k) => jobs[k]));
@@ -1266,6 +1267,19 @@ async function refresh() {
   try { renderHealthCard(data.health); } catch (e) { console.error('health', e); }
   try { renderLearningCard(data.thermal); } catch (e) { console.error('learning', e); }
   try { renderAlerts(data.anomalies); } catch (e) { console.error('alerts', e); }
+  try { renderBackup(data.backup); } catch (e) { console.error('backup', e); }
+}
+
+function renderBackup(status) {
+  // Header badge: absent when the backup is healthy/unknown, amber when stale.
+  const el = document.getElementById('backup-badge');
+  if (!el) return;
+  const b = backupBadge(status);
+  if (!b.show) { el.hidden = true; el.textContent = ''; el.removeAttribute('title'); return; }
+  el.hidden = false;
+  el.className = `backup-badge ${b.level}`;
+  el.textContent = b.text;
+  el.title = b.title;
 }
 
 /* "Changed Filters" — delegated (the button is re-rendered every refresh).

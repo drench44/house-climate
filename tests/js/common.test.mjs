@@ -23,6 +23,7 @@ const {
   timePath, hoverTargetMs, nearestByMs,
   tempClass, rhClass, crawlRhClass, crawlTempClass,
   equipmentState, bandTierLabel, pmChip, peakStripHtml, smokeBannerHtml,
+  backupBadge,
 } = sandbox;
 const { GAP_MS } = vm.runInContext('({ GAP_MS })', sandbox);
 // Arrays/objects born inside the vm carry the vm realm's prototypes, which
@@ -361,4 +362,27 @@ test('smokeBannerHtml: a custom aqi_unhealthy is honored over the fallback', () 
 test('smokeBannerHtml: null/missing humidity or AQI renders nothing', () => {
   assert.equal(smokeBannerHtml(null, 101), '');
   assert.equal(smokeBannerHtml({ outdoor_aqi: null }, 101), '');
+});
+
+// ------------------------------------------------------------- backupBadge
+
+test('backupBadge: hidden when the payload is missing or errored', () => {
+  assert.equal(backupBadge(null).show, false);
+  assert.equal(backupBadge(undefined).show, false);
+});
+
+test('backupBadge: hidden when unknown (no heartbeat recorded yet)', () => {
+  assert.equal(backupBadge({ known: false, stale: false, age_s: null }).show, false);
+});
+
+test('backupBadge: hidden when a known backup is fresh', () => {
+  assert.equal(backupBadge({ known: true, stale: false, age_s: 3600 }).show, false);
+});
+
+test('backupBadge: shown amber with age when a known backup is stale', () => {
+  const b = backupBadge({ known: true, stale: true, age_s: 111600, threshold_s: 108000 });
+  assert.equal(b.show, true);
+  assert.equal(b.level, 'warn');
+  assert.match(b.text, /Backup stale/);
+  assert.match(b.text, /31h/);   // fmtAge(111600)
 });

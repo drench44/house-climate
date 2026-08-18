@@ -145,4 +145,15 @@ mapfile -t old < <(ls -1t "$DEST_DIR"/climate-*.dump 2>/dev/null | tail -n +$((K
 # must FAIL LOUD, not print OK — the pre-deploy gate trusts this stamp to prove
 # THIS run succeeded, so a silently-unwritten stamp cannot masquerade as fresh.
 date -Is > "$STAMP" || fail "cannot write success stamp $STAMP (dump is at $final)"
+
+# Record a heartbeat in the app's kv table so the dashboard header can show
+# backup health -- a STALE heartbeat also catches "backup stopped running at
+# all" (timer disabled, box asleep), which the OnFailure notifier can't, since
+# a unit that never runs never fails. Best-effort: a good, verified dump must
+# never be reported failed because this telemetry write hiccuped, so warn but
+# do not exit non-zero.
+docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c \
+  "INSERT INTO kv (k, v, updated_at) VALUES ('backup_heartbeat', jsonb_build_object('dump', '$(basename "$final")', 'bytes', $bytes), now()) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = now();" \
+  >/dev/null 2>&1 || echo "house-climate-backup WARN: kv heartbeat write failed (dump is OK at $final)" >&2
+
 echo "house-climate-backup OK: $final ($bytes bytes) $(date -Is)"
