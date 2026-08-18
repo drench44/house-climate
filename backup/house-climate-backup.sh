@@ -112,7 +112,7 @@ if [ -n "${HC_REQUIRE_MOUNTPOINT:-}" ]; then
   mountpoint -q "$HC_REQUIRE_MOUNTPOINT" || fail "$HC_REQUIRE_MOUNTPOINT is not a mountpoint"
 fi
 mkdir -p "$DEST_DIR" || fail "cannot create $DEST_DIR"
-mkdir -p "$(dirname "$STAMP")"
+mkdir -p "$(dirname "$STAMP")" || fail "cannot create stamp dir $(dirname "$STAMP")"
 
 docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true \
   || fail "container $CONTAINER not running"
@@ -141,5 +141,8 @@ mv -f "$tmp" "$final" || fail "atomic move into place failed"
 mapfile -t old < <(ls -1t "$DEST_DIR"/climate-*.dump 2>/dev/null | tail -n +$((KEEP + 1)))
 [ "${#old[@]}" -gt 0 ] && rm -f "${old[@]}"
 
-date -Is > "$STAMP"
+# The dump is already safely in place ($final); still, a stamp we cannot write
+# must FAIL LOUD, not print OK — the pre-deploy gate trusts this stamp to prove
+# THIS run succeeded, so a silently-unwritten stamp cannot masquerade as fresh.
+date -Is > "$STAMP" || fail "cannot write success stamp $STAMP (dump is at $final)"
 echo "house-climate-backup OK: $final ($bytes bytes) $(date -Is)"

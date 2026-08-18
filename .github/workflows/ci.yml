@@ -73,6 +73,19 @@ jobs:
       - name: Restore self-test
         run: HC_DB_CONTAINER=hc-db bash backup/house-climate-backup.sh --restore-selftest
 
+  backup-selftest:
+    # Pure-logic contract for the backup + pre-deploy guard scripts (no DB).
+    # Fast tripwire so a broken verdict/freshness predicate fails CI without
+    # spinning up TimescaleDB.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash backup/house-climate-backup.sh --selftest
+      - run: bash backup/require-fresh-backup.sh --selftest
+      # Integration coverage for the guard's imperative (deploy-blocking) path
+      # against a stubbed backup — uses GNU date, so it runs here, not locally.
+      - run: bash backup/require-fresh-backup.sh --gate-selftest
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:
