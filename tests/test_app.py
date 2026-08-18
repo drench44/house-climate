@@ -87,6 +87,7 @@ def test_health_ok_reports_db_and_freshness(conn):
     assert body["checks"]["db"] == "ok"
     assert "latest_reading_age_s" in body["checks"]
     assert "poller_heartbeat_age_s" in body["checks"]
+    assert "backup_heartbeat_age_s" in body["checks"]
 
 
 def test_health_503_when_db_unreachable(conn, monkeypatch):
@@ -169,7 +170,7 @@ def test_read_endpoints_smoke_on_empty_db(conn):
     for path in ["/api/now", "/api/history", "/api/runtime", "/api/cost",
                  "/api/cost/summary", "/api/forecast", "/api/precool", "/api/humidity",
                  "/api/rooms", "/api/crawl", "/api/outdoor", "/api/moisture", "/api/air",
-                 "/api/thermal", "/api/timeline", "/api/health"]:
+                 "/api/thermal", "/api/timeline", "/api/health", "/api/backup"]:
         r = client.get(path)
         assert r.status_code == 200, f"{path}: {r.status_code} {r.text}"
 # --- dashboard feature toggles (F0, issue #26) ---
