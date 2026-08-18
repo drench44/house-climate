@@ -86,6 +86,23 @@ jobs:
       # against a stubbed backup — uses GNU date, so it runs here, not locally.
       - run: bash backup/require-fresh-backup.sh --gate-selftest
 
+  changelog-guard:
+    # A PR that changes app code under src/ must add a CHANGELOG [Unreleased]
+    # entry (docs-only / test-only diffs are exempt). Same check as the local
+    # .githooks/pre-commit hook.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need the PR base commit reachable for the diff
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python scripts/check_changelog.py --base "$BASE_SHA"
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

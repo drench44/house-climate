@@ -1,4 +1,5 @@
 import logging
+import hashlib
 import ipaddress
 import os
 import threading
@@ -11,6 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import db
+from .. import version as hcversion
 from ..config import load_config, load_secrets
 from . import alerts, api
 from .alerts import alert_loop
@@ -24,6 +26,33 @@ db.ensure_app_schema(conn)  # create runtime-added tables (filter_events) if mis
 # this. Default 30h clears the nightly run + its randomized delay, so only a
 # genuinely missed/failed backup trips it.
 BACKUP_STALE_S = int(os.environ.get("HC_BACKUP_STALE_SECS", "108000"))
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+def _compute_build() -> str:
+    """A 12-char hex token over the baked static assets — an ops "what bytes are
+    actually running?" fingerprint, distinct from the human SemVer. Changes when
+    any served html/css/js changes; a deploy restarts the process and recomputes
+    it. Never raises: an unreadable asset is skipped so import can't fail."""
+    h = hashlib.sha256()
+    for root, _dirs, files in os.walk(STATIC_DIR):
+        for name in sorted(files):
+            if name.endswith((".html", ".css", ".js")):
+                try:
+                    h.update((os.path.relpath(os.path.join(root, name), STATIC_DIR)).encode())
+                    with open(os.path.join(root, name), "rb") as f:
+                        h.update(f.read())
+                except OSError:
+                    continue
+    return h.hexdigest()[:12]
+
+
+# The human-facing release identity (distinct from BUILD, the asset-content
+# hash): the SemVer from VERSION. Both read once at import — a deploy restarts
+# the process and picks up the new version.
+APP_VERSION = hcversion.read_version()
+BUILD = _compute_build()
 
 _conn_lock = threading.Lock()
 
@@ -137,6 +166,13 @@ def backup():
     """Backup-health for the header badge: {known, last_success, age_s, stale,
     threshold_s}. Reads the heartbeat the backup script writes on success."""
     return api.build_backup(_db(), stale_s=BACKUP_STALE_S)
+
+
+@app.get("/api/version")
+def api_version():
+    """The deployed version + build hash — a debug/ops readout ("what's actually
+    running?"). The changelog itself lives on GitHub, not here."""
+    return {"version": APP_VERSION, "build": BUILD}
 
 
 @app.get("/api/history")
@@ -592,7 +628,7 @@ async def security_guard(request, call_next):
     return await call_next(request)
 
 
-app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 # alert evaluator wired in Task 11. Supervised: if alert_loop ever escapes its
 # own inner try (it shouldn't now that config is validated at load, but a novel
