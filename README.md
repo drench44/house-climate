@@ -202,6 +202,10 @@ with the DB volume, so one disk failure loses both), set `HC_REQUIRE_MOUNTPOINT`
 so a missing mount fails loud, and **encrypt** off-box dumps — they encode your
 household's occupancy patterns.
 
+See `docs/backup-and-deploy.md` for the backup model and the pre-deploy gate
+(`backup/require-fresh-backup.sh`) that refuses to deploy without a fresh,
+verified snapshot.
+
 ## Tests
 
 ```bash

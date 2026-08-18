@@ -145,6 +145,18 @@ body {
   white-space: nowrap;
 }
 
+/* Backup-health badge in the top bar: absent (hidden attr) when healthy or
+   still unknown; amber pill once a known backup goes stale. */
+.backup-badge {
+  font-family: var(--mono); font-size: 12px; font-weight: 600;
+  padding: 5px 12px; border-radius: 999px; white-space: nowrap;
+}
+.backup-badge[hidden] { display: none; }
+.backup-badge.warn {
+  color: var(--warn); background: var(--warn-soft);
+  border: 1px solid rgba(232, 194, 104, 0.28);
+}
+
 /* ================= alerts strip ================= */
 .alerts { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
 .alerts:empty { display: none; }

@@ -20,6 +20,11 @@ secrets = load_secrets(os.environ)
 conn = db.connect(secrets.db_dsn)
 db.ensure_app_schema(conn)  # create runtime-added tables (filter_events) if missing
 
+# Dashboard backup-health: warn once the last successful backup is older than
+# this. Default 30h clears the nightly run + its randomized delay, so only a
+# genuinely missed/failed backup trips it.
+BACKUP_STALE_S = int(os.environ.get("HC_BACKUP_STALE_SECS", "108000"))
+
 _conn_lock = threading.Lock()
 
 
@@ -112,6 +117,12 @@ def health():
             int((now - hb["updated_at"]).total_seconds()) if hb else None)
     except Exception:
         checks["poller_heartbeat_age_s"] = None
+    try:
+        bh = db.kv_get(_db(), "backup_heartbeat")
+        checks["backup_heartbeat_age_s"] = (
+            int((now - bh["updated_at"]).total_seconds()) if bh else None)
+    except Exception:
+        checks["backup_heartbeat_age_s"] = None
     return {"status": "ok", "checks": checks}
 
 
@@ -119,6 +130,13 @@ def health():
 def now():
     c = _db()
     return api.build_now(c, _device(c))
+
+
+@app.get("/api/backup")
+def backup():
+    """Backup-health for the header badge: {known, last_success, age_s, stale,
+    threshold_s}. Reads the heartbeat the backup script writes on success."""
+    return api.build_backup(_db(), stale_s=BACKUP_STALE_S)
 
 
 @app.get("/api/history")
