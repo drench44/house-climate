@@ -152,8 +152,12 @@ date -Is > "$STAMP" || fail "cannot write success stamp $STAMP (dump is at $fina
 # a unit that never runs never fails. Best-effort: a good, verified dump must
 # never be reported failed because this telemetry write hiccuped, so warn but
 # do not exit non-zero.
-docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c \
-  "INSERT INTO kv (k, v, updated_at) VALUES ('backup_heartbeat', jsonb_build_object('dump', '$(basename "$final")', 'bytes', $bytes), now()) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = now();" \
-  >/dev/null 2>&1 || echo "house-climate-backup WARN: kv heartbeat write failed (dump is OK at $final)" >&2
+# Capture psql's stderr into the WARN: a RECURRING heartbeat failure also shows
+# a false "Backup stale" badge on the dashboard, so the operator needs the cause
+# (missing kv table? wrong DB? auth?), not just "it failed".
+if ! hb_err="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c \
+  "INSERT INTO kv (k, v, updated_at) VALUES ('backup_heartbeat', jsonb_build_object('dump', '$(basename "$final")', 'bytes', $bytes), now()) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = now();" 2>&1)"; then
+  echo "house-climate-backup WARN: kv heartbeat write failed (dump is OK at $final): $hb_err" >&2
+fi
 
 echo "house-climate-backup OK: $final ($bytes bytes) $(date -Is)"
