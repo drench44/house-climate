@@ -248,3 +248,25 @@ def test_main_does_not_falsely_roll_back_a_landed_commit(tmp_path, monkeypatch):
     assert (repo / "VERSION").read_text(encoding="utf-8").strip() == "1.1.0"
     # the tag genuinely did not get created
     assert real_git("tag", "--list", "v1.1.0").strip() == ""
+
+
+def test_main_reports_honestly_when_the_restore_also_fails(tmp_path, monkeypatch, capsys):
+    """Commit fails AND the recovery `git checkout HEAD --` also fails: the
+    operator must NOT be told 'restored ... nothing committed' (a lie they'd
+    re-run release on top of) — the message must flag the tree may still be
+    dirty."""
+    repo = _release_repo(tmp_path, monkeypatch)
+    _git(repo, "config", "commit.gpgsign", "true")
+    _git(repo, "config", "gpg.program", "/bin/false")   # the commit fails
+    real_run = subprocess.run
+
+    def fake_run(cmd, *a, **k):
+        if isinstance(cmd, list) and cmd[:3] == ["git", "checkout", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "checkout boom")
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+    assert release.main(["minor"]) == 1
+    err = capsys.readouterr().err.lower()
+    assert "restore also failed" in err
+    assert "nothing committed" not in err
