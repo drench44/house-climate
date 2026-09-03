@@ -919,6 +919,8 @@ def _build_fits(conn, device_id, cfg, now, crawl_id, floors):
                 crawl_h, floor_h, outdoor_h, temp_diff_h, days=days, now=now,
                 crawl_rh=crawl_rh_h, interventions=interventions),
         }
+    # Only the channels that could be placed in the building take part — a
+    # garage sensor is a useful gap to show but has no position in a stack.
     ordered = _floors_by_height(floors)
     consistency = coupling.consistency_check(
         [{"name": name,
@@ -945,18 +947,26 @@ _FLOOR_WORDS = [
 
 
 def _floors_by_height(floors):
-    """`floors` sorted lowest-first, or None when the names do not say.
+    """The floors whose names place them in the building, sorted lowest-first,
+    or None when fewer than two can be placed.
 
-    Returning None is the honest answer: an inverted list makes
-    consistency_check announce leaky ducts, a specific and expensive repair,
-    on the strength of nothing but config key order."""
+    A configured channel need not be a floor above the crawl at all — a garage,
+    a shed, an attic fan — and a sensor that cannot be placed must not stop the
+    ones that can from being compared. Dropping it is right rather than
+    conservative: the check asks whether crawl air passes the lower floor
+    before the upper one, a question a garage is simply not part of.
+
+    Returning None when fewer than two remain IS the conservative answer: an
+    inverted list makes consistency_check announce leaky ducts, a specific and
+    expensive repair, on the strength of nothing but config key order."""
     ranked = []
     for sid, name in floors:
         low = str(name).lower()
         hits = {rank for word, rank in _FLOOR_WORDS if word in low}
-        if len(hits) != 1:
-            return None
-        ranked.append((hits.pop(), sid, name))
+        if len(hits) == 1:
+            ranked.append((hits.pop(), sid, name))
+    if len(ranked) < 2:
+        return None
     if len({r for r, _, _ in ranked}) != len(ranked):
         return None       # two sensors on the same level: no order to check
     return [(sid, name) for _, sid, name in sorted(ranked)]

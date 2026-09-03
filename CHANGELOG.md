@@ -10,6 +10,13 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+### Fixed
+- A configured sensor that is not a floor above the crawl — a garage, a shed —
+  made the floor-to-floor path check refuse for every floor, including ones
+  whose names place them perfectly well. Sensors that cannot be placed in the
+  building are now dropped from the ordering rather than blocking it. Found by
+  running the new panel against a real house.
+
 ### Added
 - Absolute humidity (g/m³) as a first-class moisture measure:
   `absolute_humidity_gm3` plus a dew-point variant, and a matching SQL fragment

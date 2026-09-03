@@ -1785,6 +1785,25 @@ def test_floors_by_height_reads_the_names_not_the_channel_numbers():
     assert api._floors_by_height([("a", "Upstairs Downstairs")]) is None
 
 
+def test_a_sensor_that_is_not_a_floor_does_not_block_the_ones_that_are():
+    """Found by running this on a real house: a Garage channel made the
+    floor-to-floor check refuse for Upstairs and Downstairs too, even though
+    those two are perfectly placeable. A garage has no position in the stack
+    of floors above a crawl — it is dropped from the ordering, not treated as
+    a reason to give up on it."""
+    ordered = api._floors_by_height(
+        [("ch8", "Upstairs"), ("ch7", "Downstairs"), ("ch6", "Garage")])
+    assert [n for _, n in ordered] == ["Downstairs", "Upstairs"]
+    assert "Garage" not in [n for _, n in ordered]
+
+
+def test_one_placeable_floor_is_still_not_an_order():
+    """Dropping the unplaceable sensors must not leave a single floor being
+    'compared' against nothing."""
+    assert api._floors_by_height([("a", "Upstairs"), ("b", "Garage")]) is None
+    assert api._floors_by_height([("a", "Garage"), ("b", "Shed")]) is None
+
+
 def test_unnameable_floors_refuse_the_consistency_check(conn):
     """Nothing records how high a sensor sits. If the names do not say, the
     check must refuse rather than trust channel order."""
