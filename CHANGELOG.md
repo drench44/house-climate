@@ -132,6 +132,10 @@ rolls that section to a dated version via `python scripts/release.py`.
   duplicated count silently passed a table that had come back empty. Anything
   that cannot be compared is now a failure, as is an empty table list:
   verifying nothing must never look like verifying everything.
+- `changelog-guard` no longer fails a release PR: a diff that bumps `VERSION`
+  (a `scripts/release.py` release, which rolls `[Unreleased]` rather than adding
+  a bullet) is now exempt. Releases can PR on their own.
+
 
 ## [1.1.0] — 2026-08-17
 
