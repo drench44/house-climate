@@ -329,7 +329,7 @@ def _t_crit_95(dof):
     return tv
 
 
-def _metric_compare(base_vals, post_vals):
+def _metric_compare(base_vals, post_vals, digits=1):
     """Difference of daily means with a 95% Welch-t CI. ONE bar for both the
     interval and the call: verdict is 'real' exactly when |diff| exceeds the
     displayed ci95 — showing an interval that excludes zero labeled 'noise'
@@ -337,17 +337,17 @@ def _metric_compare(base_vals, post_vals):
     bm, bs = _mean_std(base_vals)
     pm, ps = _mean_std(post_vals)
     n1, n2 = len(base_vals), len(post_vals)
-    out = {"baseline_mean": round(bm, 1) if bm is not None else None,
-           "baseline_sd": round(bs, 1) if bs is not None else None,
+    out = {"baseline_mean": round(bm, digits) if bm is not None else None,
+           "baseline_sd": round(bs, digits) if bs is not None else None,
            "baseline_n": n1,
-           "post_mean": round(pm, 1) if pm is not None else None,
-           "post_sd": round(ps, 1) if ps is not None else None,
+           "post_mean": round(pm, digits) if pm is not None else None,
+           "post_sd": round(ps, digits) if ps is not None else None,
            "post_n": n2}
     if bm is None or pm is None:
         out.update({"diff": None, "ci95": None, "verdict": "collecting"})
         return out
     diff = pm - bm
-    out["diff"] = round(diff, 1)
+    out["diff"] = round(diff, digits)
     if n1 < BASELINE_MIN_DAYS or n2 < BASELINE_MIN_DAYS or bs is None or ps is None:
         out.update({"ci95": None, "verdict": "collecting"})
         return out
@@ -359,7 +359,7 @@ def _metric_compare(base_vals, post_vals):
     # Welch-Satterthwaite dof (always between min(n)-1 and n1+n2-2)
     dof = (v1 + v2) ** 2 / (v1 ** 2 / (n1 - 1) + v2 ** 2 / (n2 - 1))
     ci = _t_crit_95(int(dof)) * se
-    out["ci95"] = round(ci, 1)
+    out["ci95"] = round(ci, digits)
     out["verdict"] = "real" if abs(diff) > ci else "noise"
     return out
 
@@ -437,6 +437,98 @@ def intervention_report(daily_stats, interventions, outdoor_days=None):
                     "baseline_days": len(base_days), "post_days": len(post_days),
                     "outdoor_dp_shift": outdoor_shift,
                     "metrics": metrics, "overall": overall})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Crawl-to-floor absolute-humidity gap
+# ---------------------------------------------------------------------------
+# The gap answers "how much more water does a cubic metre of crawl air carry
+# than a cubic metre of air on this floor?" in g/m^3. Absolute humidity, not
+# RH and not dew point: RH is not comparable between a 55F crawl and a 72F
+# hallway, and dew point compares vapour PRESSURE rather than the vapour mass
+# a given volume of air actually carries.
+def ah_gap_hourly(crawl_hourly, floor_hourly):
+    """Pair hourly crawl AH against one floor's hourly AH on the shared hour
+    buckets. Returns [{bucket, crawl, floor, gap}] oldest first; hours where
+    either side is missing are dropped rather than carried as a null gap."""
+    floor_by_bucket = {r["bucket"]: r["ah"] for r in floor_hourly
+                       if r.get("ah") is not None}
+    out = []
+    for c in crawl_hourly:
+        if c.get("ah") is None:
+            continue
+        f = floor_by_bucket.get(c["bucket"])
+        if f is None:
+            continue
+        out.append({"bucket": c["bucket"], "crawl": c["ah"], "floor": f,
+                    "gap": c["ah"] - f})
+    return out
+
+
+def ah_gap_daily(crawl_daily, floor_daily):
+    """Daily-mean crawl AH minus daily-mean floor AH, on days both sensors
+    reported. Returns [{day, crawl, floor, gap}] oldest first."""
+    floor_by_day = {d["day"]: d.get("ah_mean") for d in floor_daily}
+    out = []
+    for d in crawl_daily:
+        c = d.get("ah_mean")
+        f = floor_by_day.get(d["day"])
+        if c is None or f is None:
+            continue
+        out.append({"day": d["day"], "crawl": c, "floor": f, "gap": c - f})
+    return out
+
+
+def gap_intervention_report(gap_daily, interventions, outdoor_daily=None):
+    """Before/after the crawl-to-floor gap across each intervention marker,
+    using the same windows and the same Welch-t 95% bar as intervention_report.
+
+    Deliberately NOT given a directional verdict. A ground vapour barrier
+    lowers crawl AH and narrows the gap; air-sealing decouples the floor and
+    WIDENS it. Both are successes, so calling a sign 'good' here would be
+    guessing at which mechanism the work targeted. The report states the
+    measured change and whether it clears noise; the coupling metric
+    (ah_coupling_window) is the direction-unambiguous mechanism test.
+    """
+    outdoor_by_day = {d["day"]: d.get("ah_mean") for d in (outdoor_daily or [])}
+    marks = sorted(interventions, key=lambda i: i["marked_on"])
+    out = []
+    for idx, iv in enumerate(marks):
+        d0 = iv["marked_on"]
+        prev_mark = marks[idx - 1]["marked_on"] if idx > 0 else None
+        next_mark = marks[idx + 1]["marked_on"] if idx + 1 < len(marks) else None
+        base = [g for g in gap_daily
+                if g["day"] < d0
+                and (prev_mark is None or g["day"] >= prev_mark)
+                and g["day"] >= d0 - timedelta(days=BASELINE_MAX_DAYS)]
+        post = [g for g in gap_daily
+                if g["day"] >= d0
+                and (next_mark is None or g["day"] < next_mark)
+                and g["day"] < d0 + timedelta(days=BASELINE_MAX_DAYS)]
+        metric = _metric_compare([g["gap"] for g in base],
+                                 [g["gap"] for g in post], digits=2)
+
+        # Same seasonal honesty as intervention_report: outdoor AH swings
+        # hard between seasons and drags both sensors with it.
+        ob = [outdoor_by_day[g["day"]] for g in base
+              if outdoor_by_day.get(g["day"]) is not None]
+        op = [outdoor_by_day[g["day"]] for g in post
+              if outdoor_by_day.get(g["day"]) is not None]
+        outdoor_shift = None
+        if len(ob) >= 3 and len(op) >= 3:
+            outdoor_shift = round(sum(op) / len(op) - sum(ob) / len(ob), 2)
+            d = metric.get("diff")
+            if (metric["verdict"] == "real" and d is not None and outdoor_shift != 0
+                    and (d > 0) == (outdoor_shift > 0)
+                    and abs(outdoor_shift) >= CONFOUND_FRACTION * abs(d)):
+                metric["verdict"] = "confounded"
+
+        out.append({"id": iv["id"], "marked_on": d0.isoformat(),
+                    "label": iv["label"],
+                    "baseline_days": len(base), "post_days": len(post),
+                    "outdoor_ah_shift": outdoor_shift,
+                    "metric": metric})
     return out
 
 

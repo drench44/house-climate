@@ -10,6 +10,18 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+### Added
+- Absolute humidity (g/m³) as a first-class moisture measure: `humidity.
+  absolute_humidity_gm3` plus a dew-point variant, and a matching SQL fragment
+  so daily and hourly rollups convert per reading (AH is nonlinear in
+  temperature — averaging temperature first would be wrong).
+- Crawl-to-floor absolute humidity gap analytics: hourly and daily gap series
+  against every configured non-crawl channel, and a before/after comparison
+  across each intervention marker with the existing Welch-t and
+  seasonal-confound guards. The gap is reported without a directional verdict
+  — narrowing and widening are both consistent with a successful intervention,
+  depending on which mechanism the work targeted.
+
 ## [1.1.0] — 2026-08-17
 
 ### Added

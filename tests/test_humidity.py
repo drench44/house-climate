@@ -139,3 +139,63 @@ def test_window_advice_aqi_none_keeps_prior_behavior():
     without_param = humidity.window_advice(indoor_dp=60, outdoor_dp=55, outdoor_temp_f=65)
     assert with_none == without_param == {"action": "open",
                                            "reason": "Outside air is drier — opening windows would lower indoor moisture."}
+
+
+# --- absolute humidity -------------------------------------------------------
+
+def test_absolute_humidity_known_value():
+    # 68°F (20°C) / 50% RH ≈ 8.6 g/m³ — the standard psychrometric reference.
+    ah = humidity.absolute_humidity_gm3(68, 50)
+    assert ah is not None
+    assert abs(ah - 8.6) < 0.15
+
+
+def test_absolute_humidity_saturated_matches_saturation_density():
+    # At 100% RH and 86°F (30°C), saturation vapour density is ≈ 30.4 g/m³.
+    ah = humidity.absolute_humidity_gm3(86, 100)
+    assert abs(ah - 30.4) < 0.5
+
+
+def test_absolute_humidity_none_when_inputs_missing():
+    assert humidity.absolute_humidity_gm3(None, 50) is None
+    assert humidity.absolute_humidity_gm3(68, None) is None
+
+
+def test_absolute_humidity_none_when_rh_non_positive():
+    assert humidity.absolute_humidity_gm3(68, 0) is None
+    assert humidity.absolute_humidity_gm3(68, -5) is None
+
+
+def test_absolute_humidity_monotonic_with_rh():
+    assert humidity.absolute_humidity_gm3(68, 70) > humidity.absolute_humidity_gm3(68, 30)
+
+
+def test_absolute_humidity_equal_moisture_at_different_temps():
+    """The whole point of AH over RH: two rooms holding the SAME water vapour
+    at different temperatures must report (nearly) the same absolute humidity,
+    even though their relative humidities differ a lot."""
+    # A 50°F crawl at 90% RH and a 70°F room share a dew point near 47.5°F.
+    dp = humidity.dew_point_f(50, 90)
+    # RH the 70°F room needs to sit at that same dew point.
+    warm_rh = 100.0 * (
+        humidity.saturation_vapor_pressure_hpa(dp)
+        / humidity.saturation_vapor_pressure_hpa(70))
+    cold_ah = humidity.absolute_humidity_gm3(50, 90)
+    warm_ah = humidity.absolute_humidity_gm3(70, warm_rh)
+    # Same vapour pressure, but AH is per unit VOLUME, so the warmer (less
+    # dense) air holds slightly less per m³ — a few percent, not a factor.
+    assert abs(cold_ah - warm_ah) / cold_ah < 0.05
+
+
+def test_absolute_humidity_from_dew_point_matches_direct():
+    """The SQL rollups compute AH from stored temp + dewpoint; the Python path
+    computes it from temp + RH. They must agree, or daily means and live tiles
+    would disagree on the same reading."""
+    direct = humidity.absolute_humidity_gm3(72, 55)
+    via_dp = humidity.absolute_humidity_from_dew_point_gm3(72, humidity.dew_point_f(72, 55))
+    assert abs(direct - via_dp) < 0.01
+
+
+def test_absolute_humidity_from_dew_point_none_when_missing():
+    assert humidity.absolute_humidity_from_dew_point_gm3(None, 50) is None
+    assert humidity.absolute_humidity_from_dew_point_gm3(72, None) is None

@@ -762,19 +762,28 @@ def build_crawl(conn, device_id, cfg, range_key, now=None) -> dict:
     }
 
 
+def _indoor_sensors(cfg):
+    """Every configured non-crawl channel, as [(sensor_id, name)] in channel
+    order. These are the floors the crawl-to-floor moisture gap is measured
+    against — all of them, so adding a channel to the private config surfaces
+    it on the moisture page without a code change."""
+    ec = cfg.ecowitt or {}
+    if not ec.get("enabled"):
+        return []
+    return [(f"ecowitt_ch{ch}", name)
+            for ch, name in (ec.get("channels") or {}).items()
+            if "crawl" not in str(name).lower()]
+
+
 def _reference_sensor_id(cfg):
-    """The indoor sensor the crawl is compared against for the dew-point
+    """The single indoor sensor the crawl is compared against for the dew-point
     delta. Prefer a channel named like 'downstairs' (the floor directly above
     the crawl), else the first configured non-crawl channel."""
-    ec = cfg.ecowitt or {}
-    channels = ec.get("channels") or {}
-    for ch, name in channels.items():
+    indoor = _indoor_sensors(cfg)
+    for sid, name in indoor:
         if "down" in str(name).lower():
-            return f"ecowitt_ch{ch}", name
-    for ch, name in channels.items():
-        if "crawl" not in str(name).lower():
-            return f"ecowitt_ch{ch}", name
-    return None, None
+            return sid, name
+    return indoor[0] if indoor else (None, None)
 
 
 def build_moisture(conn, device_id, cfg, now=None) -> dict:
