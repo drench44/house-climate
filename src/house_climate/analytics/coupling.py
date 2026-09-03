@@ -408,7 +408,7 @@ def _straddles(interventions, since, now):
     return False
 
 
-def _fit_at_lag(rows, lag, extra_cols=()):
+def _fit_at_lag(rows, lag, extra_cols=(), diagnose=False):
     """Fit the floor's moisture on the crawl's, at one transport delay.
 
     Hour-of-day means come out of every column first (see
@@ -461,6 +461,11 @@ def _fit_at_lag(rows, lag, extra_cols=()):
     n_params = len(X[0]) + HOUR_OF_DAY_PARAMS - 1     # intercept already counted
     n_eff = effective_n([r[0] for r in X], fit["resid"], buckets)
     dof = n_eff - n_params
+    if diagnose:
+        # Used only to explain a refusal: report what the window is worth
+        # without applying the gates that rejected it.
+        return {"beta": fit["beta"][0], "se": None, "lag": lag, "n": len(X),
+                "n_eff": n_eff, "dof": dof, "t": 0.0, "dropped_covariates": []}
     if dof < MIN_DOF:
         return None
     var = hac_var(X, fit["resid"], fit["xtx"], buckets, col=0)
@@ -520,6 +525,16 @@ def coupling_window(crawl, floor, outdoor, days=30, now=None, crawl_rh=None,
     fits = [f for f in (_fit_at_lag(rows, lag, extra_cols)
                         for lag in range(N_LAGS_TESTED)) if f is not None]
     if not fits:
+        # Say WHICH wall was hit. Much the commonest cause is that the window,
+        # once discounted for how much each hour repeats the last, is worth too
+        # few independent readings to carry an interval — a fact about the data
+        # worth reporting, not the shrug that "no fit" gives the reader.
+        diag = _fit_at_lag(rows, 0, extra_cols, diagnose=True)
+        if diag is not None and diag["dof"] < MIN_DOF:
+            return {"ready": False, "reason": "insufficient_n_eff",
+                    "need_n_eff": MIN_N_EFF, **base, **info,
+                    "n": diag["n"], "n_eff": diag["n_eff"],
+                    "crawl_sd": round(crawl_sd, 3), "beta": None}
         return {"ready": False, "reason": "no_fit", **base, **info}
 
     best = max(fits, key=lambda f: abs(f["t"]))

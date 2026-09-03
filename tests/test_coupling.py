@@ -624,3 +624,24 @@ def test_outdoor_proxy_produces_coupling_without_a_stack_signature():
     if st["ready"]:
         assert st["delta"] - st["ci95"] <= 0, \
             "the temperature check must not confirm a weather artefact"
+
+
+def test_a_window_too_repetitive_to_carry_an_interval_says_so():
+    """A perfectly smooth relationship leaves near-zero, near-perfectly
+    correlated residuals — genuinely almost no independent information. The
+    refusal is right, but it has to name the wall it hit: "no fit" tells the
+    reader nothing they can act on."""
+    hours = 24 * 35
+
+    def crawl_anom(i):
+        return 2.0 * math.sin(2 * math.pi * i / 60.0)
+
+    crawl = _series(hours, lambda i: 12.0 + crawl_anom(i))
+    outdoor = _series(hours, lambda i: 10.0 + 1.5 * math.sin(2 * math.pi * i / 97.0))
+    # No noise at all: the floor is an exact function of the crawl.
+    floor = _series(hours, lambda i: 9.0 + 0.4 * crawl_anom(i - 2))
+    out = coupling.coupling_window(crawl, floor, outdoor, days=30, now=NOW)
+    assert out["ready"] is False
+    assert out["reason"] == "insufficient_n_eff"
+    assert out["n_eff"] < out["n"]
+    assert out["beta"] is None, "a refused fit must not leave a number behind"

@@ -1629,7 +1629,7 @@ def test_crawl_payload_carries_the_dashboard_gap_summary(conn):
     assert summary["available"] is True
     down = next(f for f in summary["floors"] if f["name"] == "Downstairs")
     assert set(down) == {"name", "gap_now", "trend_7d", "coupling_ready",
-                         "beta", "reason"}
+                         "significant", "beta", "ci95", "reason"}
     assert down["coupling_ready"] is False
     assert down["beta"] is None
 
@@ -1685,14 +1685,30 @@ def _seed_transport(conn, now, days=32, beta=0.4, lag=2):
     real signal, that the success path actually runs.
     """
     import math
+    import random
     from house_climate.analytics import humidity as hum
     hours = days * 24
 
     def crawl_ah(i):
         return 11.0 + 2.0 * math.sin(2 * math.pi * i / 60.0)
 
+    # House air is noisy, and its noise REMEMBERS the previous hour — a room
+    # does not jump about between readings. Both properties matter here. With
+    # no noise at all the residuals are essentially zero and perfectly smooth,
+    # which the autocorrelation correction rightly reads as "almost no
+    # independent information", and the fit is refused for a reason that says
+    # more about the fixture than the code. With pure white noise the
+    # correction has nothing to bite on and the effective count equals the raw
+    # hour count, which would make the assertion below vacuous.
+    rnd = random.Random(17)
+    resid, e = [], 0.0
+    for _ in range(hours):
+        e = 0.7 * e + rnd.gauss(0, 0.10)
+        resid.append(e)
+
     def floor_ah(i):
-        return 8.5 + beta * (crawl_ah(i - lag) - 11.0) + 0.4 * math.sin(2 * math.pi * i / 24.0)
+        return (8.5 + beta * (crawl_ah(i - lag) - 11.0)
+                + 0.4 * math.sin(2 * math.pi * i / 24.0) + resid[i])
 
     def rh_temp_for(ah, temp_f):
         """Pick the RH that puts this sensor at the wanted absolute humidity."""
@@ -1734,8 +1750,13 @@ def test_transport_gain_reaches_the_payload_on_a_real_window(conn):
     down = next(f for f in ah["floors"] if f["name"] == "Downstairs")
     c = down["coupling"]
     assert c["ready"] is True, c.get("reason")
-    assert 0.2 < c["beta"] < 0.6, c
-    assert c["n_eff"] < c["n"], "hourly readings counted as independent"
+    # The seed puts a known share of the crawl's swing on this floor, two hours
+    # later. Recovering it end to end — through the SQL rollups, the
+    # detrending, the time-of-day removal and the lag search — is the point.
+    assert abs(c["beta"] - 0.4) <= c["ci95"] + 0.05, c
+    assert c["lag"] == 2, c
+    assert c["n_eff"] < c["n"] / 2, (
+        f"hourly readings counted as near-independent: n={c['n']} n_eff={c['n_eff']}")
     assert c["ci95"] > 0
     assert "stack" in down and "prediction" in down
     assert ah["fit_computed_at"] is not None

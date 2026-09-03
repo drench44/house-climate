@@ -126,6 +126,9 @@ rolls that section to a dated version via `python scripts/release.py`.
   `db/init.sql` ever drift apart, so a table added later cannot quietly go
   unverified, and CI now seeds every table so the restore job can actually
   detect row loss rather than comparing empty against empty.
+- A transport fit refused for want of independent readings reported `no_fit`,
+  which named no cause. It now reports `insufficient_n_eff` with the effective
+  count, so the reason is a fact about the data rather than a shrug.
 - The restore check reported "nothing lost" whenever a row count could not be
   compared. A shell integer test returns an error, not false, on a non-numeric
   operand — but in an `elif` that reads as "no loss", so an unreadable or
