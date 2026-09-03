@@ -63,7 +63,21 @@ jobs:
           docker run -d --name hc-db \
             -e POSTGRES_USER=climate -e POSTGRES_PASSWORD=climate -e POSTGRES_DB=climate \
             timescale/timescaledb:2.29.1-pg16
-          for i in $(seq 1 30); do docker exec hc-db pg_isready -U climate && break; sleep 2; done
+          # pg_isready is not enough: the image runs initdb against a TEMPORARY
+          # server, which answers as ready, then shuts it down and starts the
+          # real one. A command issued in that gap dies with "the database
+          # system is shutting down". Wait for three consecutive successful
+          # QUERIES instead, which cannot span the restart.
+          ok=0
+          for i in $(seq 1 60); do
+            if docker exec hc-db psql -U climate -d climate -tAc 'select 1' >/dev/null 2>&1; then
+              ok=$((ok + 1)); [ "$ok" -ge 3 ] && break
+            else
+              ok=0
+            fi
+            sleep 2
+          done
+          [ "$ok" -ge 3 ] || { echo "postgres never became stably ready"; docker logs hc-db; exit 1; }
       - name: Load schema + a sample row
         run: |
           cat db/init.sql db/aggregates.sql \
