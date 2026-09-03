@@ -1,5 +1,8 @@
 import json
+
 import psycopg
+
+from .analytics import humidity
 
 READING_COLUMNS = [
     "ts", "device_id", "indoor_temp_f", "indoor_humidity", "heat_setpoint_f",
@@ -24,13 +27,18 @@ _MAGNUS_SQL = (
 # analytics/humidity.absolute_humidity_from_dew_point_gm3 exactly. It lives in
 # SQL because AH is NONLINEAR in temperature: averaging a day's AH readings is
 # not the same as computing AH from that day's mean temp and mean dew point,
-# so the rollup converts per row and averages afterwards. 216.7 is
-# 100 * M_water / R; 6.112 hPa is saturation vapour pressure at 0 C.
+# so the rollup converts per row and averages afterwards.
+#
+# The constants are interpolated from analytics.humidity rather than retyped.
+# A forked copy would drift the moment either side was edited, and the SQL path
+# is the one every rollup and every transport fit actually consumes — so the
+# divergence would be invisible in the Python tests and wrong on the page.
 def _ah_sql(temp_col: str, dp_col: str) -> str:
     tc = f"(({temp_col}-32.0)/1.8)"
     dc = f"(({dp_col}-32.0)/1.8)"
-    return (f"(216.7 * (6.112 * exp(17.62*{dc}/(243.12+{dc})))"
-            f" / ({tc} + 273.15))")
+    return (f"({humidity._VAPOR_DENSITY_K} * ({humidity._SAT_VP_HPA_0C}"
+            f" * exp({humidity._MAGNUS_A}*{dc}/({humidity._MAGNUS_B}+{dc})))"
+            f" / ({tc} - {humidity._ABS_ZERO_C}))")
 
 
 _AH_SENSOR_SQL = _ah_sql("temp_f", "dewpoint_f")
@@ -286,12 +294,36 @@ def sensor_hourly_ah(conn, sensor_id, since_ts) -> list[dict]:
     nulls, so a bucket's AH always reflects complete readings."""
     cur = conn.execute(
         f"SELECT time_bucket(interval '1 hour', ts) AS bucket,"
-        f" avg({_AH_SENSOR_SQL}) AS ah, avg(temp_f) AS temp"
+        f" avg({_AH_SENSOR_SQL}) AS ah, avg(temp_f) AS temp,"
+        " avg(humidity) AS rh, max(humidity) AS rh_max"
         " FROM sensor_readings WHERE sensor_id=%s AND ts >= %s"
         "   AND dewpoint_f IS NOT NULL AND temp_f IS NOT NULL"
         " GROUP BY bucket ORDER BY bucket",
         (sensor_id, since_ts))
-    return [{"bucket": r[0], "ah": r[1], "temp": r[2]} for r in cur.fetchall()]
+    return [{"bucket": r[0], "ah": r[1], "temp": r[2], "rh": r[3], "rh_max": r[4]}
+            for r in cur.fetchall()]
+
+
+def indoor_hourly(conn, device_id, since_ts) -> list[dict]:
+    """Hourly indoor-to-outdoor temperature difference and blower duty.
+
+    Both feed the stack-effect check in analytics/coupling: the temperature
+    difference is what drives air up through a building, and blower duty
+    separates duct-driven air movement (which runs whenever the fan does) from
+    stack-driven movement (which does not). Duty is the FRACTION of an hour's
+    readings with the air handler moving air, so an hour with no readings is
+    absent rather than silently zero."""
+    cur = conn.execute(
+        "SELECT time_bucket(interval '1 hour', ts) AS bucket,"
+        " avg(indoor_temp_f - wx_outdoor_temp_f) AS dt,"
+        " (count(*) FILTER (WHERE equipment_status IN"
+        "    ('cooling', 'overcool', 'heating', 'fan')))::float"
+        "   / nullif(count(*) FILTER (WHERE equipment_status IS NOT NULL), 0) AS duty"
+        " FROM readings WHERE device_id=%s AND ts >= %s"
+        "   AND indoor_temp_f IS NOT NULL AND wx_outdoor_temp_f IS NOT NULL"
+        " GROUP BY bucket ORDER BY bucket",
+        (device_id, since_ts))
+    return [{"bucket": r[0], "dt": r[1], "duty": r[2]} for r in cur.fetchall()]
 
 
 def outdoor_series(conn, device_id, since_ts, bucket_s) -> list[dict]:
@@ -359,6 +391,7 @@ def sensor_daily_stats(conn, sensor_id, tz, since_ts=None) -> list[dict]:
               min(dewpoint_f) AS dp_min, max(dewpoint_f) AS dp_max, avg(dewpoint_f) AS dp_mean,
               avg(temp_f) AS temp_mean,
               avg({_AH_SENSOR_SQL}) AS ah_mean,
+              count(dewpoint_f) AS ah_n,
               (coalesce(sum(dt) FILTER (WHERE humidity > 60), 0)/3600.0)::float AS h60,
               (coalesce(sum(dt) FILTER (WHERE humidity > 70), 0)/3600.0)::float AS h70,
               (coalesce(sum(dt) FILTER (WHERE humidity > 80), 0)/3600.0)::float AS h80,
@@ -391,6 +424,7 @@ def outdoor_daily(conn, device_id, tz, since_ts=None) -> list[dict]:
               avg(wx_outdoor_temp_f) AS temp_mean,
               avg(wx_dewpoint_f) AS dp_mean,
               avg({_AH_WX_SQL}) AS ah_mean,
+              count(wx_dewpoint_f) AS ah_n,
               max(wx_rain_today_in) AS rain_in,
               max(extract(hour FROM (ts AT TIME ZONE %(tz)s)))::int AS last_hour,
               (coalesce(sum(dt) FILTER (WHERE equipment_status IN

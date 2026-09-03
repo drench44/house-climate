@@ -1,4 +1,7 @@
+import math
 from datetime import datetime, timezone, timedelta
+
+import pytest
 from house_climate import db
 
 def _reading(**over):
@@ -188,3 +191,141 @@ def test_ensure_app_schema_heals_missing_continuous_aggregate(conn):
     assert back == 1
     # And it's usable (the compression policy re-applied without error too).
     db.hourly_readings(conn, "dev1", datetime(2026, 8, 10, 0, 0, tzinfo=timezone.utc))
+
+
+# --- absolute humidity in SQL ------------------------------------------------
+
+def test_ah_sql_formula_matches_python_without_a_database():
+    """Evaluate the SQL expression as arithmetic and compare it to the Python
+    conversion, reading by reading.
+
+    This is the one test of the SQL formula that runs on a bare `pytest` with
+    no Postgres — every other test of it skips locally. A typo in the
+    expression would otherwise reach the page as plausible wrong numbers and
+    only be caught when CI ran."""
+    from house_climate.analytics import humidity as hum
+    expr = db._AH_SENSOR_SQL.replace("exp(", "math.exp(")
+    for temp_f in (20.0, 45.0, 63.0, 78.0, 95.0):
+        for dp_f in (10.0, 40.0, 55.0, 70.0):
+            if dp_f > temp_f:
+                continue
+            got = eval(expr, {"math": math},
+                       {"temp_f": temp_f, "dewpoint_f": dp_f})
+            want = hum.absolute_humidity_from_dew_point_gm3(temp_f, dp_f)
+            assert got == pytest.approx(want, abs=1e-9), (temp_f, dp_f)
+
+
+def test_ah_sql_uses_the_shared_constants_not_a_forked_copy():
+    """If someone corrects the Magnus constants in analytics/humidity, the SQL
+    must move with them — the rollups and every transport fit read the SQL
+    path, so a fork would be wrong where it matters and green everywhere it
+    is tested."""
+    from house_climate.analytics import humidity as hum
+    for value in (hum._MAGNUS_A, hum._MAGNUS_B, hum._SAT_VP_HPA_0C,
+                  hum._VAPOR_DENSITY_K):
+        assert str(value) in db._AH_SENSOR_SQL
+        assert str(value) in db._AH_WX_SQL
+
+
+def test_sensor_hourly_ah_matches_the_python_conversion(conn):
+    """The SQL rollups and the live tiles must agree about the same reading.
+    They take different routes to absolute humidity — SQL from stored temp +
+    dew point, Python from temp + RH — so this pins them together."""
+    from house_climate.analytics import humidity as hum
+    ts = datetime(2026, 8, 20, 6, 0, tzinfo=timezone.utc)
+    temp, rh = 63.0, 88.0
+    dp = hum.dew_point_f(temp, rh)
+    db.insert_sensor_reading(conn, "ecowitt_crawl", ts, temp_f=temp, humidity=rh,
+                             dewpoint_f=dp)
+    rows = db.sensor_hourly_ah(conn, "ecowitt_crawl",
+                               datetime(2026, 8, 20, 0, tzinfo=timezone.utc))
+    assert len(rows) == 1
+    assert rows[0]["ah"] == pytest.approx(hum.absolute_humidity_gm3(temp, rh), abs=0.01)
+    assert rows[0]["rh_max"] == rh
+
+
+def test_sensor_hourly_ah_skips_rows_without_a_dew_point(conn):
+    ts = datetime(2026, 8, 20, 7, 0, tzinfo=timezone.utc)
+    db.insert_sensor_reading(conn, "ecowitt_crawl", ts, temp_f=63.0, humidity=88.0,
+                             dewpoint_f=None)
+    rows = db.sensor_hourly_ah(conn, "ecowitt_crawl",
+                               datetime(2026, 8, 20, 0, tzinfo=timezone.utc))
+    assert rows == []
+
+
+def test_daily_absolute_humidity_averages_readings_not_temperatures(conn):
+    """Absolute humidity does not move in a straight line with temperature, so
+    a day's figure has to be worked out reading by reading and averaged
+    afterwards. Computing it from the day's average temperature and average dew
+    point instead gives a different — wrong — answer, and this pins the
+    difference so the cheaper shortcut can never quietly replace it."""
+    from house_climate.analytics import humidity as hum
+    day = datetime(2026, 8, 21, tzinfo=timezone.utc)
+    pairs = [(45.0, 44.0), (95.0, 60.0)]     # a cold damp hour and a hot one
+    for i, (t, dp) in enumerate(pairs):
+        db.insert_sensor_reading(conn, "ecowitt_crawl", day + timedelta(hours=i),
+                                 temp_f=t, humidity=80.0, dewpoint_f=dp)
+    daily = db.sensor_daily_stats(conn, "ecowitt_crawl", "UTC",
+                                  since_ts=day - timedelta(hours=1))
+    row = next(d for d in daily if d["ah_mean"] is not None)
+    per_reading = sum(hum.absolute_humidity_from_dew_point_gm3(t, dp)
+                      for t, dp in pairs) / len(pairs)
+    shortcut = hum.absolute_humidity_from_dew_point_gm3(
+        sum(t for t, _ in pairs) / 2, sum(dp for _, dp in pairs) / 2)
+    assert row["ah_mean"] == pytest.approx(per_reading, abs=0.02)
+    assert abs(per_reading - shortcut) > 0.1, \
+        "fixture too mild to catch the shortcut — widen the temperature spread"
+
+
+def test_indoor_hourly_reports_temperature_difference_and_blower_duty(conn):
+    """Both feed the stack-effect check: the temperature difference drives air
+    up through the building, and blower duty separates duct-driven movement
+    from it."""
+    base = datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc)
+    for i, status in enumerate(["cooling", "idle", "idle", "fan"]):
+        db.insert_reading(conn, dict(
+            ts=base + timedelta(minutes=10 * i), device_id="dev1",
+            indoor_temp_f=72.0, indoor_humidity=48, heat_setpoint_f=68,
+            cool_setpoint_f=74, equipment_status=status, mode="cool",
+            daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
+            wx_outdoor_temp_f=52.0, wx_humidity=60, wx_dewpoint_f=45,
+            wx_solar_wm2=100, wx_uv=1, wx_fc_high_f=70, wx_fc_low_f=50,
+            wx_conditions="Clear", wx_aqi=20, wx_alert_count=0, weather_ok=True,
+            wx_rain_today_in=0.0))
+    rows = db.indoor_hourly(conn, "dev1", base - timedelta(hours=1))
+    assert len(rows) == 1
+    assert rows[0]["dt"] == pytest.approx(20.0)     # 72F inside, 52F outside
+    assert rows[0]["duty"] == pytest.approx(0.5)    # cooling + fan out of four
+
+
+def test_indoor_hourly_skips_hours_without_both_temperatures(conn):
+    """An hour with no outdoor reading has no temperature difference, and must
+    be absent rather than reported as zero."""
+    ts = datetime(2026, 8, 23, 9, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, dict(
+        ts=ts, device_id="dev1", indoor_temp_f=72.0, indoor_humidity=48,
+        heat_setpoint_f=68, cool_setpoint_f=74, equipment_status="idle",
+        mode="cool", daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
+        wx_outdoor_temp_f=None, wx_humidity=None, wx_dewpoint_f=None,
+        wx_solar_wm2=None, wx_uv=None, wx_fc_high_f=None, wx_fc_low_f=None,
+        wx_conditions=None, wx_aqi=None, wx_alert_count=0, weather_ok=False,
+        wx_rain_today_in=None))
+    assert db.indoor_hourly(conn, "dev1", ts - timedelta(hours=1)) == []
+
+
+def test_outdoor_daily_and_series_carry_absolute_humidity(conn):
+    from house_climate.analytics import humidity as hum
+    ts = datetime(2026, 8, 24, 9, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, dict(
+        ts=ts, device_id="dev1", indoor_temp_f=72.0, indoor_humidity=48,
+        heat_setpoint_f=68, cool_setpoint_f=74, equipment_status="idle",
+        mode="cool", daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
+        wx_outdoor_temp_f=80.0, wx_humidity=55, wx_dewpoint_f=62.0,
+        wx_solar_wm2=400, wx_uv=5, wx_fc_high_f=90, wx_fc_low_f=60,
+        wx_conditions="Clear", wx_aqi=30, wx_alert_count=0, weather_ok=True,
+        wx_rain_today_in=0.0))
+    expected = hum.absolute_humidity_from_dew_point_gm3(80.0, 62.0)
+    daily = db.outdoor_daily(conn, "dev1", "UTC", since_ts=ts - timedelta(hours=1))
+    assert daily[0]["ah_mean"] == pytest.approx(expected, abs=0.01)
+    series = db.outdoor_series(conn, "dev1", ts - timedelta(hours=1), 3600)
+    assert series[0]["ah"] == pytest.approx(expected, abs=0.01)

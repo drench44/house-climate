@@ -315,3 +315,21 @@ def test_dockerfile_ships_version():
     dockerfile = (ROOT / "web.Dockerfile").read_text()
     assert re.search(r"COPY\s+.*\bVERSION\b", dockerfile), \
         "web.Dockerfile must COPY VERSION into the image"
+
+
+# ------------------------------------------------------------------ ids
+
+_ID_LOOKUP = re.compile(r"getElementById\(\s*'([A-Za-z][\w-]*)'\s*\)")
+# Ids written into markup: the static pages, plus the ones JS builds into
+# template strings (`id="cost-today"`, `id="peak-countdown"` and friends).
+_ID_DECLARED = re.compile(r'id="([A-Za-z][\w-]*)"')
+
+
+def test_every_element_the_js_looks_up_exists_in_the_markup():
+    """A typo'd id fails silently — `if (!el) return` swallows it and the panel
+    simply never renders, showing an empty box rather than an error. The JS
+    suite cannot catch it either: its DOM stub creates any id on demand. So the
+    contract is pinned here, against the real pages."""
+    declared = set(_ID_DECLARED.findall(ALL_HTML)) | set(_ID_DECLARED.findall(ALL_JS))
+    missing = sorted(set(_ID_LOOKUP.findall(ALL_JS)) - declared)
+    assert not missing, f"JS looks up ids that nothing declares: {missing}"

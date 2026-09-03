@@ -2,7 +2,8 @@ import calendar
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from .. import db
-from ..analytics import runtime, cost, correlation, humidity, moisture, thermal, precool
+from ..analytics import (runtime, cost, correlation, humidity, moisture, thermal,
+                        precool, coupling)
 
 _RANGES = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
 
@@ -759,7 +760,62 @@ def build_crawl(conn, device_id, cfg, range_key, now=None) -> dict:
         "vent": vent,
         "data_start": rows[0]["ts"].isoformat(),
         "series": series,
+        "ah_gap": _ah_gap_summary(conn, device_id, cfg, now),
     }
+
+
+def _ah_gap_summary(conn, device_id, cfg, now):
+    """The dashboard strip: how much wetter the crawl is than each floor right
+    now, which way that is moving, and the transport verdict if one has already
+    been worked out.
+
+    Deliberately NOT built on _build_ah_section. That function assembles 60-day
+    series, excess-over-outdoor, every intervention comparison and the
+    prediction test — all of which this throws away — and the dashboard asks
+    for it every few seconds. This path reads two short windows per sensor and
+    stops.
+    """
+    crawl_id, _ = _crawl_sensor_id(cfg)
+    floors = _indoor_sensors(cfg)
+    if crawl_id is None or not floors:
+        return {"available": False, "reason": "not_configured"}
+
+    tz = cfg.timezone
+    since_trend = now - timedelta(days=16)
+    since_now = now - timedelta(hours=6)
+    crawl_daily = db.sensor_daily_stats(conn, crawl_id, tz, since_ts=since_trend)
+    crawl_h = db.sensor_hourly_ah(conn, crawl_id, since_now)
+    if not crawl_daily and not crawl_h:
+        return {"available": False, "reason": "no_data"}
+
+    # Whatever fit is already cached. Never starts one: a refit takes over a
+    # second, and the dashboard's poll must not be the request that pays it.
+    interventions = db.list_interventions(conn)
+    fits = _fits_cached(conn, device_id, cfg, now, crawl_id, floors,
+                        interventions, allow_fit=False) or {}
+
+    out = []
+    for sid, name in floors:
+        gap_hourly = moisture.ah_gap_hourly(
+            crawl_h, db.sensor_hourly_ah(conn, sid, since_now))
+        gap_daily = moisture.ah_gap_daily(
+            crawl_daily, db.sensor_daily_stats(conn, sid, tz, since_ts=since_trend))
+        cw = (fits.get("per_floor", {}).get(sid, {}).get("coupling")
+              or {"ready": False, "reason": "not_computed"})
+        ready = bool(cw.get("ready"))
+        out.append({
+            "name": name,
+            "gap_now": round(gap_hourly[-1]["gap"], 2) if gap_hourly else None,
+            "trend_7d": _gap_trend(gap_daily, now.date()),
+            "coupling_ready": ready,
+            # `significant` travels with beta. Without it the strip would state
+            # a gain of 0.08 with an interval four times its size as plain fact.
+            "significant": bool(cw.get("significant")) if ready else None,
+            "beta": cw.get("beta") if ready else None,
+            "ci95": cw.get("ci95") if ready else None,
+            "reason": None if ready else cw.get("reason"),
+        })
+    return {"available": True, "floors": out}
 
 
 def _indoor_sensors(cfg):
@@ -784,6 +840,236 @@ def _reference_sensor_id(cfg):
         if "down" in str(name).lower():
             return sid, name
     return indoor[0] if indoor else (None, None)
+
+
+# The gap numbers are cheap: a couple of rollup queries and a subtraction.
+# The transport-gain fits are not — around 1.5 seconds for a whole house — so
+# the two are built separately. The dashboard polls every few seconds and only
+# ever gets the cheap half plus whatever fit is already cached, so its request
+# never waits on a refit. The moisture page is the one that pays for a rebuild.
+_AH_FIT_TTL_S = 1800
+_ah_fit_cache: dict = {}
+
+
+def _fits_cached(conn, device_id, cfg, now, crawl_id, floors, interventions,
+                 allow_fit):
+    """Transport-gain fits per floor, from cache when fresh.
+
+    `allow_fit=False` (the dashboard) returns whatever is cached and never
+    computes, so a cold cache costs the dashboard nothing but a missing line.
+
+    The intervention markers are part of the key. A fit refuses outright when
+    its window straddles one, so marking new work has to invalidate the cache
+    — otherwise the page would keep serving a fit spanning the marker as
+    current, with no refusal, for as long as the entry lived.
+    """
+    key = (device_id, crawl_id, tuple(sid for sid, _ in floors),
+           tuple(sorted(iv["marked_on"] for iv in interventions)))
+    hit = _ah_fit_cache.get(key)
+    if hit is not None and (now - hit[0]).total_seconds() < _AH_FIT_TTL_S:
+        return {**hit[1], "computed_at": hit[0].isoformat()}
+    if not allow_fit:
+        return None
+    built = _build_fits(conn, device_id, cfg, now, crawl_id, floors)
+    _ah_fit_cache[key] = (now, built)
+    return {**built, "computed_at": now.isoformat()}
+
+
+def _coupling_days(now, data_start_day):
+    """Longest whole-day window the data can support, capped at 45 days.
+
+    Longer is better here — hourly readings carry far less independent
+    information than their count suggests — but a window reaching back past
+    the first reading would be mostly absence."""
+    if data_start_day is None:
+        return coupling.MIN_WINDOW_DAYS
+    have = (now.date() - data_start_day).days
+    return max(coupling.MIN_WINDOW_DAYS, min(45, have))
+
+
+def _build_fits(conn, device_id, cfg, now, crawl_id, floors):
+    """The expensive half: does crawl air reach each floor, and does the link
+    behave like air actually moving?"""
+    crawl_daily = db.sensor_daily_stats(conn, crawl_id, cfg.timezone)
+    days = _coupling_days(now, crawl_daily[0]["day"] if crawl_daily else None)
+    # The trailing-week baseline each reading is measured against needs half a
+    # week of context either side of the window, so the fetch reaches back
+    # further than the window itself.
+    since = now - timedelta(days=days + coupling.DETREND_WINDOW_H // 24 + 1)
+
+    crawl_h = db.sensor_hourly_ah(conn, crawl_id, since)
+    outdoor_h = [{"bucket": r["bucket"], "ah": r.get("ah")}
+                 for r in db.outdoor_hourly(conn, device_id, since)]
+    indoor_h = db.indoor_hourly(conn, device_id, since)
+    interventions = db.list_interventions(conn)
+    crawl_rh_h = [{"bucket": r["bucket"], "rh": r.get("rh_max")} for r in crawl_h]
+    temp_diff_h = [{"bucket": r["bucket"], "dt": r["dt"]} for r in indoor_h
+                   if r.get("dt") is not None]
+    blower_h = [{"bucket": r["bucket"], "duty": r["duty"]} for r in indoor_h
+                if r.get("duty") is not None]
+
+    per_floor = {}
+    for sid, name in floors:
+        floor_h = db.sensor_hourly_ah(conn, sid, since)
+        per_floor[sid] = {
+            "coupling": coupling.coupling_window(
+                crawl_h, floor_h, outdoor_h, days=days, now=now,
+                crawl_rh=crawl_rh_h, interventions=interventions, blower=blower_h),
+            "stack": coupling.stack_signature(
+                crawl_h, floor_h, outdoor_h, temp_diff_h, days=days, now=now,
+                crawl_rh=crawl_rh_h, interventions=interventions),
+        }
+    ordered = _floors_by_height(floors)
+    consistency = coupling.consistency_check(
+        [{"name": name,
+          "ready": bool(per_floor[sid]["coupling"].get("ready")),
+          "beta": per_floor[sid]["coupling"].get("beta"),
+          "ci95": per_floor[sid]["coupling"].get("ci95"),
+          "lag": per_floor[sid]["coupling"].get("lag")}
+         for sid, name in (ordered or floors)],
+        ordered=ordered is not None)
+    return {"per_floor": per_floor, "consistency": consistency,
+            "window_days": days}
+
+
+# Words that place a sensor in the building, lowest first. The cross-floor
+# check only means anything if the floors are in height order, and a channel
+# number does not record height — so the order is read from the configured
+# NAMES, and the check is skipped entirely when they do not say.
+_FLOOR_WORDS = [
+    ("basement", 0), ("cellar", 0),
+    ("downstairs", 1), ("down", 1), ("main", 1), ("first", 1), ("ground", 1),
+    ("upstairs", 2), ("upper", 2), ("up", 2), ("second", 2), ("master", 2),
+    ("attic", 3), ("loft", 3), ("third", 3),
+]
+
+
+def _floors_by_height(floors):
+    """`floors` sorted lowest-first, or None when the names do not say.
+
+    Returning None is the honest answer: an inverted list makes
+    consistency_check announce leaky ducts, a specific and expensive repair,
+    on the strength of nothing but config key order."""
+    ranked = []
+    for sid, name in floors:
+        low = str(name).lower()
+        hits = {rank for word, rank in _FLOOR_WORDS if word in low}
+        if len(hits) != 1:
+            return None
+        ranked.append((hits.pop(), sid, name))
+    if len({r for r, _, _ in ranked}) != len(ranked):
+        return None       # two sensors on the same level: no order to check
+    return [(sid, name) for _, sid, name in sorted(ranked)]
+
+
+def _build_ah_section(conn, device_id, cfg, now, allow_fit=True):
+    """Absolute-humidity gap, excess over outdoor, and — when the fits are
+    available — how much of the crawl's moisture reaches each floor.
+    See docs/superpowers/specs for the design."""
+    crawl_id, crawl_name = _crawl_sensor_id(cfg)
+    floors = _indoor_sensors(cfg)
+    if crawl_id is None or not floors:
+        return {"available": False, "reason": "not_configured"}
+
+    tz = cfg.timezone
+    crawl_daily = db.sensor_daily_stats(conn, crawl_id, tz)
+    if not crawl_daily:
+        return {"available": False, "reason": "no_data"}
+    outdoor_days = db.outdoor_daily(conn, device_id, tz)
+    interventions = db.list_interventions(conn)
+    since_7d = now - timedelta(days=7)
+    crawl_h7 = db.sensor_hourly_ah(conn, crawl_id, since_7d)
+    crawl_excess = moisture.ah_excess_daily(crawl_daily, outdoor_days)
+
+    fits = _fits_cached(conn, device_id, cfg, now, crawl_id, floors,
+                        interventions, allow_fit)
+    out_floors = []
+    for sid, name in floors:
+        floor_daily = db.sensor_daily_stats(conn, sid, tz)
+        floor_h7 = db.sensor_hourly_ah(conn, sid, since_7d)
+        gap_daily = moisture.ah_gap_daily(crawl_daily, floor_daily)
+        gap_hourly = moisture.ah_gap_hourly(crawl_h7, floor_h7)
+        floor_excess = moisture.ah_excess_daily(floor_daily, outdoor_days)
+        fit = (fits or {}).get("per_floor", {}).get(sid, {})
+        # "not_computed" rather than "collecting": the difference between "the
+        # data cannot answer this yet" and "nobody has run the numbers since
+        # the process started" matters to the reader, and only one of them is
+        # a statement about the house.
+        cw = fit.get("coupling") or {"ready": False, "reason": "not_computed"}
+        out_floors.append({
+            "sensor": sid, "name": name,
+            "gap_now": round(gap_hourly[-1]["gap"], 2) if gap_hourly else None,
+            "gap_series": [{"ts": g["bucket"].isoformat(),
+                            "crawl": round(g["crawl"], 2),
+                            "floor": round(g["floor"], 2),
+                            "gap": round(g["gap"], 2)} for g in gap_hourly],
+            "gap_daily": [{"day": g["day"].isoformat(), "gap": round(g["gap"], 2)}
+                          for g in gap_daily[-60:]],
+            "excess_daily": [{"day": r["day"].isoformat(),
+                              "excess": round(r["excess"], 2)}
+                             for r in floor_excess[-60:]],
+            "gap_trend_7d": _gap_trend(gap_daily, now.date()),
+            "coupling": cw,
+            "stack": fit.get("stack") or {"ready": False, "reason": "not_computed"},
+            "interventions": moisture.gap_intervention_report(
+                gap_daily, interventions, outdoor_daily=outdoor_days),
+            "prediction": _predictions(cw, crawl_excess, floor_excess, interventions),
+        })
+
+    return {"available": True, "crawl": crawl_name,
+            "window_days": (fits or {}).get("window_days"),
+            "crawl_excess_daily": [{"day": r["day"].isoformat(),
+                                    "excess": round(r["excess"], 2)}
+                                   for r in crawl_excess[-60:]],
+            "floors": out_floors,
+            "consistency": (fits or {}).get("consistency")
+                           or {"verdict": "not_computed",
+                               "text": "The floor-to-floor check has not been run "
+                                       "since the server started."},
+            "fit_computed_at": (fits or {}).get("computed_at"),
+            "settle_days": moisture.INSTALL_SETTLE_DAYS}
+
+
+# Days each side of the trend arrow must actually carry, out of seven.
+_TREND_MIN_DAYS = 4
+
+
+def _gap_trend(gap_daily, today):
+    """Change in the gap over the last week, g/m^3, or None.
+
+    Compares the last seven CALENDAR days against the seven before them, not
+    the last fourteen rows. gap_daily only holds days where both sensors
+    reported, so after an outage fourteen rows can span a month — and the
+    dashboard would print "closing 0.42 vs last week" from data that is
+    nothing of the sort."""
+    if not gap_daily:
+        return None
+    recent = [g["gap"] for g in gap_daily
+              if today - timedelta(days=7) < g["day"] <= today]
+    prior = [g["gap"] for g in gap_daily
+             if today - timedelta(days=14) < g["day"] <= today - timedelta(days=7)]
+    if len(recent) < _TREND_MIN_DAYS or len(prior) < _TREND_MIN_DAYS:
+        return None
+    return round(sum(recent) / len(recent) - sum(prior) / len(prior), 2)
+
+
+def _predictions(cw, crawl_excess, floor_excess, interventions):
+    """For each marker: what the transport gain says the floor above should
+    have gained, against what it actually did."""
+    if not interventions:
+        return []
+    beta = cw.get("beta") if cw.get("ready") else None
+    beta_ci = cw.get("ci95") if cw.get("ready") else None
+    out = []
+    for iv in sorted(interventions, key=lambda i: i["marked_on"]):
+        d0 = iv["marked_on"]
+        d_crawl, d_crawl_ci = moisture.change_across(crawl_excess, "excess", d0)
+        d_floor, d_floor_ci = moisture.change_across(floor_excess, "excess", d0)
+        out.append({"id": iv["id"], "label": iv["label"],
+                    "marked_on": d0.isoformat(),
+                    **coupling.prediction_test(beta, beta_ci, d_crawl,
+                                               d_crawl_ci, d_floor, d_floor_ci)})
+    return out
 
 
 def build_moisture(conn, device_id, cfg, now=None) -> dict:
@@ -898,6 +1184,7 @@ def build_moisture(conn, device_id, cfg, now=None) -> dict:
         "daily": daily_out,
         "interventions": iv_report,
         "projection": projection,
+        "ah": _build_ah_section(conn, device_id, cfg, now),
     }
 
 

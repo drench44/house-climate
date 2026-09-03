@@ -1564,3 +1564,238 @@ def test_build_backup_unknown_when_kv_empty(conn):
     s = api.build_backup(conn, now=_T0, stale_s=108000)
     assert s == {"known": False, "last_success": None, "age_s": None,
                  "stale": False, "threshold_s": 108000}
+
+
+
+# --- absolute-humidity gap + transport gain ---------------------------------
+
+@pytest.fixture(autouse=True)
+def _clear_ah_cache():
+    """The transport-gain fits are cached for half an hour so the dashboard
+    poll stays cheap. Tests seed different data under the same device id, so
+    the cache has to go between them or the second test reads the first
+    one's numbers."""
+    api._ah_fit_cache.clear()
+    yield
+    api._ah_fit_cache.clear()
+
+
+def test_ah_section_reports_a_gap_per_indoor_channel(conn):
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    ah = api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)["ah"]
+    assert ah["available"] is True
+    assert ah["crawl"] == "Crawl Space"
+    names = [f["name"] for f in ah["floors"]]
+    assert "Downstairs" in names and "Upstairs" in names, \
+        "every non-crawl channel gets a gap, not just the reference one"
+    down = next(f for f in ah["floors"] if f["name"] == "Downstairs")
+    # 63F/70% crawl air carries more water per cubic metre than 71F/50% air.
+    assert down["gap_now"] > 0
+    assert down["gap_series"] and set(down["gap_series"][0]) == {
+        "ts", "crawl", "floor", "gap"}
+
+
+def test_ah_section_refuses_transport_gain_on_three_days_of_data(conn):
+    """Three days cannot support the fit, and the payload must say which gate
+    stopped it rather than shipping a number."""
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    ah = api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)["ah"]
+    down = next(f for f in ah["floors"] if f["name"] == "Downstairs")
+    assert down["coupling"]["ready"] is False
+    assert down["coupling"]["reason"] in (
+        "thin_coverage", "outage", "insufficient_n_eff", "no_data", "weak_signal")
+    assert "beta" not in down["coupling"] or down["coupling"].get("beta") is None
+
+
+def test_ah_section_absent_channel_still_listed_without_data(conn):
+    """Upstairs is configured but never reported here. It must appear with an
+    empty gap rather than vanish or crash."""
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    ah = api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)["ah"]
+    up = next(f for f in ah["floors"] if f["name"] == "Upstairs")
+    assert up["gap_now"] is None
+    assert up["gap_daily"] == []
+    assert up["coupling"]["ready"] is False
+
+
+def test_crawl_payload_carries_the_dashboard_gap_summary(conn):
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    c = api.build_crawl(conn, "dev1", CRAWL_CFG, "24h", now=now)
+    summary = c["ah_gap"]
+    assert summary["available"] is True
+    down = next(f for f in summary["floors"] if f["name"] == "Downstairs")
+    assert set(down) == {"name", "gap_now", "trend_7d", "coupling_ready",
+                         "beta", "reason"}
+    assert down["coupling_ready"] is False
+    assert down["beta"] is None
+
+
+def test_dashboard_never_triggers_the_expensive_fit(conn):
+    """The dashboard polls every few seconds. It must serve the cheap gap
+    numbers and whatever fit is already cached, and never start one itself —
+    otherwise one poll in every cache window stalls for over a second."""
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    api.build_crawl(conn, "dev1", CRAWL_CFG, "24h", now=now)
+    assert api._ah_fit_cache == {}, "the dashboard fitted a model"
+    api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)
+    assert len(api._ah_fit_cache) == 1, "the moisture page should fill the cache"
+
+
+def test_moisture_page_reuses_a_cached_fit(conn):
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)
+    stamped = list(api._ah_fit_cache.values())[0][0]
+    api.build_moisture(conn, "dev1", CRAWL_CFG, now=now + timedelta(minutes=1))
+    assert list(api._ah_fit_cache.values())[0][0] == stamped, "refitted inside the cache window"
+
+
+def test_dashboard_gap_numbers_do_not_need_a_fit(conn):
+    """Cold cache: the gap tiles still have real numbers, and the transport
+    line simply reports that it is still being worked out."""
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    summary = api.build_crawl(conn, "dev1", CRAWL_CFG, "24h", now=now)["ah_gap"]
+    down = next(f for f in summary["floors"] if f["name"] == "Downstairs")
+    assert down["gap_now"] is not None
+    assert down["coupling_ready"] is False
+
+
+def test_ah_section_not_configured_without_indoor_channels(conn):
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    cfg = dataclasses.replace(CFG, ecowitt={
+        "enabled": True, "gateway_url": "http://gw",
+        "channels": {}, "outdoor_name": "Crawl Space"})
+    ah = api.build_moisture(conn, "dev1", cfg, now=now)["ah"]
+    assert ah == {"available": False, "reason": "not_configured"}
+
+
+def _seed_transport(conn, now, days=32, beta=0.4, lag=2):
+    """A house where a KNOWN share of the crawl's dampness reaches upstairs.
+
+    Every API test above seeds three days, which every gate correctly refuses —
+    so nothing exercised _build_fits, the stack check, the consistency check or
+    the prediction test on the live path. This seeds long enough, and with a
+    real signal, that the success path actually runs.
+    """
+    import math
+    from house_climate.analytics import humidity as hum
+    hours = days * 24
+
+    def crawl_ah(i):
+        return 11.0 + 2.0 * math.sin(2 * math.pi * i / 60.0)
+
+    def floor_ah(i):
+        return 8.5 + beta * (crawl_ah(i - lag) - 11.0) + 0.4 * math.sin(2 * math.pi * i / 24.0)
+
+    def rh_temp_for(ah, temp_f):
+        """Pick the RH that puts this sensor at the wanted absolute humidity."""
+        lo, hi = 1.0, 99.0
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            if hum.absolute_humidity_gm3(temp_f, mid) < ah:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2
+
+    for i in range(hours):
+        ts = now - timedelta(hours=hours - i)
+        for sid, temp, ah in (("ecowitt_outdoor", 62.0, crawl_ah(i)),
+                              ("ecowitt_ch7", 71.0, floor_ah(i)),
+                              ("ecowitt_ch8", 73.0, floor_ah(i) - 0.3)):
+            rh = rh_temp_for(ah, temp)
+            db.insert_sensor_reading(conn, sid, ts, temp_f=temp, humidity=rh,
+                                     dewpoint_f=hum.dew_point_f(temp, rh))
+        db.insert_reading(conn, dict(
+            ts=ts, device_id="dev1", indoor_temp_f=72.0, indoor_humidity=48,
+            heat_setpoint_f=68, cool_setpoint_f=74,
+            equipment_status="cooling" if i % 6 == 0 else "idle", mode="cool",
+            daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
+            wx_outdoor_temp_f=58.0 + 6.0 * math.sin(2 * math.pi * i / 97.0),
+            wx_humidity=60, wx_dewpoint_f=48.0 + 3.0 * math.sin(2 * math.pi * i / 83.0),
+            wx_solar_wm2=100, wx_uv=1, wx_fc_high_f=70, wx_fc_low_f=50,
+            wx_conditions="Clear", wx_aqi=20, wx_alert_count=0, weather_ok=True,
+            wx_rain_today_in=0.0))
+
+
+def test_transport_gain_reaches_the_payload_on_a_real_window(conn):
+    """The success path end to end: enough days, a real signal, and the fit,
+    stack check and consistency verdict all present in the payload."""
+    now = datetime.now(timezone.utc)
+    _seed_transport(conn, now)
+    ah = api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)["ah"]
+    down = next(f for f in ah["floors"] if f["name"] == "Downstairs")
+    c = down["coupling"]
+    assert c["ready"] is True, c.get("reason")
+    assert 0.2 < c["beta"] < 0.6, c
+    assert c["n_eff"] < c["n"], "hourly readings counted as independent"
+    assert c["ci95"] > 0
+    assert "stack" in down and "prediction" in down
+    assert ah["fit_computed_at"] is not None
+
+
+def test_floor_order_comes_from_names_and_drives_the_consistency_check(conn):
+    """Downstairs must be compared as the lower floor even though it sits on a
+    higher channel number than Upstairs in this config."""
+    now = datetime.now(timezone.utc)
+    _seed_transport(conn, now)
+    ah = api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)["ah"]
+    assert ah["consistency"]["verdict"] in ("consistent", "bypass_suspected",
+                                            "collecting")
+
+
+def test_floors_by_height_reads_the_names_not_the_channel_numbers():
+    """Pure: no database needed, so it runs on a bare pytest too."""
+    assert [n for _, n in api._floors_by_height(
+        [("ch8", "Upstairs"), ("ch7", "Downstairs")])] == ["Downstairs", "Upstairs"]
+    assert [n for _, n in api._floors_by_height(
+        [("a", "Main Floor"), ("b", "Attic"), ("c", "Basement")])] == [
+            "Basement", "Main Floor", "Attic"]
+    # Names that do not place the sensor, or place two on the same level.
+    assert api._floors_by_height([("a", "Sensor A"), ("b", "Sensor B")]) is None
+    assert api._floors_by_height([("a", "Upstairs"), ("b", "Upper Hall")]) is None
+    assert api._floors_by_height([("a", "Upstairs Downstairs")]) is None
+
+
+def test_unnameable_floors_refuse_the_consistency_check(conn):
+    """Nothing records how high a sensor sits. If the names do not say, the
+    check must refuse rather than trust channel order."""
+    now = datetime.now(timezone.utc)
+    _seed_transport(conn, now)
+    cfg = dataclasses.replace(CFG, ecowitt={
+        "enabled": True, "gateway_url": "http://gw",
+        "channels": {"8": "Sensor A", "7": "Sensor B"},
+        "outdoor_name": "Crawl Space"})
+    ah = api.build_moisture(conn, "dev1", cfg, now=now)["ah"]
+    assert ah["consistency"]["verdict"] == "unknown_order"
+
+
+def test_marking_an_intervention_invalidates_the_cached_fit(conn):
+    """A fit whose window straddles the work is invalid, so marking new work
+    must not keep serving the old one for half an hour."""
+    now = datetime.now(timezone.utc)
+    _seed_transport(conn, now)
+    api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)
+    assert len(api._ah_fit_cache) == 1
+    db.add_intervention(conn, (now - timedelta(days=10)).date(), "Vapor barrier", None)
+    ah = api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)["ah"]
+    assert len(api._ah_fit_cache) == 2, "the marker did not change the cache key"
+    down = next(f for f in ah["floors"] if f["name"] == "Downstairs")
+    assert down["coupling"]["reason"] == "straddles_intervention"
+
+
+def test_gap_trend_uses_calendar_weeks_not_row_positions():
+    """After an outage, fourteen rows can span a month. The arrow must not
+    call that 'vs last week'."""
+    today = datetime.now(timezone.utc).date()
+    fresh = [{"day": today - timedelta(days=i), "gap": 2.0} for i in range(14)]
+    assert api._gap_trend(fresh, today) is not None
+    stale = [{"day": today - timedelta(days=i * 5), "gap": 2.0} for i in range(14)]
+    assert api._gap_trend(stale, today) is None

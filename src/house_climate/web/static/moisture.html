@@ -58,6 +58,33 @@
       <svg id="mo-delta-chart" viewBox="0 0 960 130" role="img" aria-label="Crawl minus indoor dew point over 7 days"></svg>
     </section>
 
+    <!-- crawl-to-floor absolute humidity gap + transport gain -->
+    <section class="mo-panel" aria-label="Crawl to floor moisture gap">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">How much wetter the crawl is than each floor</span>
+        <span class="micro right">grams of water per cubic metre &mdash; the same measure in a cold crawl and a warm room</span>
+      </div>
+      <div id="mo-gap-tiles"></div>
+      <svg id="mo-gap-chart" viewBox="0 0 960 170" role="img"
+           aria-label="Crawl minus each floor, grams per cubic metre, daily"></svg>
+      <div class="ribbon-legend" id="mo-gap-legend"></div>
+      <div id="mo-gap-lead"></div>
+    </section>
+
+    <!-- does crawl air reach the floors above? -->
+    <section class="mo-panel" aria-label="Crawl air reaching the floors above">
+      <div class="panel-head">
+        <span class="micro" style="color:var(--dim)">Is crawl air reaching the floors above?</span>
+        <span class="micro right">when the crawl gets damper on its own, how much of it turns up upstairs?</span>
+      </div>
+      <div id="mo-coupling"></div>
+      <div id="mo-prediction"></div>
+      <details class="mo-method">
+        <summary class="micro">How this is worked out, and what could fool it</summary>
+        <div id="mo-coupling-method"></div>
+      </details>
+    </section>
+
     <!-- source attribution -->
     <section class="mo-panel" aria-label="Moisture source attribution">
       <div class="panel-head">

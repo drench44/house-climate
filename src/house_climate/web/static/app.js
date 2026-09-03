@@ -643,6 +643,87 @@ function setCrawlRange(r) {
   j(`/api/crawl?range=${r}`).then(renderCrawl).catch((e) => console.error('crawl', e));
 }
 
+
+/* Crawl-to-floor moisture gap strip, under the crawl chart. Shows how much
+   wetter the crawl air is than each floor right now, which way that is
+   heading, and — once the maths on /moisture.html can stand behind it — how
+   much of the crawl's dampness is actually turning up on that floor.
+
+   The numbers arrive on /api/crawl, which the dashboard already polls, and
+   are served from a cache on the server, so this strip costs the poll cycle
+   nothing extra. */
+/* Why no transport figure is showing. Collapsing these into one message
+   would hide two things worth knowing: a sensor outage, and the good news
+   that the crawl has stopped getting damp on its own. */
+function gapStripReason(floors) {
+  const reasons = floors.map((f) => f.reason).filter(Boolean);
+  if (reasons.indexOf('outage') !== -1) {
+    return 'Readings are missing for more than a day &mdash; check the sensors';
+  }
+  if (reasons.indexOf('inconsistent_sign') !== -1) {
+    return 'The crawl and the floors above are moving in ways that do not add up';
+  }
+  if (reasons.length && reasons.every((r) => r === 'weak_signal')) {
+    return 'The crawl no longer gets damp on its own &mdash; nothing left to trace upstairs';
+  }
+  if (reasons.indexOf('straddles_intervention') !== -1) {
+    return 'Measuring separately either side of the work in the crawl';
+  }
+  return 'Still working out whether crawl air is reaching the floors above';
+}
+
+function renderGapStrip(summary) {
+  const el = document.getElementById('gap-strip');
+  if (!el) return;
+  const floors = (summary && summary.available && summary.floors) || [];
+  const withData = floors.filter((f) => f.gap_now != null);
+  if (!withData.length) { el.hidden = true; el.innerHTML = ''; return; }
+
+  const tiles = withData.map((f) => {
+    const t = f.trend_7d;
+    const trend = t == null ? 'no trend yet'
+      : t < -0.1 ? `closing ${Math.abs(t).toFixed(2)} vs last week`
+      : t > 0.1 ? `widening ${t.toFixed(2)} vs last week`
+      : 'steady vs last week';
+    return `<div class="gap-tile">
+      <span class="k">crawl &minus; ${escapeHtml((f.name || '').toLowerCase())}</span>
+      <span class="v num ${crawlGapClass(f.gap_now)}">${f.gap_now > 0 ? '+' : ''}${f.gap_now.toFixed(2)}</span>
+      <span class="t">g/m&sup3; &middot; ${trend}</span>
+    </div>`;
+  });
+
+  const ready = withData.filter((f) => f.coupling_ready && f.beta != null);
+  let note;
+  if (ready.length) {
+    /* `significant` is separate from `coupling_ready` on purpose: a gain of 8%
+       give or take 40% is a ready result AND indistinguishable from nothing.
+       Printing the bare number here would state it as fact on the surface
+       people actually look at. */
+    note = ready.map((f) => (f.significant
+      ? `${escapeHtml(f.name)}: ${Math.round(f.beta * 100)}% of the crawl&rsquo;s dampness reaches this floor`
+      : `${escapeHtml(f.name)}: too little crawl air reaching this floor to measure`
+    )).join(' &middot; ');
+  } else {
+    note = gapStripReason(withData);
+  }
+  el.innerHTML = tiles.join('')
+    + `<div class="gap-note">${note} &mdash; <a href="/moisture.html">see the evidence</a></div>`;
+  el.hidden = false;
+}
+
+/* Grams of water per cubic metre more than the room above. Under 1 the crawl
+   is barely different; over 3 it is a separate climate under the floor. */
+function crawlGapClass(v) {
+  if (v == null) return '';
+  /* A floor damper than the crawl beneath it is not "good" — it usually means
+     swapped sensors or a moisture source upstairs, so it gets flagged rather
+     than rendered as the healthiest possible reading. */
+  if (v < -1) return 'v-watch';
+  if (v <= 1) return 'v-ok';
+  if (v <= 3) return 'v-watch';
+  return 'v-out';
+}
+
 function renderCrawl(c) {
   const panel = document.getElementById('crawl');
   const lead = document.getElementById('crawl-lead');
@@ -655,6 +736,7 @@ function renderCrawl(c) {
   /* No crawl sensor in the config at all -> the panel is noise; hide it. */
   if (c && c.available === false && c.reason === 'not_configured') {
     panel.hidden = true;
+    renderGapStrip(null);
     return;
   }
   panel.hidden = false;
@@ -671,9 +753,11 @@ function renderCrawl(c) {
     legend.hidden = true;
     note.textContent = '—';
     crawlGeom = null; crawlPts = [];
+    renderGapStrip(null);
     return;
   }
   legend.hidden = false;
+  renderGapStrip(c.ah_gap);
 
   /* head note: window + honesty about young data */
   const rangeWords = { '24h': 'the last 24 hours', '7d': 'the last 7 days', '30d': 'the last 30 days' };

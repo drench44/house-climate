@@ -918,6 +918,34 @@ body {
 .sw-moref { background: rgba(91, 201, 240, 0.5); }
 /* outdoor on the moisture page: amber dashed, matching the dashboard */
 .mo-out-line { fill: none; stroke: rgba(245, 164, 92, 0.55); stroke-width: 1.5; stroke-dasharray: 5 4; }
+/* dashboard: crawl-to-floor gap strip under the crawl panel */
+.gap-strip { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(233, 238, 247, 0.10); }
+.gap-strip .gap-tile { flex: 1 1 130px; min-width: 120px; }
+.gap-strip .gap-tile .k { display: block; font-size: 10.5px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--dim); }
+.gap-strip .gap-tile .v { font-family: var(--mono); font-size: 22px; font-weight: 600; }
+.gap-strip .gap-tile .t { display: block; font-size: 11px; color: var(--dim); }
+.gap-strip .gap-note { flex: 1 1 100%; font-size: 11.5px; color: var(--dim); }
+.gap-strip .gap-note a { color: inherit; text-decoration: underline; }
+
+/* crawl-to-floor gap: one line per floor, distinct from the dew-point lines
+   above so the two panels are never confused at a glance */
+.mo-gap-a { fill: none; stroke: var(--warn); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.mo-gap-b { fill: none; stroke: rgba(91, 201, 240, 0.75); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.mo-gap-c { fill: none; stroke: var(--mint); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.mo-gap-d { fill: none; stroke: rgba(199, 146, 234, 0.8); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.mo-gap-a-sw { background: var(--warn); }
+.mo-gap-b-sw { background: rgba(91, 201, 240, 0.75); }
+.mo-gap-c-sw { background: var(--mint); }
+.mo-gap-d-sw { background: rgba(199, 146, 234, 0.8); }
+/* findings lists under the gap and transport panels */
+.mo-list { margin: 8px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.55; color: var(--ink); }
+.mo-list li { margin-bottom: 6px; }
+.mo-list .micro { display: block; color: var(--dim); margin-top: 2px; }
+.mo-method { margin-top: 10px; border-top: 1px solid rgba(233, 238, 247, 0.10); padding-top: 8px; }
+.mo-method summary { cursor: pointer; color: var(--dim); }
+.mo-method summary:hover { color: var(--ink); }
 /* direct line-end labels on the dew-point sparkline */
 .hs-endlabel { font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: 0.06em; }
 .mo-marker { stroke: var(--mint); stroke-width: 1.2; stroke-dasharray: 2 3; }
@@ -1103,6 +1131,11 @@ body {
   .mo-zero { stroke: #999; }
   .cz-avg { stroke: #7d4bb5; }
   .mo-delta-line { stroke: #b8860b; }
+  .mo-gap-a { stroke: #b8860b; }
+  .mo-gap-b { stroke: #147cad; }
+  .mo-gap-c { stroke: #2e8b57; }
+  .mo-gap-d { stroke: #7d4bb5; }
+  .mo-method summary { color: #666; }
   .cz-temp { stroke: #a87fd4; }
   .mo-out-line { stroke: #d08030; }
   .mo-ref-line { stroke: #147cad; }

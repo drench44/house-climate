@@ -1,7 +1,7 @@
 # Crawl-to-floor absolute humidity: gap, coupling, and the transport test
 
 Date: 2026-09-03
-Status: design, awaiting review
+Status: implemented on `feat/crawl-upstairs-ah-gap`
 Scope: `analytics/humidity.py`, `analytics/moisture.py`, new
 `analytics/coupling.py`, `db.py`, `web/api.py`, `web/static/moisture.*`,
 `web/static/index.html` + `app.js`
@@ -252,18 +252,28 @@ A new module rather than more growth in `moisture.py`, which is already past
 
 **`analytics/coupling.py`** — pure functions, no DB, no config:
 
-- `hourly_anomalies(series, window_h=168)` — centred moving-mean detrend
-- `hour_of_day_dummies(buckets)`
-- `ols(X, y)` — normal equations with a singularity guard, reusing the
-  existing `_solve3` approach generalised to n columns
-- `newey_west_se(X, resid, bandwidth=48)`
-- `effective_n(x_anom, resid)`
-- `coupling_window(crawl, floor, outdoor, hours, ...)` → `{beta, ci95, lag,
-  n, n_eff, t, ready, reason}`
-- `stack_signature(...)` → `{delta, ci95, ready, reason}`
-- `prediction_test(beta, d_crawl_excess, d_floor_excess)` → `{predicted,
-  observed, ci95, verdict}`
-- `consistency_check(betas_by_floor)` → floor-order sanity verdict
+- `centered_anomalies(by_bucket, buckets, window_h=168)` — centred
+  moving-mean detrend, `None` where the window is under 70 % full
+- `solve` / `ols` — Gaussian elimination with partial pivoting and a
+  singularity guard, generalising the existing `_solve3` to n columns
+- `hac_var(X, resid, xtx, buckets, col, bandwidth=48)` — Newey-West variance
+  of ONE coefficient. Because only one element of the sandwich is ever needed,
+  it projects each row onto `(X'X)⁻¹e` and works in scalars, turning an
+  O(n·L·k²) computation into O(n·L). Lags are matched on the clock, not on row
+  position, so an outage cannot manufacture a correlation across the gap.
+- `effective_n(x, resid)` / `lag1_autocorr(vals)`
+- `coupling_window(...)` → `{ready, beta, ci95, lag, n, n_eff, t, crawl_sd,
+  reason}`
+- `stack_signature(...)` → `{ready, delta, ci95, lag, reason}`
+- `prediction_test(...)` → `{predicted, ci95, observed, verdict}`
+- `consistency_check(floors)` → floor-order verdict and its explanation
+
+Hour-of-day effects are removed by subtracting each series' own hour-of-day
+mean rather than by fitting 23 dummy columns. That is algebraically the same
+estimate and leaves a 3-column solve instead of a 26-column one — the
+difference between a fit that is affordable on a page load and one that is
+not. The degrees of freedom still pay for the absorbed parameters
+(`HOUR_OF_DAY_PARAMS`).
 
 **`analytics/moisture.py`** — gap only: `ah_gap_hourly`, `ah_gap_daily`,
 `ah_excess_daily`, `gap_intervention_report`.
@@ -274,12 +284,18 @@ return RH for the saturation filter; new `indoor_hourly()` for temperature and
 blower duty.
 
 **`web/api.py`** — `_indoor_sensors(cfg)` returns every non-crawl channel.
-`build_moisture` gains `ah_gaps` (per floor: now, series, daily, excess,
-interventions) and `coupling` (per floor: beta block, stack signature,
-prediction test, plus the cross-floor consistency verdict). `build_crawl`
-gains a compact `ah_gap` summary — current gap per floor and the coupling
-verdict when ready — so the dashboard does not have to fetch the full moisture
-payload on its poll cycle.
+`build_moisture` gains an `ah` block (per floor: gap now, 7-day hourly series,
+60-day daily series, excess over outdoor, intervention comparisons, transport
+gain, stack signature and prediction test, plus the cross-floor consistency
+verdict). `build_crawl` gains a compact `ah_gap` summary for the dashboard.
+
+The cheap half and the expensive half are built separately. Gap numbers are
+two rollup queries and a subtraction; the fits cost around 1.5 seconds for a
+whole house. `_build_ah_section(..., allow_fit=False)` — the dashboard's path —
+serves the gaps fresh plus whatever fit is already cached, and never starts
+one. Without that split, one dashboard poll in every cache window would stall
+for over a second. The moisture page is the surface that pays for a rebuild,
+on a 30-minute cache.
 
 ## Surfaces
 
@@ -314,11 +330,9 @@ request to the dashboard's poll cycle.
   disagree about the same reading). *Written and green.*
 - **Gap** — hourly pairing drops unpaired and null hours; daily join; the
   before/after real-change, collecting and seasonal-confound cases; an
-  explicit test that no directional verdict is emitted. *Written and green
-  against the first cut.* The three before/after changes above
-  (autocorrelation-scaled df, the 14-day bar, install-week exclusion) are not
-  yet implemented and need their own tests — currently the comparison still
-  uses the inherited 10-day bar and unscaled df.
+  explicit test that no directional verdict is emitted; the settling week is
+  excluded even when it contains a large transient; and the autocorrelation
+  discount actually reduces the day count on a smooth run.
 - **β estimator on synthetic data** — construct a floor series as a known β
   times a lagged crawl series plus outdoor plus a diurnal cycle plus noise,
   and assert the fit recovers β within its CI and finds the right lag.
@@ -337,19 +351,14 @@ request to the dashboard's poll cycle.
 
 ## Delivery
 
-Two PRs, because the first is already built and independently useful.
-
-**PR 1 — AH and the gap.** The AH math, the SQL fragment and rollups, the
-non-crawl channel enumeration, gap and excess analytics, the moisture-page gap
-panel, and the dashboard strip. Ships a real answer to "how much wetter is the
-crawl than each floor, and how is that changing".
-
-**PR 2 — Coupling and the transport test.** `analytics/coupling.py`, the gates,
-the stack signature, the prediction test, the consistency check, and the
-coupling readout on both surfaces.
-
-Both go through the three review agents per `CLAUDE.md`, both add a
+Shipped as one branch (`feat/crawl-upstairs-ah-gap`) rather than the two PRs
+originally planned — the gap half was already built and the transport half
+depends on the same rollups, so splitting them would have meant landing the
+SQL twice. Through the three review agents per `CLAUDE.md`, with a
 `CHANGELOG.md` entry under `## [Unreleased]`.
+
+Frontend surfaces: a gap panel and a transport panel on `/moisture.html`, and
+a gap strip under the crawl panel on the dashboard.
 
 ## Known limitations
 
