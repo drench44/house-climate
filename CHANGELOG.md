@@ -116,6 +116,12 @@ rolls that section to a dated version via `python scripts/release.py`.
 - Marking a new intervention did not invalidate the cached fit, so a fit
   spanning the marker — which the estimator refuses to compute — could be
   served as current for up to half an hour.
+- The backup restore self-test verified only the `readings` table. A restore
+  that lost `sensor_readings` (the crawl and per-floor probe history) or
+  `interventions` (the hand-entered markers the whole before/after case rests
+  on) passed — and `interventions` is far too small for the dump's size check
+  to notice. It now verifies every table carrying history, via
+  `HC_VERIFY_TABLES`, and fails if any is missing or comes back empty.
 
 ## [1.1.0] — 2026-08-17
 

@@ -41,6 +41,31 @@ MIN_BYTES="${HC_MIN_BYTES:-2000}"           # a real -Fc dump of this DB is well
 STAMP="${HC_STAMP:-$HOME/.local/state/house-climate-backup-last-success}"
 
 # --- pure predicate (selftest-covered) ---------------------------------------
+# Tables the restore self-test proves came back with their rows. Every table
+# holding history that cannot be regenerated belongs here: losing any one of
+# them is unrecoverable, and a dump that silently drops a small table is
+# nowhere near the size check's threshold. Override with HC_VERIFY_TABLES to
+# add app tables in a private overlay.
+HC_VERIFY_TABLES="${HC_VERIFY_TABLES:-readings sensor_readings interventions precip_daily air_readings filter_events poll_errors devices kv}"
+
+# hc_count <"a=1 b=2"> <name> -> the count for `name`, or empty if absent.
+hc_count() { echo "$1" | tr ' ' '\n' | sed -n "s/^$2=//p"; }
+
+# hc_lost <src_counts> <restored_counts> <tables> -> "" when every table came
+# back with at least as many rows as the source had, else a description of what
+# was lost. A table missing from the restored list was not queryable at all.
+hc_lost() {
+  local src="$1" got="$2" tables="$3" out="" t s g
+  for t in $tables; do
+    s="$(hc_count "$src" "$t")"
+    g="$(hc_count "$got" "$t")"
+    if [ -z "$g" ]; then out="$out $t=MISSING"
+    elif [ "$g" -lt "${s:-0}" ]; then out="$out $t=$g(want>=$s)"
+    fi
+  done
+  echo "$out"
+}
+
 # hc_verdict <pg_dump_rc> <bytes> -> ok | fail:<reason>
 # A zero/undersized archive is a FAILURE, never a success.
 hc_verdict() {
@@ -57,6 +82,20 @@ if [ "${1:-}" = "--selftest" ]; then
   check "$(hc_verdict 1 50000)"  "fail:pg_dump-exit-1"
   check "$(hc_verdict 0 0)"      "fail:undersized-0-bytes"
   check "$(hc_verdict 0 100)"    "fail:undersized-100-bytes"
+  # A restore is only good if EVERY table came back with its rows. The cases
+  # below are the ones that would otherwise pass unnoticed: a small table
+  # silently dropped (interventions is a handful of hand-entered rows, far too
+  # small to move the dump's size check) and a table restored empty.
+  check "$(hc_lost "readings=10 interventions=3" "readings=10 interventions=3" "readings interventions")" ""
+  check "$(hc_lost "readings=10 interventions=3" "readings=10" "readings interventions")" " interventions=MISSING"
+  check "$(hc_lost "readings=10 interventions=3" "readings=10 interventions=0" "readings interventions")" " interventions=0(want>=3)"
+  check "$(hc_lost "readings=10 sensor_readings=99" "readings=10 sensor_readings=0" "readings sensor_readings")" " sensor_readings=0(want>=99)"
+  # A table that is legitimately empty on both sides is not a loss.
+  check "$(hc_lost "readings=10 air_readings=0" "readings=10 air_readings=0" "readings air_readings")" ""
+  # A grown table (rows written between the count and the dump) is fine.
+  check "$(hc_lost "readings=10" "readings=12" "readings")" ""
+  # Neighbouring names must not be confused for one another.
+  check "$(hc_lost "readings=10 sensor_readings=5" "readings=10 sensor_readings=5" "readings")" ""
   [ "$fails" -eq 0 ] && { echo "selftest OK"; exit 0; } || { echo "selftest FAILED ($fails)"; exit 1; }
 fi
 
@@ -77,9 +116,13 @@ if [ "${1:-}" = "--restore-selftest" ]; then
   # classic TimescaleDB pre/post_restore failure) leaves readings queryable but
   # EMPTY, which must be a failure, not a pass. We assert the restored count is
   # at least the source count (the dump snapshot has >= this many).
-  src_n="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT count(*) FROM readings")" \
-    || fail "cannot count source readings"
-  echo "restore-selftest: dumping $DB_NAME ($src_n readings rows)"
+  src_counts=""
+  for t in $HC_VERIFY_TABLES; do
+    c="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT count(*) FROM $t")" \
+      || fail "cannot count source $t (table missing?)"
+    src_counts="$src_counts $t=$c"
+  done
+  echo "restore-selftest: dumping $DB_NAME ($src_counts )"
   docker exec "$CONTAINER" pg_dump -U "$DB_USER" -Fc "$DB_NAME" > "$tmp" || fail "pg_dump failed"
   bytes=$(wc -c < "$tmp"); [ "$bytes" -ge "$MIN_BYTES" ] || fail "dump undersized ($bytes bytes)"
   echo "restore-selftest: restoring into throwaway $testdb"
@@ -91,14 +134,27 @@ if [ "${1:-}" = "--restore-selftest" ]; then
   docker exec -i "$CONTAINER" pg_restore -U "$DB_USER" -d "$testdb" --no-owner < "$tmp"
   docker exec "$CONTAINER" psql -U "$DB_USER" -d "$testdb" -v ON_ERROR_STOP=1 \
     -c "SELECT timescaledb_post_restore();" || fail "post_restore failed"
-  n="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$testdb" -tAc "SELECT count(*) FROM readings")" \
-    || fail "readings not queryable after restore"
+  # Verify EVERY table that carries irreplaceable history, not just readings.
+  # sensor_readings holds the crawl and per-floor probes the whole moisture
+  # case rests on, and interventions holds the hand-entered markers that the
+  # before/after comparisons and the transport prediction hang off. Both are
+  # created by the app rather than the initdb bootstrap, so a restore can lose
+  # them while leaving readings intact. interventions in particular is a
+  # handful of rows that could never be reconstructed and is far too small to
+  # move the dump's size check.
+  restored_counts=""
+  for t in $HC_VERIFY_TABLES; do
+    got="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$testdb" -tAc "SELECT count(*) FROM $t")" \
+      || continue          # not queryable -> absent from the list -> MISSING
+    restored_counts="$restored_counts $t=$got"
+  done
+  lost="$(hc_lost "$src_counts" "$restored_counts" "$HC_VERIFY_TABLES")"
   docker exec "$CONTAINER" psql -U "$DB_USER" -d postgres \
     -c "DROP DATABASE IF EXISTS $testdb;" >/dev/null
   rm -f "$tmp"
   # The data must survive, not just the schema.
-  [ "${n:-0}" -ge "${src_n:-0}" ] || fail "restore lost rows: source=$src_n restored=$n (schema-only restore?)"
-  echo "restore-selftest OK: readings rows source=$src_n restored=$n $(date -Is)"
+  [ -z "$lost" ] || fail "restore lost data:$lost (schema-only restore?)"
+  echo "restore-selftest OK:$restored_counts $(date -Is)"
   exit 0
 fi
 
