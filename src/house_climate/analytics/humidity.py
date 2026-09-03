@@ -58,6 +58,64 @@ def dew_point_f(temp_f, rh):
     return dp_c * 9.0 / 5.0 + 32.0
 
 
+# Absolute humidity: g of water vapour per m^3 of air. Derived from the same
+# Magnus saturation curve as dew_point_f so the two never disagree about the
+# same reading. 216.7 = 100 * M_water / R_universal (18.016 / 8.3145), the
+# factor that turns vapour pressure in hPa over absolute temperature in K into
+# g/m^3 via the ideal gas law.
+_VAPOR_DENSITY_K = 216.7
+_SAT_VP_HPA_0C = 6.112
+_ABS_ZERO_C = -273.15
+
+
+def saturation_vapor_pressure_hpa(temp_f):
+    """Saturation vapour pressure in hPa at a given temperature (Magnus/AERK).
+    Evaluated at the dew point it gives the ACTUAL vapour pressure. None when
+    temp_f is missing, or at/below absolute zero where the curve is undefined."""
+    if temp_f is None:
+        return None
+    temp_c = (temp_f - 32.0) * 5.0 / 9.0
+    if temp_c <= _ABS_ZERO_C:
+        return None
+    return _SAT_VP_HPA_0C * math.exp(_MAGNUS_A * temp_c / (_MAGNUS_B + temp_c))
+
+
+def absolute_humidity_gm3(temp_f, rh):
+    """Absolute humidity in g/m^3 from air temperature and relative humidity.
+
+    Unlike RH this is a real moisture CONTENT, so it is comparable between a
+    55F crawl space and a 72F hallway — which is exactly what the crawl-to-
+    floor gap needs. None if inputs are missing or rh is non-positive."""
+    if temp_f is None or rh is None or rh <= 0:
+        return None
+    es = saturation_vapor_pressure_hpa(temp_f)
+    if es is None:
+        return None
+    return _vapor_density(es * rh / 100.0, temp_f)
+
+
+def absolute_humidity_from_dew_point_gm3(temp_f, dew_point_f_val):
+    """Absolute humidity from air temperature and dew point — the path the SQL
+    rollups take, since dewpoint_f is stored first-class while RH is averaged
+    per bucket. Agrees with absolute_humidity_gm3 on the same reading."""
+    if temp_f is None or dew_point_f_val is None:
+        return None
+    e = saturation_vapor_pressure_hpa(dew_point_f_val)
+    if e is None:
+        return None
+    return _vapor_density(e, temp_f)
+
+
+def _vapor_density(vapor_pressure_hpa, temp_f):
+    """Ideal-gas conversion of vapour pressure (hPa) at an air temperature to
+    vapour density (g/m^3). The AIR temperature sets the density, not the dew
+    point — that is why the two arguments are separate."""
+    temp_c = (temp_f - 32.0) * 5.0 / 9.0
+    if temp_c <= _ABS_ZERO_C:
+        return None
+    return _VAPOR_DENSITY_K * vapor_pressure_hpa / (temp_c - _ABS_ZERO_C)
+
+
 def avg_rh_by_state(readings):
     """Mean indoor_humidity while the equipment is actively cooling
     (cooling/overcool) vs idle. Readings in any other state (heating, fan)

@@ -68,8 +68,21 @@ jobs:
         run: |
           cat db/init.sql db/aggregates.sql \
             | docker exec -i hc-db psql -U climate -d climate -v ON_ERROR_STOP=1 -f -
-          docker exec hc-db psql -U climate -d climate \
-            -c "INSERT INTO readings (ts, device_id, indoor_temp_f) VALUES (now(), 'dev1', 72.0);"
+          # Seed EVERY table the restore check verifies, not just readings.
+          # A table that is empty on both sides passes trivially, so with rows
+          # in readings alone the job could never catch a restore that dropped
+          # every row of sensor_readings or interventions — which is the whole
+          # regression this check exists to detect.
+          docker exec hc-db psql -U climate -d climate -v ON_ERROR_STOP=1 \
+            -c "INSERT INTO devices (device_id, name) VALUES ('dev1', 'test');" \
+            -c "INSERT INTO readings (ts, device_id, indoor_temp_f) VALUES (now(), 'dev1', 72.0);" \
+            -c "INSERT INTO poll_errors (kind, detail) VALUES ('test', 'seed');" \
+            -c "INSERT INTO sensor_readings (ts, sensor_id, temp_f, humidity, dewpoint_f) VALUES (now(), 'ecowitt_crawl', 63.0, 78.0, 56.5);" \
+            -c "INSERT INTO precip_daily (day, inches, source) VALUES (current_date, 0.1, 'station');" \
+            -c "INSERT INTO interventions (marked_on, label) VALUES (current_date, 'Vapor barrier');" \
+            -c "INSERT INTO kv (k, v) VALUES ('seed', '{}'::jsonb);" \
+            -c "INSERT INTO filter_events (device_id, note) VALUES ('dev1', 'seed');" \
+            -c "INSERT INTO air_readings (ts, room, pm25) VALUES (now(), 'test', 5.0);"
       - name: Restore self-test
         run: HC_DB_CONTAINER=hc-db bash backup/house-climate-backup.sh --restore-selftest
 

@@ -28,6 +28,306 @@ function deltaClass(v) {
   return 'v-out';
 }
 
+
+/* ------------------------------------------------------------------ */
+/* crawl-to-floor moisture gap + transport gain                        */
+/* ------------------------------------------------------------------ */
+
+const GAP_LINE_CLASSES = ['mo-gap-a', 'mo-gap-b', 'mo-gap-c', 'mo-gap-d'];
+
+function gapClass(v) {
+  /* Grams per cubic metre. Under 1 the crawl is barely wetter than the room;
+     over 3 it is a different climate under the floor. Kept in step with
+     crawlGapClass in app.js — a test pins them together. */
+  if (v == null) return '';
+  if (v < -1) return 'v-watch';
+  if (v <= 1) return 'v-ok';
+  if (v <= 3) return 'v-watch';
+  return 'v-out';
+}
+
+/* Plain-language reason a transport number is not being shown. Each maps to a
+   gate in analytics/coupling.py — the page never says "unavailable" without
+   saying what it is waiting for. */
+function couplingReason(c) {
+  const need = c.need_days || 21;
+  switch (c.reason) {
+    case 'window_too_short':
+      return `Needs about ${need} days of readings before this can be worked out. Collecting.`;
+    case 'thin_coverage':
+      return 'Too many hours missing from the record to trust the answer. Collecting.';
+    case 'outage':
+      return 'There is a gap of more than a day in the readings. Waiting for a clean stretch.';
+    case 'insufficient_n_eff':
+      return 'One hour looks much like the last, so this stretch carries less information than its length suggests. Collecting.';
+    case 'weak_signal':
+      return 'The crawl is no longer getting damp on its own — it now follows the outside air closely. '
+           + 'That means there is nothing left to trace into the house, which is a good sign, not a fault.';
+    case 'straddles_intervention':
+      return 'The window covers work done in the crawl, so before and after would be mixed together. '
+           + 'Measuring them separately once there is enough of each.';
+    case 'inconsistent_sign':
+      return 'The numbers point the wrong way round, which is not physically possible. '
+           + 'Something else is driving them, so no figure is shown.';
+    case 'not_configured':
+      return 'No indoor sensors are set up to compare against.';
+    case 'not_computed':
+      return 'Not worked out since the server last restarted. It appears on the next refresh.';
+    case 'no_fit':
+      return 'The sums could not be solved on this stretch of data \u2014 the readings are too '
+           + 'alike to separate. Nothing is shown rather than a figure that would be noise.';
+    case 'no_data':
+      return 'No overlapping readings from the crawl and this floor yet. Collecting.';
+    case 'collecting':
+      return 'Not enough to go on yet. Collecting.';
+    default:
+      /* An unrecognised reason must not be dressed up as normal progress: a
+         failed fit reported as "Collecting" reads as a healthy wait. */
+      return `Not shown \u2014 the server reported "${reasonLabel(c.reason)}", which this page `
+           + 'does not have an explanation for.';
+  }
+}
+
+function reasonLabel(reason) {
+  return escapeHtml(String(reason == null ? 'no reason given' : reason)).replace(/_/g, ' ');
+}
+
+/* The interval as the maths actually produced it. Clamping the lower end at
+   zero would hide the fact that an interval reaching below zero is consistent
+   with no crawl air arriving at all \u2014 on the page whose whole argument is
+   that the uncertainty is shown honestly. */
+function betaRange(beta, ci) {
+  return `${Math.round((beta - ci) * 100)}&ndash;${Math.round((beta + ci) * 100)}%`;
+}
+
+function renderGapTiles(m) {
+  const el = document.getElementById('mo-gap-tiles');
+  const ah = m.ah;
+  if (!el) return;
+  /* Blank first: every branch below ends by assigning innerHTML, so a throw
+     part-way would otherwise leave the previous poll's numbers on screen
+     indefinitely, indistinguishable from current ones. */
+  el.innerHTML = '';
+  if (!ah || !ah.available) {
+    el.innerHTML = `<p class="mo-read">${escapeHtml(couplingReason(ah || {}))}</p>`;
+    return;
+  }
+  el.innerHTML = ah.floors.map((f) => {
+    const t = f.gap_trend_7d;
+    const arrow = t == null ? '' :
+      (t < -0.1 ? '&darr; closing' : t > 0.1 ? '&uarr; widening' : '&rarr; steady');
+    return `<div class="mo-dp">
+      <span class="micro">crawl &minus; ${escapeHtml((f.name || '').toLowerCase())}</span>
+      <span class="v num ${gapClass(f.gap_now)}">${f.gap_now == null ? '&mdash;'
+        : (f.gap_now > 0 ? '+' : '') + f.gap_now.toFixed(2)}<span class="u">g/m&sup3;</span></span>
+      <span class="micro">${arrow}${t == null ? '' :
+        ` ${t > 0 ? '+' : ''}${t.toFixed(2)} vs last week`}</span>
+    </div>`;
+  }).join('');
+}
+
+function drawGapChart(m) {
+  const svg = document.getElementById('mo-gap-chart');
+  const legend = document.getElementById('mo-gap-legend');
+  if (!svg) return;
+  svg.innerHTML = '';
+  if (legend) legend.innerHTML = '';
+  const ah = m.ah;
+  const W = 960, H = 170, padL = 40, padR = 40, top = 12, bot = 140, textY = 158;
+  const floors = (ah && ah.available ? ah.floors : []).filter((f) => f.gap_daily.length >= 2);
+  if (!floors.length) {
+    svgEl(svg, 'text', { class: 'rb-empty', x: padL, y: H / 2 },
+      'Gap history — collecting.');
+    return;
+  }
+  const dayMs = (d) => new Date(`${d}T12:00:00`).getTime();
+  let lo = Infinity, hi = -Infinity, winStart = Infinity, winEnd = -Infinity;
+  floors.forEach((f) => f.gap_daily.forEach((g) => {
+    lo = Math.min(lo, g.gap); hi = Math.max(hi, g.gap);
+    const ms = dayMs(g.day);
+    winStart = Math.min(winStart, ms); winEnd = Math.max(winEnd, ms);
+  }));
+  lo = Math.min(lo, 0); hi = Math.max(hi, 0.5);
+  const pad = (hi - lo) * 0.1 || 0.5;
+  lo -= pad; hi += pad;
+  const xOf = (ms) => padL + clamp((ms - winStart) / (winEnd - winStart || 1), 0, 1) * (W - padL - padR);
+  const yOf = (v) => bot - (v - lo) / (hi - lo) * (bot - top);
+
+  gridLevels(lo, hi, 5).forEach((v) => {
+    svgEl(svg, 'line', { class: 'hs-grid', x1: padL, y1: yOf(v), x2: W - padR, y2: yOf(v) });
+    svgEl(svg, 'text', { class: 'hs-label', x: 4, y: yOf(v) + 3 }, `${v}`);
+  });
+  /* Zero matters here: below it the floor is damper than the crawl. */
+  svgEl(svg, 'line', { class: 'mo-zero', x1: padL, y1: yOf(0), x2: W - padR, y2: yOf(0) });
+
+  floors.forEach((f, i) => {
+    const cls = GAP_LINE_CLASSES[i % GAP_LINE_CLASSES.length];
+    const pts = f.gap_daily.map((g) => ({ ms: dayMs(g.day), v: g.gap }));
+    svgEl(svg, 'path', { class: cls, d: timePath(pts, xOf, yOf, 864e5 * 2.5) });
+    if (legend) {
+      legend.insertAdjacentHTML('beforeend',
+        `<span class="li"><span class="sw ${cls}-sw"></span>crawl &minus; ${escapeHtml((f.name || '').toLowerCase())}</span>`);
+    }
+  });
+  moTimeTicks(svg, xOf, winStart, winEnd, bot + 4, bot + 9, textY);
+  moMarkers(svg, xOf, winStart, winEnd, top, bot);
+}
+
+function renderGapLead(m) {
+  const el = document.getElementById('mo-gap-lead');
+  if (!el) return;
+  /* Blank first: every branch below ends by assigning innerHTML, so a throw
+     part-way would otherwise leave the previous poll's numbers on screen
+     indefinitely, indistinguishable from current ones. */
+  el.innerHTML = '';
+  const ah = m.ah;
+  if (!ah || !ah.available) { el.innerHTML = ''; return; }
+  const parts = [];
+  const ivs = [];
+  ah.floors.forEach((f) => (f.interventions || []).forEach((iv) => {
+    const mm = iv.metric || {};
+    if (mm.verdict === 'collecting' || mm.diff == null) return;
+    ivs.push(`<li><b>${escapeHtml(f.name)}</b> after ${escapeHtml(iv.label)}: `
+      + `${mm.diff > 0 ? 'widened' : 'closed'} by ${Math.abs(mm.diff).toFixed(2)} g/m&sup3;`
+      + (mm.ci95 != null ? ` (&plusmn;${mm.ci95.toFixed(2)})` : '')
+      + ` &mdash; ${mm.verdict === 'real' ? 'bigger than the day-to-day noise'
+          : mm.verdict === 'confounded' ? 'but the outside air moved with it, so this is not proof'
+          : 'within the day-to-day noise'}.</li>`);
+  }));
+  if (ivs.length) {
+    parts.push(`<p class="mo-read">Since the work was marked (first ${ah.settle_days} days `
+      + 'left out while things settle):</p>'
+      + `<ul class="mo-list">${ivs.join('')}</ul>`);
+  }
+  parts.push('<p class="mo-read micro">A closing gap and a widening gap can both mean the work '
+    + 'succeeded &mdash; sealing the ground dries the crawl and closes it, while sealing the air '
+    + 'path separates the floors and widens it. That is why no direction is called good here. '
+    + 'The reading below is the one that tells you whether the air is actually moving.</p>');
+  el.innerHTML = parts.join('');
+}
+
+function renderCoupling(m) {
+  const el = document.getElementById('mo-coupling');
+  if (!el) return;
+  /* Blank first: every branch below ends by assigning innerHTML, so a throw
+     part-way would otherwise leave the previous poll's numbers on screen
+     indefinitely, indistinguishable from current ones. */
+  el.innerHTML = '';
+  const ah = m.ah;
+  if (!ah || !ah.available) {
+    el.innerHTML = `<p class="mo-read">${escapeHtml(couplingReason(ah || {}))}</p>`;
+    return;
+  }
+  const rows = ah.floors.map((f) => {
+    const c = f.coupling || {};
+    if (!c.ready) {
+      return `<li><b>${escapeHtml(f.name)}</b> &mdash; ${escapeHtml(couplingReason(c))}</li>`;
+    }
+    const pct = Math.round(c.beta * 100);
+    const lag = c.lag === 0 ? 'within the hour' : `about ${c.lag} hour${c.lag === 1 ? '' : 's'} later`;
+    const strength = !c.significant ? 'too small to separate from nothing at all'
+      : pct >= 40 ? 'a large share' : pct >= 15 ? 'a meaningful share' : 'a small but real share';
+    return `<li><b>${escapeHtml(f.name)}</b> &mdash; when the crawl gets damper on its own, `
+      + `<b class="${gapClass(c.beta * 5)}">${pct}%</b> of it turns up here, ${lag} `
+      + `(${betaRange(c.beta, c.ci95)}). That is ${strength}.`
+      + `<span class="micro"> Based on ${c.days} days; because one hour looks much like the next, `
+      + `that is worth about ${c.n_eff} independent readings, and the range above already allows for it.</span></li>`;
+  });
+  const stackRows = ah.floors.map((f) => {
+    const st = f.stack || {};
+    /* The temperature check is what separates real air movement from both
+       sensors following the local weather. If its row silently disappeared,
+       the percentage above would read as settled while the method note below
+       still pointed at a guard that was not there. */
+    if (!st.ready || st.delta == null) {
+      return `<li class="micro"><b>${escapeHtml(f.name)}</b>: the temperature check that `
+        + 'separates moving air from both sensors just following the weather cannot run yet '
+        + `&mdash; ${escapeHtml(couplingReason(st))} Treat the figure above as unconfirmed.</li>`;
+    }
+    const solid = st.delta - st.ci95 > 0;
+    return `<li class="micro"><b>${escapeHtml(f.name)}</b>: `
+      + (solid
+        ? 'the link gets stronger as the temperature difference between inside and outside grows, '
+          + 'which is what air genuinely moving up through the building looks like.'
+        : 'the link does not change with the temperature difference between inside and outside, '
+          + 'so some of it may just be both sensors following the local weather.')
+      + '</li>';
+  });
+
+  const cons = ah.consistency || {};
+  el.innerHTML = `<ul class="mo-list">${rows.join('')}</ul>`
+    + (stackRows.length ? `<ul class="mo-list">${stackRows.join('')}</ul>` : '')
+    + (cons.text ? `<p class="mo-read ${cons.verdict === 'bypass_suspected' ? 'v-out' : ''}">`
+        + `${escapeHtml(cons.text)}</p>` : '');
+}
+
+function renderPrediction(m) {
+  const el = document.getElementById('mo-prediction');
+  if (!el) return;
+  /* Blank first: every branch below ends by assigning innerHTML, so a throw
+     part-way would otherwise leave the previous poll's numbers on screen
+     indefinitely, indistinguishable from current ones. */
+  el.innerHTML = '';
+  const ah = m.ah;
+  if (!ah || !ah.available) { el.innerHTML = ''; return; }
+  const rows = [];
+  ah.floors.forEach((f) => (f.prediction || []).forEach((p) => {
+    if (p.verdict === 'collecting') {
+      rows.push(`<li><b>${escapeHtml(f.name)}</b> after ${escapeHtml(p.label)} &mdash; `
+        + 'not enough settled days on both sides of the work yet. Collecting.</li>');
+      return;
+    }
+    if (p.verdict === 'inconclusive') {
+      /* An unmeasurable margin is not a failed prediction. Reporting it as one
+         would print a confident "the crawl is not the source" from a
+         measurement that was never made. */
+      rows.push(`<li><b>${escapeHtml(f.name)}</b> after ${escapeHtml(p.label)} &mdash; `
+        + 'the readings either side are too flat to put a margin on, so this cannot be '
+        + 'called either way. Not evidence for or against.</li>');
+      return;
+    }
+    const ok = p.verdict === 'confirmed';
+    rows.push(`<li><b>${escapeHtml(f.name)}</b> after ${escapeHtml(p.label)} &mdash; `
+      + `expected this floor to dry out by ${Math.abs(p.predicted).toFixed(2)} g/m&sup3; `
+      + `(&plusmn;${p.ci95.toFixed(2)}); it actually changed by ${Math.abs(p.observed).toFixed(2)}. `
+      + `<b class="${ok ? 'v-ok' : 'v-out'}">${ok
+        ? 'That matches, which is the strongest evidence on this page that crawl air reaches this floor.'
+        : 'That does not match, so the crawl is not the main source of moisture here.'}</b></li>`);
+  }));
+  el.innerHTML = rows.length
+    ? `<p class="mo-read"><b>The test:</b> predict how much drier each floor should get, then check it.</p>`
+      + `<ul class="mo-list">${rows.join('')}</ul>`
+    : '';
+}
+
+function renderCouplingMethod(m) {
+  const el = document.getElementById('mo-coupling-method');
+  if (!el) return;
+  /* Blank first: every branch below ends by assigning innerHTML, so a throw
+     part-way would otherwise leave the previous poll's numbers on screen
+     indefinitely, indistinguishable from current ones. */
+  el.innerHTML = '';
+  const ah = m.ah || {};
+  el.innerHTML = `
+    <p class="mo-read micro">Every sensor in and under the house follows the weather, so two
+    damp-looking charts prove nothing on their own. Each reading here is first measured against
+    its own trailing week, which strips out the slow drift of the seasons, and against its own
+    time of day, which strips out the daily rhythm of showers, cooking and the air handler.
+    What is left is the crawl getting damp for its own reasons &mdash; and the question is how
+    much of that shows up upstairs.</p>
+    <p class="mo-read micro">Readings an hour apart are not independent, so a month of them
+    carries far less information than its length suggests. Every range shown is widened to
+    account for that, and the honest count is printed next to it${ah.window_days
+      ? ` (window: ${ah.window_days} days)` : ''}.</p>
+    <p class="mo-read micro"><b>What could still fool this:</b> a vented crawl is effectively a
+    weather station under the house, and the outdoor readings come from further away. So the crawl
+    can appear to drive the indoor air simply by knowing the local weather better. The
+    temperature-difference check above is the guard against that, but an outdoor sensor at the
+    house would settle it properly. Hours where the crawl sensor reads 95% humidity or above are
+    left out, because sensors stop being accurate there. A bedroom door closed against the hallway
+    will reduce what actually reaches the room below what the hallway sensor sees.</p>`;
+}
+
 /* ------------------------------------------------------------------ */
 /* verdict strip                                                       */
 /* ------------------------------------------------------------------ */
@@ -439,6 +739,12 @@ async function moRefresh() {
   try { drawAttrChart(m); } catch (e) { console.error('attr', e); }
   try { drawCondChart(m); } catch (e) { console.error('cond', e); }
   try { drawRainChart(m); } catch (e) { console.error('rain', e); }
+  try { renderGapTiles(m); } catch (e) { console.error('gap tiles', e); }
+  try { drawGapChart(m); } catch (e) { console.error('gap chart', e); }
+  try { renderGapLead(m); } catch (e) { console.error('gap lead', e); }
+  try { renderCoupling(m); } catch (e) { console.error('coupling', e); }
+  try { renderPrediction(m); } catch (e) { console.error('prediction', e); }
+  try { renderCouplingMethod(m); } catch (e) { console.error('coupling method', e); }
   try { renderThresholds(m); } catch (e) { console.error('thresholds', e); }
   try { renderInterventions(m); } catch (e) { console.error('interventions', e); }
   try { renderProjection(m); } catch (e) { console.error('projection', e); }

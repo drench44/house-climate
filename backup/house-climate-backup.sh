@@ -41,6 +41,65 @@ MIN_BYTES="${HC_MIN_BYTES:-2000}"           # a real -Fc dump of this DB is well
 STAMP="${HC_STAMP:-$HOME/.local/state/house-climate-backup-last-success}"
 
 # --- pure predicate (selftest-covered) ---------------------------------------
+# Tables the restore self-test proves came back with their rows: every table in
+# db/init.sql. Verifying `readings` alone proves nothing about the other eight,
+# and a dump that silently dropped a small one would be nowhere near the size
+# check's threshold — `interventions` is a handful of hand-entered rows.
+# tests/test_backup_tables.py fails if this list and db/init.sql drift apart,
+# so a table added later cannot quietly go unverified.
+#
+# Setting HC_VERIFY_TABLES REPLACES this list, it does not extend it — an
+# overlay adding its own tables must re-list these too, or it stops verifying
+# them, which is the exact silent loss of coverage this exists to prevent.
+HC_VERIFY_TABLES="${HC_VERIFY_TABLES:-readings sensor_readings interventions precip_daily air_readings filter_events poll_errors devices kv}"
+
+# hc_count <"a=1 b=2"> <name> -> the count for `name`, or empty if absent.
+# An exact field match, deliberately not a regex: a table name is DATA, and
+# interpolating it into a sed pattern let a name containing a metacharacter
+# match the wrong table's count, while a name matching two fields produced a
+# multi-line value that broke the comparison below into silence.
+hc_count() {
+  local pairs="$1" want="$2" kv
+  for kv in $pairs; do
+    [ "${kv%%=*}" = "$want" ] && { echo "${kv#*=}"; return; }
+  done
+}
+
+# hc_lost <src_counts> <restored_counts> <tables> -> "" when every table came
+# back with at least as many rows as the source had, else a description of what
+# was lost.
+#
+# Every branch that CANNOT decide reports a loss. `[ x -lt y ]` on a
+# non-integer returns 2, which an `elif` reads as plain false — so an
+# unparseable count used to mean "nothing lost", and a table restored empty
+# could be reported healthy. Anything not a plain integer is now a failure, as
+# is an empty table list: verifying nothing must never look like verifying
+# everything.
+hc_lost() {
+  local src="$1" got="$2" tables="$3" out="" t s g
+  set -f                      # a table name must never be glob-expanded
+  # shellcheck disable=SC2086
+  set -- $tables
+  set +f
+  [ "$#" -gt 0 ] || { echo " NO-TABLES-CONFIGURED"; return; }
+  for t in "$@"; do
+    case "$t" in
+      ''|*[!A-Za-z0-9_]*) out="$out $t=BAD-TABLE-NAME"; continue ;;
+    esac
+    s="$(hc_count "$src" "$t")"
+    g="$(hc_count "$got" "$t")"
+    case "$s" in
+      ''|*[!0-9]*) out="$out $t=UNCOUNTED-SOURCE"; continue ;;
+    esac
+    case "$g" in
+      '') out="$out $t=MISSING"; continue ;;
+      *[!0-9]*) out="$out $t=UNREADABLE-COUNT"; continue ;;
+    esac
+    [ "$g" -ge "$s" ] || out="$out $t=$g(want>=$s)"
+  done
+  echo "$out"
+}
+
 # hc_verdict <pg_dump_rc> <bytes> -> ok | fail:<reason>
 # A zero/undersized archive is a FAILURE, never a success.
 hc_verdict() {
@@ -57,6 +116,41 @@ if [ "${1:-}" = "--selftest" ]; then
   check "$(hc_verdict 1 50000)"  "fail:pg_dump-exit-1"
   check "$(hc_verdict 0 0)"      "fail:undersized-0-bytes"
   check "$(hc_verdict 0 100)"    "fail:undersized-100-bytes"
+  # A restore is only good if EVERY table came back with its rows. The cases
+  # below are the ones that would otherwise pass unnoticed: a small table
+  # silently dropped (interventions is a handful of hand-entered rows, far too
+  # small to move the dump's size check) and a table restored empty.
+  check "$(hc_lost "readings=10 interventions=3" "readings=10 interventions=3" "readings interventions")" ""
+  check "$(hc_lost "readings=10 interventions=3" "readings=10" "readings interventions")" " interventions=MISSING"
+  check "$(hc_lost "readings=10 interventions=3" "readings=10 interventions=0" "readings interventions")" " interventions=0(want>=3)"
+  check "$(hc_lost "readings=10 sensor_readings=99" "readings=10 sensor_readings=0" "readings sensor_readings")" " sensor_readings=0(want>=99)"
+  # A table that is legitimately empty on both sides is not a loss.
+  check "$(hc_lost "readings=10 air_readings=0" "readings=10 air_readings=0" "readings air_readings")" ""
+  # A grown table (rows written between the count and the dump) is fine.
+  check "$(hc_lost "readings=10" "readings=12" "readings")" ""
+  # Neighbouring names must not be confused for one another.
+  # Neighbouring names must not be confused. This has to put BOTH names in the
+  # tables list, give them DIFFERENT counts, and list the longer name first —
+  # anything less and the case passes whether or not the lookup is exact.
+  check "$(hc_lost "sensor_readings=5 readings=10" "sensor_readings=5 readings=0" "readings sensor_readings")" \
+        " readings=0(want>=10)"
+  # A count that is not a plain number cannot be compared. That used to make
+  # the comparison error out to stderr and read as "nothing lost".
+  check "$(hc_lost "readings=10" "readings=ERROR" "readings")" " readings=UNREADABLE-COUNT"
+  # A duplicated table name used to produce a multi-line count, which broke the
+  # comparison into silence — a table restored EMPTY was reported healthy.
+  check "$(hc_lost "readings=10 readings=10" "readings=0 readings=0" "readings")" \
+        " readings=0(want>=10)"
+  # A source count that never arrived is a failure, not an exemption.
+  check "$(hc_lost "" "readings=0" "readings")" " readings=UNCOUNTED-SOURCE"
+  # Absent from BOTH sides is still a loss, not a pass.
+  check "$(hc_lost "" "" "readings")" " readings=UNCOUNTED-SOURCE"
+  # Verifying nothing must never look like verifying everything.
+  check "$(hc_lost "readings=10" "readings=10" "")" " NO-TABLES-CONFIGURED"
+  check "$(hc_lost "readings=10" "readings=10" "   ")" " NO-TABLES-CONFIGURED"
+  # A name that is not a plain table name is refused rather than expanded.
+  check "$(hc_lost "readings=10" "readings=10" "a.b")" " a.b=BAD-TABLE-NAME"
+  check "$(hc_lost "readings=10" "readings=10" "*")" " *=BAD-TABLE-NAME"
   [ "$fails" -eq 0 ] && { echo "selftest OK"; exit 0; } || { echo "selftest FAILED ($fails)"; exit 1; }
 fi
 
@@ -77,9 +171,22 @@ if [ "${1:-}" = "--restore-selftest" ]; then
   # classic TimescaleDB pre/post_restore failure) leaves readings queryable but
   # EMPTY, which must be a failure, not a pass. We assert the restored count is
   # at least the source count (the dump snapshot has >= this many).
-  src_n="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT count(*) FROM readings")" \
-    || fail "cannot count source readings"
-  echo "restore-selftest: dumping $DB_NAME ($src_n readings rows)"
+  # Counting the source BEFORE the dump: rows written in between only make the
+  # dump larger than the count, which passes. (A retention policy dropping
+  # chunks in that window would fail loud on a good backup — rare, and the safe
+  # direction for something that gates deploys.)
+  # ON_ERROR_STOP matches every other psql call in this file: without it psql
+  # can exit 0 on a statement error, and an empty count would enrol a table in
+  # the verification while exempting it from every check.
+  [ -n "$(echo $HC_VERIFY_TABLES)" ] || fail "HC_VERIFY_TABLES is empty — nothing would be verified"
+  src_counts=""
+  for t in $HC_VERIFY_TABLES; do
+    c="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+         -tAc "SELECT count(*) FROM $t")" \
+      || fail "cannot count source $t (table missing?)"
+    src_counts="$src_counts $t=$c"
+  done
+  echo "restore-selftest: dumping $DB_NAME (${src_counts# })"
   docker exec "$CONTAINER" pg_dump -U "$DB_USER" -Fc "$DB_NAME" > "$tmp" || fail "pg_dump failed"
   bytes=$(wc -c < "$tmp"); [ "$bytes" -ge "$MIN_BYTES" ] || fail "dump undersized ($bytes bytes)"
   echo "restore-selftest: restoring into throwaway $testdb"
@@ -91,14 +198,27 @@ if [ "${1:-}" = "--restore-selftest" ]; then
   docker exec -i "$CONTAINER" pg_restore -U "$DB_USER" -d "$testdb" --no-owner < "$tmp"
   docker exec "$CONTAINER" psql -U "$DB_USER" -d "$testdb" -v ON_ERROR_STOP=1 \
     -c "SELECT timescaledb_post_restore();" || fail "post_restore failed"
-  n="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$testdb" -tAc "SELECT count(*) FROM readings")" \
-    || fail "readings not queryable after restore"
+  # Verify EVERY table that carries irreplaceable history, not just readings.
+  # sensor_readings holds the crawl and per-floor probes the whole moisture
+  # case rests on, and interventions holds the hand-entered markers that the
+  # before/after comparisons and the transport prediction hang off — a few
+  # rows that could never be reconstructed, and far too few to move the dump's
+  # size check if they went missing. A restore is not proven by one table
+  # coming back.
+  restored_counts=""
+  for t in $HC_VERIFY_TABLES; do
+    got="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$testdb" -v ON_ERROR_STOP=1 \
+           -tAc "SELECT count(*) FROM $t")" \
+      || continue          # not queryable -> absent from the list -> MISSING
+    restored_counts="$restored_counts $t=$got"
+  done
+  lost="$(hc_lost "$src_counts" "$restored_counts" "$HC_VERIFY_TABLES")"
   docker exec "$CONTAINER" psql -U "$DB_USER" -d postgres \
     -c "DROP DATABASE IF EXISTS $testdb;" >/dev/null
   rm -f "$tmp"
   # The data must survive, not just the schema.
-  [ "${n:-0}" -ge "${src_n:-0}" ] || fail "restore lost rows: source=$src_n restored=$n (schema-only restore?)"
-  echo "restore-selftest OK: readings rows source=$src_n restored=$n $(date -Is)"
+  [ -z "$lost" ] || fail "restore lost data:$lost (schema-only restore?)"
+  echo "restore-selftest OK:$restored_counts $(date -Is)"
   exit 0
 fi
 

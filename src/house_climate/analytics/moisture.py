@@ -12,6 +12,10 @@ inspectable.
 import math
 from datetime import timedelta
 
+# lag1_autocorr lives in coupling.py, where the rest of the autocorrelation
+# machinery is. Imported rather than duplicated so the two never drift.
+from .coupling import lag1_autocorr
+
 # ---- gates -----------------------------------------------------------------
 # Source attribution: hourly-mean pairs needed per window, and the minimum
 # spread outdoor dew point must show. If outdoor dew point barely moved,
@@ -329,7 +333,24 @@ def _t_crit_95(dof):
     return tv
 
 
-def _metric_compare(base_vals, post_vals):
+def _effective_days(vals, days=None):
+    """How many independent days a run of correlated daily means is worth.
+
+    `days` lets the neighbour test run on the CALENDAR: after a sensor outage,
+    the previous row is not the previous day, and pairing across the gap makes
+    the days look less alike than they are — which inflates this count and
+    narrows every interval built from it."""
+    n = len(vals)
+    if n < 3:
+        return n
+    rho = lag1_autocorr(vals, days, step=timedelta(days=1))
+    if rho <= 0:
+        return n
+    return max(2, min(n, int(round(n * (1.0 - rho) / (1.0 + rho)))))
+
+
+def _metric_compare(base_vals, post_vals, digits=1, min_days=None,
+                    base_days=None, post_days=None):
     """Difference of daily means with a 95% Welch-t CI. ONE bar for both the
     interval and the call: verdict is 'real' exactly when |diff| exceeds the
     displayed ci95 — showing an interval that excludes zero labeled 'noise'
@@ -337,29 +358,46 @@ def _metric_compare(base_vals, post_vals):
     bm, bs = _mean_std(base_vals)
     pm, ps = _mean_std(post_vals)
     n1, n2 = len(base_vals), len(post_vals)
-    out = {"baseline_mean": round(bm, 1) if bm is not None else None,
-           "baseline_sd": round(bs, 1) if bs is not None else None,
+    out = {"baseline_mean": round(bm, digits) if bm is not None else None,
+           "baseline_sd": round(bs, digits) if bs is not None else None,
            "baseline_n": n1,
-           "post_mean": round(pm, 1) if pm is not None else None,
-           "post_sd": round(ps, 1) if ps is not None else None,
+           "post_mean": round(pm, digits) if pm is not None else None,
+           "post_sd": round(ps, digits) if ps is not None else None,
            "post_n": n2}
     if bm is None or pm is None:
         out.update({"diff": None, "ci95": None, "verdict": "collecting"})
         return out
     diff = pm - bm
-    out["diff"] = round(diff, 1)
-    if n1 < BASELINE_MIN_DAYS or n2 < BASELINE_MIN_DAYS or bs is None or ps is None:
+    out["diff"] = round(diff, digits)
+    need = BASELINE_MIN_DAYS if min_days is None else min_days
+    if n1 < need or n2 < need or bs is None or ps is None:
         out.update({"ci95": None, "verdict": "collecting"})
         return out
-    v1, v2 = bs ** 2 / n1, ps ** 2 / n2
+    # Consecutive days are not independent samples: a damp week is damp on
+    # Tuesday because it was damp on Monday. Counting each day as a fresh
+    # observation makes the interval too narrow and turns weather into
+    # "evidence". Each side is discounted to the number of independent days it
+    # is really worth. The day-count gate above still uses the RAW count,
+    # because that gate is about data coverage, not information.
+    e1 = _effective_days(base_vals, base_days)
+    e2 = _effective_days(post_vals, post_days)
+    out["baseline_days_eff"], out["post_days_eff"] = e1, e2
+    v1, v2 = bs ** 2 / e1, ps ** 2 / e2
     se = math.sqrt(v1 + v2)
     if se <= 0:
-        out.update({"ci95": 0.0, "verdict": "real" if diff != 0 else "noise"})
+        # Neither side varied at all — a stuck or pinned sensor, not a
+        # perfectly clean result. Calling that "real" with a zero-width
+        # interval would be the most confident wrong answer this function
+        # could give.
+        out.update({"ci95": None, "verdict": "collecting"})
         return out
-    # Welch-Satterthwaite dof (always between min(n)-1 and n1+n2-2)
-    dof = (v1 + v2) ** 2 / (v1 ** 2 / (n1 - 1) + v2 ** 2 / (n2 - 1))
+    # Welch-Satterthwaite dof, on the discounted counts
+    if e1 < 2 or e2 < 2:
+        out.update({"ci95": None, "verdict": "collecting"})
+        return out
+    dof = (v1 + v2) ** 2 / (v1 ** 2 / (e1 - 1) + v2 ** 2 / (e2 - 1))
     ci = _t_crit_95(int(dof)) * se
-    out["ci95"] = round(ci, 1)
+    out["ci95"] = round(ci, digits)
     out["verdict"] = "real" if abs(diff) > ci else "noise"
     return out
 
@@ -397,12 +435,20 @@ def intervention_report(daily_stats, interventions, outdoor_days=None):
                      if d["day"] >= d0
                      and (next_mark is None or d["day"] < next_mark)
                      and d["day"] < d0 + timedelta(days=BASELINE_MAX_DAYS)]
-        pick = lambda days, key: [d[key] for d in days if d.get(key) is not None]
+        def pick(rows, key):
+            """Values and their calendar days, so the autocorrelation discount
+            can tell a real neighbour from one across an outage."""
+            usable = [d for d in rows if d.get(key) is not None]
+            return [d[key] for d in usable], [d["day"] for d in usable]
+
+        def compare(key):
+            bv, bd = pick(base_days, key)
+            pv, pd = pick(post_days, key)
+            return _metric_compare(bv, pv, base_days=bd, post_days=pd)
+
         metrics = {
-            "rh_mean": _metric_compare(pick(base_days, "rh_mean"), pick(post_days, "rh_mean")),
-            "dp_mean": _metric_compare(pick(base_days, "dp_mean"), pick(post_days, "dp_mean")),
-            "h60_per_day": _metric_compare(pick(base_days, "h60"), pick(post_days, "h60")),
-            "h70_per_day": _metric_compare(pick(base_days, "h70"), pick(post_days, "h70")),
+            "rh_mean": compare("rh_mean"), "dp_mean": compare("dp_mean"),
+            "h60_per_day": compare("h60"), "h70_per_day": compare("h70"),
         }
 
         # Seasonal confound check on the moisture metrics.
@@ -437,6 +483,180 @@ def intervention_report(daily_stats, interventions, outdoor_days=None):
                     "baseline_days": len(base_days), "post_days": len(post_days),
                     "outdoor_dp_shift": outdoor_shift,
                     "metrics": metrics, "overall": overall})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Crawl-to-floor absolute-humidity gap
+# ---------------------------------------------------------------------------
+# The gap answers "how much more water does a cubic metre of crawl air carry
+# than a cubic metre of air on this floor?" in g/m^3. Absolute humidity, not
+# RH and not dew point: RH is not comparable between a 55F crawl and a 72F
+# hallway, and dew point compares vapour PRESSURE rather than the vapour mass
+# a given volume of air actually carries.
+# Days after a marker to leave out of the "after" window. An open hatch,
+# people crawling around and disturbed soil produce a transient that is not
+# the steady-state result of the work.
+INSTALL_SETTLE_DAYS = 7
+# Days needed on each side of a marker before the gap comparison will speak.
+# Higher than BASELINE_MIN_DAYS because daily gaps are more autocorrelated
+# than the crawl's own humidity, so ten days buys fewer independent ones.
+GAP_MIN_DAYS = 14
+
+
+# Readings a day must carry before its absolute-humidity mean is trusted.
+# SQL `avg` silently skips nulls, so a day where the dew point was recorded
+# twice would otherwise sit in a Welch-t comparison weighing exactly as much
+# as a fully observed one.
+MIN_DAY_AH_READINGS = 24
+
+
+def _day_ah(day):
+    """A day's mean absolute humidity, or None if too little of it was
+    observed to stand as a day."""
+    if (day.get("ah_n") or 0) < MIN_DAY_AH_READINGS:
+        return None
+    return day.get("ah_mean")
+
+
+def ah_excess_daily(sensor_daily, outdoor_daily):
+    """Daily-mean absolute humidity above the outdoor air, in g/m^3.
+
+    Outdoor moisture swings hard across a season and drags every sensor in the
+    house with it, so a raw crawl-to-floor gap drifts for reasons that have
+    nothing to do with the building. Measuring each sensor against the outdoor
+    air on the same day removes that: the crawl's excess is how much the
+    ground and the structure are adding, and a floor's excess is how much of
+    it is reaching the living space.
+    """
+    out_by_day = {d["day"]: _day_ah(d) for d in outdoor_daily}
+    rows = []
+    for d in sensor_daily:
+        v = _day_ah(d)
+        o = out_by_day.get(d["day"])
+        if v is None or o is None:
+            continue
+        rows.append({"day": d["day"], "ah": v, "outdoor": o, "excess": v - o})
+    return rows
+
+
+def ah_gap_hourly(crawl_hourly, floor_hourly):
+    """Pair hourly crawl AH against one floor's hourly AH on the shared hour
+    buckets. Returns [{bucket, crawl, floor, gap}] oldest first; hours where
+    either side is missing are dropped rather than carried as a null gap."""
+    floor_by_bucket = {r["bucket"]: r["ah"] for r in floor_hourly
+                       if r.get("ah") is not None}
+    out = []
+    for c in crawl_hourly:
+        if c.get("ah") is None:
+            continue
+        f = floor_by_bucket.get(c["bucket"])
+        if f is None:
+            continue
+        out.append({"bucket": c["bucket"], "crawl": c["ah"], "floor": f,
+                    "gap": c["ah"] - f})
+    return out
+
+
+def ah_gap_daily(crawl_daily, floor_daily):
+    """Daily-mean crawl AH minus daily-mean floor AH, on days both sensors
+    reported. Returns [{day, crawl, floor, gap}] oldest first."""
+    floor_by_day = {d["day"]: _day_ah(d) for d in floor_daily}
+    out = []
+    for d in crawl_daily:
+        c = _day_ah(d)
+        f = floor_by_day.get(d["day"])
+        if c is None or f is None:
+            continue
+        out.append({"day": d["day"], "crawl": c, "floor": f, "gap": c - f})
+    return out
+
+
+def change_across(rows, key, d0, settle_days=None, max_days=None):
+    """Before/after change in a daily series across one marker, with the same
+    windows, the same day bar and the same interval machinery the gap
+    comparison uses — so the prediction test and the gap table can never
+    disagree about what "after" means or how confident it is.
+
+    Returns (diff, ci95). Either is None when the windows cannot support a
+    figure; a None interval means "not measured", never "measured as zero".
+    """
+    settle = INSTALL_SETTLE_DAYS if settle_days is None else settle_days
+    span = BASELINE_MAX_DAYS if max_days is None else max_days
+    base = [r for r in rows if d0 - timedelta(days=span) <= r["day"] < d0
+            and r.get(key) is not None]
+    post = [r for r in rows if d0 + timedelta(days=settle) <= r["day"]
+            < d0 + timedelta(days=span) and r.get(key) is not None]
+    m = _metric_compare([r[key] for r in base], [r[key] for r in post],
+                        digits=3, min_days=GAP_MIN_DAYS,
+                        base_days=[r["day"] for r in base],
+                        post_days=[r["day"] for r in post])
+    if m["verdict"] == "collecting":
+        return m.get("diff"), None
+    return m.get("diff"), m.get("ci95")
+
+
+def gap_intervention_report(gap_daily, interventions, outdoor_daily=None):
+    """Before/after the crawl-to-floor gap across each intervention marker,
+    using the same windows and the same Welch-t 95% bar as intervention_report.
+
+    Deliberately NOT given a directional verdict. A ground vapour barrier
+    lowers crawl AH and narrows the gap; air-sealing decouples the floor and
+    WIDENS it. Both are successes, so calling a sign 'good' here would be
+    guessing at which mechanism the work targeted. The report states the
+    measured change and whether it clears noise; the coupling metric
+    (ah_coupling_window) is the direction-unambiguous mechanism test.
+    """
+    outdoor_by_day = {d["day"]: _day_ah(d) for d in (outdoor_daily or [])}
+    marks = sorted(interventions, key=lambda i: i["marked_on"])
+    out = []
+    for idx, iv in enumerate(marks):
+        d0 = iv["marked_on"]
+        prev_mark = marks[idx - 1]["marked_on"] if idx > 0 else None
+        next_mark = marks[idx + 1]["marked_on"] if idx + 1 < len(marks) else None
+        base = [g for g in gap_daily
+                if g["day"] < d0
+                and (prev_mark is None or g["day"] >= prev_mark)
+                and g["day"] >= d0 - timedelta(days=BASELINE_MAX_DAYS)]
+        settled = d0 + timedelta(days=INSTALL_SETTLE_DAYS)
+        post = [g for g in gap_daily
+                if g["day"] >= settled
+                and (next_mark is None or g["day"] < next_mark)
+                and g["day"] < d0 + timedelta(days=BASELINE_MAX_DAYS)]
+        metric = _metric_compare([g["gap"] for g in base],
+                                 [g["gap"] for g in post], digits=2,
+                                 min_days=GAP_MIN_DAYS,
+                                 base_days=[g["day"] for g in base],
+                                 post_days=[g["day"] for g in post])
+
+        # Same seasonal honesty as intervention_report: outdoor AH swings
+        # hard between seasons and drags both sensors with it.
+        ob = [outdoor_by_day[g["day"]] for g in base
+              if outdoor_by_day.get(g["day"]) is not None]
+        op = [outdoor_by_day[g["day"]] for g in post
+              if outdoor_by_day.get(g["day"]) is not None]
+        outdoor_shift = None
+        outdoor_checked = len(ob) >= 3 and len(op) >= 3
+        if outdoor_checked:
+            outdoor_shift = round(sum(op) / len(op) - sum(ob) / len(ob), 2)
+            d = metric.get("diff")
+            if (metric["verdict"] == "real" and d is not None and outdoor_shift != 0
+                    and (d > 0) == (outdoor_shift > 0)
+                    and abs(outdoor_shift) >= CONFOUND_FRACTION * abs(d)):
+                metric["verdict"] = "confounded"
+        elif metric["verdict"] == "real":
+            # Without outdoor data on both sides, a seasonal swing cannot be
+            # ruled out. An unchecked result must not be displayed the same way
+            # as one that passed the check.
+            metric["verdict"] = "unchecked"
+
+        out.append({"id": iv["id"], "marked_on": d0.isoformat(),
+                    "label": iv["label"],
+                    "baseline_days": len(base), "post_days": len(post),
+                    "settle_days": INSTALL_SETTLE_DAYS,
+                    "outdoor_ah_shift": outdoor_shift,
+                    "outdoor_checked": outdoor_checked,
+                    "metric": metric})
     return out
 
 
