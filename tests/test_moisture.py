@@ -364,3 +364,194 @@ def test_condensation_7d_means_calendar_days():
     c = moisture.condensation_summary(days, [], days)
     # only the Aug 20-22 rows fall inside [max-6, max]
     assert c["hours_7d"] == 3.0
+
+
+# -------------------------------------------- crawl-to-floor AH gap
+
+def _ah_hourly(now, hours, fn):
+    """[{bucket, ah, temp}] for the last `hours` hours, oldest first."""
+    return [{"bucket": now - timedelta(hours=hours - i), "ah": fn(i), "temp": 60.0}
+            for i in range(hours)]
+
+
+def _ah_daily(start, n, fn, ah_n=48):
+    return [{"day": start + timedelta(days=i), "ah_mean": fn(i), "ah_n": ah_n}
+            for i in range(n)]
+
+
+def test_ah_gap_hourly_pairs_on_shared_buckets():
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    crawl = _ah_hourly(now, 5, lambda i: 12.0)
+    floor = _ah_hourly(now, 5, lambda i: 9.5)
+    out = moisture.ah_gap_hourly(crawl, floor)
+    assert len(out) == 5
+    assert all(abs(r["gap"] - 2.5) < 1e-9 for r in out)
+
+
+def test_ah_gap_hourly_drops_unpaired_and_null_hours():
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    crawl = _ah_hourly(now, 5, lambda i: 12.0)
+    crawl[1]["ah"] = None                      # crawl missing this hour
+    floor = _ah_hourly(now, 5, lambda i: 9.0)
+    del floor[3]                               # floor never reported this hour
+    floor[0]["ah"] = None                      # floor null -> not a zero gap
+    out = moisture.ah_gap_hourly(crawl, floor)
+    assert len(out) == 2
+    assert all(r["gap"] == 3.0 for r in out)
+
+
+def _outdoor_ah(start, n, fn):
+    return [{"day": start + timedelta(days=i), "ah_mean": fn(i), "ah_n": 48}
+            for i in range(n)]
+
+
+def test_ah_gap_daily_joins_on_day():
+    start = date(2026, 8, 1)
+    crawl = _ah_daily(start, 4, lambda i: 13.0)
+    floor = _ah_daily(start, 4, lambda i: 10.0)
+    del floor[2]
+    floor[0]["ah_mean"] = None
+    out = moisture.ah_gap_daily(crawl, floor)
+    assert [r["day"] for r in out] == [start + timedelta(days=1), start + timedelta(days=3)]
+    assert all(abs(r["gap"] - 3.0) < 1e-9 for r in out)
+
+
+def _gap_days(start, n, fn):
+    return [{"day": start + timedelta(days=i), "crawl": 12.0, "floor": 12.0 - fn(i),
+             "gap": fn(i)} for i in range(n)]
+
+
+def test_gap_intervention_detects_real_narrowing():
+    d0 = date(2026, 7, 1)
+    # 20 baseline days at a 3.0 gap, then 28 post days at 1.0. The first week
+    # after the marker is dropped as settling time, leaving 21 usable days.
+    gaps = (_gap_days(d0 - timedelta(days=20), 20, lambda i: 3.0 + (i % 2) * 0.05)
+            + _gap_days(d0, 28, lambda i: 1.0 + (i % 2) * 0.05))
+    steady_outdoor = _outdoor_ah(d0 - timedelta(days=20), 48, lambda i: 12.0)
+    out = moisture.gap_intervention_report(
+        gaps, [{"id": 1, "marked_on": d0, "label": "Vapor barrier"}],
+        outdoor_daily=steady_outdoor)
+    m = out[0]["metric"]
+    assert m["verdict"] == "real"
+    assert out[0]["outdoor_checked"] is True
+    assert m["diff"] == pytest.approx(-2.0, abs=0.05)
+    assert out[0]["baseline_days"] == 20
+    assert out[0]["post_days"] == 28 - moisture.INSTALL_SETTLE_DAYS
+
+
+def test_gap_intervention_excludes_the_settling_week():
+    """The week after the work is disturbed soil and an open hatch, not the
+    result of the work. Those days must not reach the comparison."""
+    d0 = date(2026, 7, 1)
+    # A wild transient during the settle week that would swamp the real signal.
+    gaps = (_gap_days(d0 - timedelta(days=20), 20, lambda i: 3.0 + (i % 2) * 0.05)
+            + _gap_days(d0, 7, lambda i: 40.0)
+            + _gap_days(d0 + timedelta(days=7), 21, lambda i: 1.0 + (i % 2) * 0.05))
+    out = moisture.gap_intervention_report(
+        gaps, [{"id": 1, "marked_on": d0, "label": "Vapor barrier"}],
+        outdoor_daily=_outdoor_ah(d0 - timedelta(days=20), 55, lambda i: 12.0))
+    assert out[0]["post_days"] == 21
+    assert out[0]["metric"]["diff"] == pytest.approx(-2.0, abs=0.05)
+
+
+def test_metric_compare_discounts_correlated_days():
+    """A smooth run of days carries less information than its day count says.
+    Counting each day as independent would turn a slow drift into 'evidence'."""
+    drifting_base = [3.0 + 0.05 * i for i in range(30)]
+    drifting_post = [1.0 + 0.05 * i for i in range(30)]
+    m = moisture._metric_compare(drifting_base, drifting_post, digits=2)
+    assert m["baseline_days_eff"] < 30
+    assert m["post_days_eff"] < 30
+    # Same means and spreads, but treating the days as independent would give a
+    # much narrower interval than the honest one.
+    assert m["ci95"] > 0
+
+
+def test_gap_intervention_reports_no_direction_verdict():
+    """The report must NOT label a sign good or bad — a narrowing gap and a
+    widening gap are both consistent with a successful intervention depending
+    on whether it targeted ground vapour or air movement."""
+    d0 = date(2026, 7, 1)
+    gaps = (_gap_days(d0 - timedelta(days=20), 20, lambda i: 1.0)
+            + _gap_days(d0, 28, lambda i: 3.0))
+    out = moisture.gap_intervention_report(
+        gaps, [{"id": 1, "marked_on": d0, "label": "Air sealing"}])
+    assert out[0]["metric"]["diff"] > 0
+    assert "verdict" not in out[0]           # no overall directional call
+    assert set(out[0]) == {"id", "marked_on", "label", "baseline_days",
+                           "post_days", "settle_days", "outdoor_ah_shift",
+                           "outdoor_checked", "metric"}
+
+
+def test_gap_intervention_collecting_when_window_too_short():
+    d0 = date(2026, 7, 1)
+    gaps = (_gap_days(d0 - timedelta(days=20), 20, lambda i: 3.0)
+            + _gap_days(d0, 9, lambda i: 1.0))     # only 2 days survive settling
+    out = moisture.gap_intervention_report(
+        gaps, [{"id": 1, "marked_on": d0, "label": "Barrier"}])
+    assert out[0]["metric"]["verdict"] == "collecting"
+
+
+def test_gap_intervention_seasonal_confound_downgrades():
+    """Outdoor AH falling by as much as the gap changed means autumn, not a
+    barrier — the verdict must drop from 'real' to 'confounded'."""
+    d0 = date(2026, 9, 1)
+    gaps = (_gap_days(d0 - timedelta(days=20), 20, lambda i: 3.0 + (i % 2) * 0.05)
+            + _gap_days(d0, 28, lambda i: 1.0 + (i % 2) * 0.05))
+    outdoor = ([{"day": d0 - timedelta(days=20 - i), "ah_mean": 14.0, "ah_n": 48}
+                for i in range(20)]
+               + [{"day": d0 + timedelta(days=i), "ah_mean": 11.0, "ah_n": 48}
+                  for i in range(28)])
+    out = moisture.gap_intervention_report(
+        gaps, [{"id": 1, "marked_on": d0, "label": "Barrier"}], outdoor_daily=outdoor)
+    assert out[0]["outdoor_ah_shift"] == pytest.approx(-3.0)
+    assert out[0]["metric"]["verdict"] == "confounded"
+
+
+def test_ah_excess_daily_measures_against_outdoor_air():
+    start = date(2026, 8, 1)
+    sensor = _ah_daily(start, 4, lambda i: 13.0 + i)
+    outdoor = _outdoor_ah(start, 4, lambda i: 10.0 + i)
+    del outdoor[2]
+    out = moisture.ah_excess_daily(sensor, outdoor)
+    assert len(out) == 3
+    assert all(abs(r["excess"] - 3.0) < 1e-9 for r in out)
+
+
+def test_ah_excess_daily_skips_days_without_outdoor_data():
+    start = date(2026, 8, 1)
+    assert moisture.ah_excess_daily(_ah_daily(start, 1, lambda i: 13.0), []) == []
+
+
+def test_barely_observed_days_are_dropped_not_weighted_as_full_days():
+    """SQL averages skip missing readings silently, so a day with two dew-point
+    readings would otherwise sit in the comparison weighing as much as a fully
+    observed one."""
+    start = date(2026, 8, 1)
+    crawl = _ah_daily(start, 3, lambda i: 13.0)
+    crawl[1]["ah_n"] = 2                      # an almost entirely missing day
+    floor = _ah_daily(start, 3, lambda i: 10.0)
+    gaps = moisture.ah_gap_daily(crawl, floor)
+    assert [g["day"] for g in gaps] == [start, start + timedelta(days=2)]
+    thin = moisture.ah_excess_daily(crawl, _outdoor_ah(start, 3, lambda i: 8.0))
+    assert len(thin) == 2
+
+
+def test_intervention_without_outdoor_data_is_unchecked_not_real():
+    """A change that could not be checked against the outside air must not be
+    presented the same way as one that survived the check."""
+    d0 = date(2026, 7, 1)
+    gaps = (_gap_days(d0 - timedelta(days=20), 20, lambda i: 3.0 + (i % 2) * 0.05)
+            + _gap_days(d0, 28, lambda i: 1.0 + (i % 2) * 0.05))
+    out = moisture.gap_intervention_report(
+        gaps, [{"id": 1, "marked_on": d0, "label": "Vapor barrier"}])
+    assert out[0]["outdoor_checked"] is False
+    assert out[0]["metric"]["verdict"] == "unchecked"
+
+
+def test_metric_compare_refuses_a_stuck_sensor_instead_of_calling_it_real():
+    """Two flat runs at different values is a pinned sensor, not a perfectly
+    clean result."""
+    m = moisture._metric_compare([3.0] * 20, [1.0] * 20, digits=2)
+    assert m["verdict"] == "collecting"
+    assert m["ci95"] is None
