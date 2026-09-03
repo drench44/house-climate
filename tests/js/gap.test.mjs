@@ -67,7 +67,7 @@ test('every refusal reason is explained in plain words', () => {
     'weak_signal', 'straddles_intervention', 'inconsistent_sign', 'not_configured',
     'not_computed', 'no_fit', 'no_data', 'collecting'];
   for (const reason of reasons) {
-    const text = couplingReason({ reason, need_days: 21 });
+    const text = couplingReason({ reason, need_days: 21, thinnest: 'outdoor' });
     assert.ok(text.length > 20, `${reason} needs a real explanation`);
     assert.ok(!/unavailable|error|failed|n\/a/i.test(text),
       `${reason} must say what it is waiting for, not that something broke: ${text}`);
@@ -306,4 +306,96 @@ test('a floor damper than the crawl is flagged, not shown as healthy', () => {
 
 test('dashboard gap severity bands match the moisture page', () => {
   for (const v of [null, -2.5, 0.5, 2, 5]) assert.equal(crawlGapClass(v), gapClass(v));
+});
+
+// ------------------------------------------------- outdoor reference
+
+const { outdoorSourceNote, renderCouplingMethod } =
+  vm.runInContext('({outdoorSourceNote, renderCouplingMethod})', mo.sandbox);
+
+test('a weather-feed reference is named as the weaker one', () => {
+  const text = outdoorSourceNote({ outdoor_source: { source: 'weather_feed', name: null } });
+  assert.match(text, /weather feed/);
+  assert.match(text, /outdoor sensor at the house would settle it/);
+});
+
+test('an on-site reference says so and names the sensor', () => {
+  const text = outdoorSourceNote({ outdoor_source: { source: 'sensor', name: 'Outdoor' } });
+  assert.match(text, /sensor at the house/);
+  assert.match(text, /Outdoor/);
+  assert.ok(!/would settle it properly/.test(text), text);
+});
+
+test('an unknown source is not reported as the weather feed', () => {
+  /* Two states in the code, three in reality. A payload with no source block
+     used to print the confident "comes from a weather feed" sentence. */
+  for (const payload of [{}, { outdoor_source: {} }, { outdoor_source: null }]) {
+    const text = outdoorSourceNote(payload);
+    assert.match(text, /could not be determined/);
+    assert.ok(!/undefined|null/.test(text), text);
+  }
+});
+
+test('a rejected sensor is named, with why, instead of being hidden', () => {
+  const stale = outdoorSourceNote({ outdoor_source: {
+    source: 'weather_feed', ignored_sensor: 'Outdoor', reason: 'stale', stale_days: 9 } });
+  assert.match(stale, /Outdoor/);
+  assert.match(stale, /has not reported for 9 days/);
+  const young = outdoorSourceNote({ outdoor_source: {
+    source: 'weather_feed', ignored_sensor: 'Outdoor', reason: 'too_little_history',
+    sensor_days: 3, need_days: 7 } });
+  assert.match(young, /3 full days/);
+  assert.match(young, /7 needed/);
+});
+
+test('the on-site claim is scoped to the figures it actually covers', () => {
+  const text = outdoorSourceNote({ outdoor_source: { source: 'sensor', name: 'Outdoor' } });
+  assert.match(text, /Rainfall, the condensation history and the winter projection/);
+});
+
+test('the method note reaches the page', () => {
+  renderCouplingMethod({ ah: { available: true, window_days: 30,
+    outdoor_source: { source: 'sensor', name: 'Outdoor' } } });
+  assert.match(mo.document.getElementById('mo-coupling-method').innerHTML,
+    /sensor at the house/);
+});
+
+
+// --------------------------------------- intervention verdict wording
+
+const { gapVerdictText, renderGapLead } =
+  vm.runInContext('({gapVerdictText, renderGapLead})', mo.sandbox);
+
+test('an unchecked change is not reported as no change at all', () => {
+  /* It used to fall through to the "within the noise" wording, which says the
+     work did nothing — the opposite of what was measured. */
+  const text = gapVerdictText('unchecked');
+  assert.match(text, /bigger than the day-to-day noise/);
+  assert.match(text, /not yet proof/);
+  assert.notEqual(text, gapVerdictText('noise'));
+});
+
+test('each intervention verdict has its own wording', () => {
+  const seen = new Set(['real', 'confounded', 'unchecked', 'noise'].map(gapVerdictText));
+  assert.equal(seen.size, 4, 'two verdicts share wording');
+  assert.match(gapVerdictText('something_new'), /not yet possible to judge/);
+});
+
+test('an unchecked verdict reaches the page with its own wording', () => {
+  renderGapLead({ ah: { available: true, settle_days: 7, floors: [{
+    name: 'Upstairs', gap_daily: [], gap_now: 1.0,
+    interventions: [{ label: 'Vapor barrier',
+                      metric: { verdict: 'unchecked', diff: -2.0, ci95: 0.3 } }],
+  }] } });
+  const html = mo.document.getElementById('mo-gap-lead').innerHTML;
+  assert.match(html, /not yet proof/);
+  assert.ok(!/within the day-to-day noise/.test(html), html);
+});
+
+
+test('thin coverage names which readings are missing', () => {
+  assert.match(couplingReason({ reason: 'thin_coverage', thinnest: 'outdoor' }),
+    /outdoor readings/);
+  assert.match(couplingReason({ reason: 'thin_coverage', thinnest: 'crawl' }),
+    /crawl readings/);
 });

@@ -1885,3 +1885,159 @@ def test_gap_trend_uses_calendar_weeks_not_row_positions():
     assert api._gap_trend(fresh, today) is not None
     stale = [{"day": today - timedelta(days=i * 5), "gap": 2.0} for i in range(14)]
     assert api._gap_trend(stale, today) is None
+
+
+# --- on-site outdoor reference ----------------------------------------------
+
+def _cfg_with(channels):
+    return dataclasses.replace(CFG, ecowitt={
+        "enabled": True, "gateway_url": "http://gw",
+        "channels": channels, "outdoor_name": "Crawl Space"})
+
+
+def test_an_outdoor_channel_is_found_and_is_not_a_floor():
+    """The gateway has one outdoor slot and a crawl install spends it on the
+    crawl probe, so an on-site outdoor reading has to come from an ordinary
+    channel. It is a reference, not a room."""
+    cfg = _cfg_with({"8": "Upstairs", "7": "Downstairs", "2": "Outdoor"})
+    assert api._onsite_outdoor_sensor(cfg) == ("ecowitt_ch2", "Outdoor")
+    assert [n for _, n in api._indoor_sensors(cfg)] == ["Upstairs", "Downstairs"]
+
+
+def test_no_outdoor_channel_configured():
+    cfg = _cfg_with({"8": "Upstairs", "7": "Downstairs"})
+    assert api._onsite_outdoor_sensor(cfg) == (None, None)
+    assert [n for _, n in api._indoor_sensors(cfg)] == ["Upstairs", "Downstairs"]
+
+
+def test_a_sheltered_space_is_never_promoted_to_the_outdoor_reference():
+    """Every moisture figure on the page is measured against this reading. A
+    covered patio or a porch sits in half-sheltered air, so it must not become
+    the reference — including when its name ALSO says outdoor, which is the
+    case a plain 'does it mention outdoor' check would wave through."""
+    for name in ("Patio", "Back Porch", "Garage", "Screened Deck",
+                 "Outdoor Patio", "Covered Outdoor Deck", "Garage Outside Wall",
+                 "Outside Shed", "Outdoor Greenhouse"):
+        cfg = _cfg_with({"8": "Upstairs", "3": name})
+        assert api._onsite_outdoor_sensor(cfg) == (None, None), name
+
+
+def test_two_channels_claiming_to_be_outdoor_is_refused():
+    """Picking whichever came first in the file would silently choose the
+    reading everything else is measured against, and silently drop the other
+    channel from the page entirely."""
+    cfg = _cfg_with({"8": "Upstairs", "2": "Outdoor North", "3": "Outdoor South"})
+    assert api._onsite_outdoor_sensor(cfg) == (None, None)
+
+
+def test_the_crawl_probe_is_never_read_as_the_outdoor_reference():
+    """In this install the gateway's outdoor SLOT is the crawl. A channel
+    named for both must not become the thing the crawl is compared against."""
+    cfg = _cfg_with({"8": "Upstairs", "4": "Outdoor Crawl Vent"})
+    assert api._onsite_outdoor_sensor(cfg) == (None, None)
+
+
+def test_outdoor_moisture_falls_back_to_the_weather_feed(conn):
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    ah = api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)["ah"]
+    assert ah["outdoor_source"] == {"source": "weather_feed", "name": None}
+
+
+def test_outdoor_moisture_prefers_an_on_site_sensor(conn):
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    from house_climate.analytics import humidity as hum
+    for i in range(48):
+        ts = now - timedelta(hours=48 - i)
+        db.insert_sensor_reading(conn, "ecowitt_ch2", ts, temp_f=59.0, humidity=72.0,
+                                 dewpoint_f=hum.dew_point_f(59.0, 72.0))
+    cfg = _cfg_with({"8": "Upstairs", "7": "Downstairs", "2": "Outdoor"})
+    ah = api.build_moisture(conn, "dev1", cfg, now=now)["ah"]
+    assert ah["outdoor_source"] == {"source": "sensor", "name": "Outdoor"}
+    assert "Outdoor" not in [f["name"] for f in ah["floors"]]
+
+
+def test_a_configured_but_silent_outdoor_sensor_falls_back(conn):
+    """A sensor that has never reported is worse than no sensor: measuring
+    everything against nothing would empty the page."""
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    cfg = _cfg_with({"8": "Upstairs", "7": "Downstairs", "2": "Outdoor"})
+    ah = api.build_moisture(conn, "dev1", cfg, now=now)["ah"]
+    assert ah["outdoor_source"]["source"] == "weather_feed"
+    assert ah["crawl_excess_daily"], "excess should still be computed"
+
+
+def _seed_outdoor_sensor(conn, now, days, per_day=48, end_days_ago=0):
+    from house_climate.analytics import humidity as hum
+    for d in range(days):
+        for k in range(per_day):
+            ts = (now - timedelta(days=end_days_ago + days - d)
+                  + timedelta(minutes=(24 * 60 // per_day) * k))
+            db.insert_sensor_reading(conn, "ecowitt_ch2", ts, temp_f=59.0,
+                                     humidity=72.0,
+                                     dewpoint_f=hum.dew_point_f(59.0, 72.0))
+
+
+def test_a_sensor_with_too_little_history_falls_back_and_says_so(conn):
+    """A barely-reporting sensor is WORSE than none: it would empty the
+    excess series and disable the seasonal check while the page claimed the
+    figures rested on a sensor at the house."""
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    _seed_outdoor_sensor(conn, now, days=2)
+    cfg = _cfg_with({"8": "Upstairs", "7": "Downstairs", "2": "Outdoor"})
+    src = api.build_moisture(conn, "dev1", cfg, now=now)["ah"]["outdoor_source"]
+    assert src["source"] == "weather_feed"
+    assert src["ignored_sensor"] == "Outdoor"
+    assert src["reason"] == "too_little_history"
+
+
+def test_a_sensor_that_has_stopped_reporting_falls_back(conn):
+    """History alone is not enough. A sensor with a good record that died last
+    week clears any 'has it observed enough days' test while contributing
+    nothing to the days being compared now."""
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    _seed_outdoor_sensor(conn, now, days=20, end_days_ago=10)
+    cfg = _cfg_with({"8": "Upstairs", "7": "Downstairs", "2": "Outdoor"})
+    src = api.build_moisture(conn, "dev1", cfg, now=now)["ah"]["outdoor_source"]
+    assert src["source"] == "weather_feed"
+    assert src["reason"] == "stale"
+    assert src["stale_days"] >= api.MAX_OUTDOOR_SENSOR_AGE_DAYS
+
+
+def test_the_excess_is_actually_measured_against_the_on_site_sensor(conn):
+    """Asserting only that the payload SAYS 'sensor' would pass if the label
+    changed and the arithmetic did not. The sensor is seeded much drier than
+    the weather feed, so the excess has to move with it."""
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now, days=12)
+    cfg = _cfg_with({"8": "Upstairs", "7": "Downstairs", "2": "Outdoor"})
+    feed = api.build_moisture(conn, "dev1", cfg, now=now)["ah"]
+    assert feed["outdoor_source"]["source"] == "weather_feed"
+    feed_excess = feed["crawl_excess_daily"][-1]["excess"]
+
+    api._ah_fit_cache.clear()
+    _seed_outdoor_sensor(conn, now, days=12)      # 59F/72% — drier than the feed
+    live = api.build_moisture(conn, "dev1", cfg, now=now)["ah"]
+    assert live["outdoor_source"] == {"source": "sensor", "name": "Outdoor",
+                                      "ignored_sensor": None, "reason": None}
+    assert live["crawl_excess_daily"], "the excess must still be computed"
+    assert live["crawl_excess_daily"][-1]["excess"] != feed_excess, (
+        "the excess did not move when the reference did — is it still using the feed?")
+
+
+def test_adding_an_outdoor_sensor_invalidates_the_cached_fit(conn):
+    """The outdoor channel is excluded from the floors list, so without naming
+    it in the cache key a new sensor would leave the key identical and keep
+    serving a fit computed against the weather feed."""
+    now = datetime.now(timezone.utc)
+    _seed_moisture(conn, now)
+    before = _cfg_with({"8": "Upstairs", "7": "Downstairs"})
+    after = _cfg_with({"8": "Upstairs", "7": "Downstairs", "2": "Outdoor"})
+    api.build_moisture(conn, "dev1", before, now=now)
+    assert len(api._ah_fit_cache) == 1
+    api.build_moisture(conn, "dev1", after, now=now)
+    assert len(api._ah_fit_cache) == 2, "the new sensor did not change the cache key"

@@ -519,6 +519,14 @@ def _day_ah(day):
     return day.get("ah_mean")
 
 
+def usable_ah_days(rows):
+    """How many of these days observed enough to carry an absolute-humidity
+    mean. A caller deciding whether a sensor is fit to be the reference every
+    other figure is measured against needs this, not a row count: a day with a
+    single reading produces a row and no usable number."""
+    return sum(1 for d in (rows or []) if _day_ah(d) is not None)
+
+
 def ah_excess_daily(sensor_daily, outdoor_daily):
     """Daily-mean absolute humidity above the outdoor air, in g/m^3.
 

@@ -10,6 +10,27 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+### Added
+- An Ecowitt channel named `Outdoor` or `Outside` is now used as an on-site
+  outdoor reference for the moisture comparisons, in place of the weather feed.
+  A vented crawl is effectively a weather station under the floor, so measuring
+  it against a station some distance away lets it look influential simply by
+  knowing the local weather better — the largest way the transport measurement
+  can be fooled. The channel is excluded from the floors it would otherwise be
+  compared as. Promotion is hard to trigger by accident: the name must say
+  outdoor and name no sheltered space (`Outdoor Patio` and `Garage Outside
+  Wall` stay ordinary channels), only one channel may claim it, and the sensor
+  must have a week of well-observed days and still be reporting — one that is
+  barely reporting, or has stopped, would empty the comparisons rather than
+  improve them, so the page falls back and names the sensor it is ignoring.
+  Rainfall, the condensation history and the winter projection stay on the
+  weather feed and the thermostat regardless, and the page states which source
+  the figures rest on.
+- A coverage refusal now names which readings were thin — crawl, indoor or
+  outdoor. With outdoor readings able to come from a sensor at the house, a
+  patchy outdoor sensor can refuse every floor, and "thin coverage" alone
+  pointed the reader at the wrong sensor.
+
 ### Fixed
 - A configured sensor that is not a floor above the crawl — a garage, a shed —
   made the floor-to-floor path check refuse for every floor, including ones
@@ -95,6 +116,11 @@ rolls that section to a dated version via `python scripts/release.py`.
   one.
 
 ### Fixed
+- An intervention change that could not be checked against the outside air was
+  displayed as "within the day-to-day noise" — an affirmative claim that the
+  work did nothing, when the measurement said the opposite. It now says the
+  change cleared the noise but is not yet proof. (The verdict existed; the page
+  had no wording for it and fell through to the "no change" branch.)
 - Critical values for the transport-gain interval were wrong below 20 degrees
   of freedom and badly wrong below 10 — a range that is routinely reached,
   since 24 degrees of freedom are spent absorbing the daily rhythm. The table

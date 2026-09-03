@@ -819,17 +819,74 @@ def _ah_gap_summary(conn, device_id, cfg, now):
     return {"available": True, "floors": out}
 
 
+# A channel named for the outdoors is a WEATHER REFERENCE, not a room. It has
+# to say so explicitly AND not name a sheltered space: "Outdoor Patio" and
+# "Garage Outside Wall" both contain an outdoor word while describing
+# half-sheltered air, and this is the one reading every other moisture figure
+# on the page is measured against.
+_OUTDOOR_CHANNEL = re.compile(r"\b(outdoor|outdoors|outside)\b")
+_SHELTERED = re.compile(
+    r"\b(patio|porch|deck|garage|shed|barn|carport|greenhouse|sauna|shop"
+    r"|crawl|attic|basement|cellar|closet|room|hall|bath|bed|kitchen)\b")
+
+# Days an on-site sensor must have actually observed before it displaces the
+# weather feed. A sensor that reported once, or whose readings are too sparse
+# to form daily means, would otherwise empty the excess-over-outdoor series and
+# silently disable the seasonal check on every intervention — while the page
+# claimed the figures rested on a sensor at the house.
+MIN_OUTDOOR_SENSOR_DAYS = 7
+# ...and it must still be reporting. History alone is not enough: a sensor with
+# a good record that died last week passes any "has it observed enough days"
+# test while contributing nothing to the days that matter now.
+MAX_OUTDOOR_SENSOR_AGE_DAYS = 2
+
+
+def _onsite_outdoor_sensor(cfg):
+    """An Ecowitt channel serving as an on-site outdoor reference, or None.
+
+    Worth having because a vented crawl is, in effect, a weather station under
+    the house, while the configured weather feed is a station some distance
+    away. The crawl can therefore appear to drive the indoor air simply by
+    knowing the local weather better than the feed does — the single largest
+    way the transport measurement could be fooled. A sensor at the house
+    removes that at the root rather than modelling around it.
+
+    Note the hardware constraint this exists for: the gateway has exactly ONE
+    outdoor slot (the WH32), and in a crawl-space installation that slot is the
+    crawl probe. So an on-site outdoor reading has to come from a WH31 on an
+    ordinary channel, in a radiation shield, which is what this recognises."""
+    ec = cfg.ecowitt or {}
+    if not ec.get("enabled"):
+        return None, None
+    matches = [(f"ecowitt_ch{ch}", name)
+               for ch, name in (ec.get("channels") or {}).items()
+               if _OUTDOOR_CHANNEL.search(str(name).lower())
+               and not _SHELTERED.search(str(name).lower())]
+    # Two channels both claiming to be the outdoor reference is a configuration
+    # the code cannot resolve. Picking whichever came first in the file would
+    # silently choose the reading every other figure is measured against, and
+    # silently drop the other channel from the page entirely.
+    if len(matches) != 1:
+        return None, None
+    return matches[0]
+
+
 def _indoor_sensors(cfg):
-    """Every configured non-crawl channel, as [(sensor_id, name)] in channel
-    order. These are the floors the crawl-to-floor moisture gap is measured
-    against — all of them, so adding a channel to the private config surfaces
-    it on the moisture page without a code change."""
+    """Every configured channel that is a room, as [(sensor_id, name)] in
+    channel order. These are the floors the crawl-to-floor moisture gap is
+    measured against — all of them, so adding a channel to the private config
+    surfaces it on the moisture page without a code change.
+
+    The crawl itself and an on-site outdoor reference are both excluded: one is
+    the thing being measured, the other is what it is measured against, and
+    neither is a floor the crawl's air could rise into."""
     ec = cfg.ecowitt or {}
     if not ec.get("enabled"):
         return []
     return [(f"ecowitt_ch{ch}", name)
             for ch, name in (ec.get("channels") or {}).items()
-            if "crawl" not in str(name).lower()]
+            if "crawl" not in str(name).lower()
+            and not _OUTDOOR_CHANNEL.search(str(name).lower())]
 
 
 def _reference_sensor_id(cfg):
@@ -867,7 +924,11 @@ def _fits_cached(conn, device_id, cfg, now, crawl_id, floors, interventions,
     # Names, not just ids: a channel renamed from "Garage" to "Second Floor"
     # changes which sensors take part in the floor-to-floor check and in what
     # order, so a name change has to invalidate the cached verdict too.
-    key = (device_id, crawl_id, tuple(floors),
+    # The on-site outdoor channel is EXCLUDED from `floors`, so without naming
+    # it here a newly-added Outdoor sensor would leave the key identical and
+    # keep serving a fit computed against the weather feed — while the page
+    # announced the sensor.
+    key = (device_id, crawl_id, tuple(floors), _onsite_outdoor_sensor(cfg),
            tuple(sorted(iv["marked_on"] for iv in interventions)))
     hit = _ah_fit_cache.get(key)
     if hit is not None and (now - hit[0]).total_seconds() < _AH_FIT_TTL_S:
@@ -891,6 +952,74 @@ def _coupling_days(now, data_start_day):
     return max(coupling.MIN_WINDOW_DAYS, min(45, have))
 
 
+def _outdoor_source(conn, cfg, tz, now):
+    """Where outdoor moisture should come from: (sensor_id or None, daily rows
+    or None, a description of the choice).
+
+    Prefers an on-site sensor over the weather feed, but only once it has
+    genuinely observed enough days. A configured-but-barely-reporting sensor is
+    WORSE than no sensor: it would empty the excess-over-outdoor series and
+    turn every intervention verdict to "unchecked", while the page told the
+    reader the figures rested on a sensor at the house. Falling back says so
+    instead.
+    """
+    sid, name = _onsite_outdoor_sensor(cfg)
+    if sid is None:
+        return None, None, {"source": "weather_feed", "name": None,
+                            "ignored_sensor": None, "reason": None}
+
+    def fall_back(reason, **extra):
+        return None, None, {"source": "weather_feed", "name": None,
+                            "ignored_sensor": name, "reason": reason, **extra}
+
+    daily = db.sensor_daily_stats(conn, sid, tz)
+    usable = [d for d in daily if moisture.usable_ah_days([d])]
+    if len(usable) < MIN_OUTDOOR_SENSOR_DAYS:
+        return fall_back("too_little_history", sensor_days=len(usable),
+                         need_days=MIN_OUTDOOR_SENSOR_DAYS)
+    # Still reporting, not merely once having reported. A sensor with a good
+    # record that died last week clears any history test while contributing
+    # nothing to the days being compared now — and would quietly empty the
+    # excess series from the day it went quiet.
+    age_days = (now.date() - usable[-1]["day"]).days
+    if age_days > MAX_OUTDOOR_SENSOR_AGE_DAYS:
+        return fall_back("stale", stale_days=age_days,
+                         max_age_days=MAX_OUTDOOR_SENSOR_AGE_DAYS)
+    return sid, daily, {"source": "sensor", "name": name,
+                        "ignored_sensor": None, "reason": None}
+
+
+def _outdoor_daily(conn, device_id, cfg, tz, now):
+    """Daily outdoor absolute humidity, from the best available source.
+
+    ONLY the moisture figures move here: rainfall and cooling hours still come
+    from the weather feed and the thermostat via db.outdoor_daily, because a
+    temperature/humidity sensor does not measure them. That is why this returns
+    rows for the AH consumers rather than standing in for outdoor_daily
+    wholesale."""
+    _, daily, meta = _outdoor_source(conn, cfg, tz, now)
+    if daily is None:
+        daily = db.outdoor_daily(conn, device_id, tz)
+    # Narrowed to the three fields the moisture consumers actually use. The two
+    # sources carry different extra columns — the feed has rain and cooling
+    # hours, the sensor has threshold hours — so returning them whole would let
+    # a future consumer reach for a field that exists on one branch only, and
+    # fail exclusively in installs that have an outdoor channel. That is the
+    # hardest possible bug to reproduce, so neither branch offers the chance.
+    return [{"day": d["day"], "ah_mean": d.get("ah_mean"), "ah_n": d.get("ah_n")}
+            for d in daily], meta
+
+
+def _outdoor_hourly(conn, device_id, cfg, tz, since, now):
+    """Hourly outdoor absolute humidity, from the best available source."""
+    sid, _, meta = _outdoor_source(conn, cfg, tz, now)
+    if sid is not None:
+        return [{"bucket": r["bucket"], "ah": r["ah"]}
+                for r in db.sensor_hourly_ah(conn, sid, since)], meta
+    return [{"bucket": r["bucket"], "ah": r.get("ah")}
+            for r in db.outdoor_hourly(conn, device_id, since)], meta
+
+
 def _build_fits(conn, device_id, cfg, now, crawl_id, floors):
     """The expensive half: does crawl air reach each floor, and does the link
     behave like air actually moving?"""
@@ -902,8 +1031,8 @@ def _build_fits(conn, device_id, cfg, now, crawl_id, floors):
     since = now - timedelta(days=days + coupling.DETREND_WINDOW_H // 24 + 1)
 
     crawl_h = db.sensor_hourly_ah(conn, crawl_id, since)
-    outdoor_h = [{"bucket": r["bucket"], "ah": r.get("ah")}
-                 for r in db.outdoor_hourly(conn, device_id, since)]
+    outdoor_h, outdoor_src = _outdoor_hourly(conn, device_id, cfg, cfg.timezone,
+                                             since, now)
     indoor_h = db.indoor_hourly(conn, device_id, since)
     interventions = db.list_interventions(conn)
     crawl_rh_h = [{"bucket": r["bucket"], "rh": r.get("rh_max")} for r in crawl_h]
@@ -935,7 +1064,7 @@ def _build_fits(conn, device_id, cfg, now, crawl_id, floors):
          for sid, name in (ordered or floors)],
         ordered=ordered is not None, excluded=excluded)
     return {"per_floor": per_floor, "consistency": consistency,
-            "window_days": days}
+            "window_days": days, "outdoor_source": outdoor_src}
 
 
 # Words that place a sensor in the building, lowest first. The cross-floor
@@ -1010,9 +1139,9 @@ def _build_ah_section(conn, device_id, cfg, now, allow_fit=True):
     crawl_daily = db.sensor_daily_stats(conn, crawl_id, tz)
     if not crawl_daily:
         return {"available": False, "reason": "no_data"}
-    outdoor_days = db.outdoor_daily(conn, device_id, tz)
     interventions = db.list_interventions(conn)
     since_7d = now - timedelta(days=7)
+    outdoor_days, outdoor_src = _outdoor_daily(conn, device_id, cfg, tz, now)
     crawl_h7 = db.sensor_hourly_ah(conn, crawl_id, since_7d)
     crawl_excess = moisture.ah_excess_daily(crawl_daily, outdoor_days)
 
@@ -1052,6 +1181,7 @@ def _build_ah_section(conn, device_id, cfg, now, allow_fit=True):
         })
 
     return {"available": True, "crawl": crawl_name,
+            "outdoor_source": outdoor_src,
             "window_days": (fits or {}).get("window_days"),
             "crawl_excess_daily": [{"day": r["day"].isoformat(),
                                     "excess": round(r["excess"], 2)}

@@ -55,7 +55,9 @@ function couplingReason(c) {
     case 'window_too_short':
       return `Needs about ${need} days of readings before this can be worked out. Collecting.`;
     case 'thin_coverage':
-      return 'Too many hours missing from the record to trust the answer. Collecting.';
+      return 'Too many hours missing from the '
+           + { crawl: 'crawl', floor: 'indoor', outdoor: 'outdoor' }[c.thinnest]
+           + ' readings to trust the answer. Collecting.';
     case 'outage':
       return 'There is a gap of more than a day in the readings. Waiting for a clean stretch.';
     case 'insufficient_n_eff':
@@ -173,6 +175,26 @@ function drawGapChart(m) {
   moMarkers(svg, xOf, winStart, winEnd, top, bot);
 }
 
+/* An `unchecked` change cleared the day-to-day noise but could not be tested
+   against the outside air — usually because outdoor readings do not reach far
+   enough back. Letting it fall through to the "within the noise" wording said
+   the change did NOTHING, which is the opposite of what was measured. */
+function gapVerdictText(verdict) {
+  switch (verdict) {
+    case 'real':
+      return 'bigger than the day-to-day noise';
+    case 'confounded':
+      return 'but the outside air moved with it, so this is not proof';
+    case 'unchecked':
+      return 'bigger than the day-to-day noise, but there was not enough outdoor '
+           + 'data either side to rule out the season, so this is not yet proof';
+    case 'noise':
+      return 'within the day-to-day noise';
+    default:
+      return 'not yet possible to judge';
+  }
+}
+
 function renderGapLead(m) {
   const el = document.getElementById('mo-gap-lead');
   if (!el) return;
@@ -190,9 +212,7 @@ function renderGapLead(m) {
     ivs.push(`<li><b>${escapeHtml(f.name)}</b> after ${escapeHtml(iv.label)}: `
       + `${mm.diff > 0 ? 'widened' : 'closed'} by ${Math.abs(mm.diff).toFixed(2)} g/m&sup3;`
       + (mm.ci95 != null ? ` (&plusmn;${mm.ci95.toFixed(2)})` : '')
-      + ` &mdash; ${mm.verdict === 'real' ? 'bigger than the day-to-day noise'
-          : mm.verdict === 'confounded' ? 'but the outside air moved with it, so this is not proof'
-          : 'within the day-to-day noise'}.</li>`);
+      + ` &mdash; ${gapVerdictText(mm.verdict)}.</li>`);
   }));
   if (ivs.length) {
     parts.push(`<p class="mo-read">Since the work was marked (first ${ah.settle_days} days `
@@ -300,6 +320,41 @@ function renderPrediction(m) {
     : '';
 }
 
+/* Which outdoor reading everything is measured against. This is not a detail:
+   a vented crawl is effectively a weather station under the house, so if the
+   outdoor reference is a station some distance away, the crawl can appear to
+   drive the indoor air purely by knowing the local weather better. */
+function outdoorSourceNote(ah) {
+  const src = ah.outdoor_source;
+  if (!src || !src.source) {
+    return 'Which outdoor reading these figures are measured against could not be '
+      + 'determined, so treat the comparison below with caution.';
+  }
+  if (src.ignored_sensor) {
+    const why = src.reason === 'stale'
+      ? `has not reported for ${src.stale_days} days`
+      : `has only ${src.sensor_days} full days of readings so far (${src.need_days} needed)`;
+    return `An outdoor sensor at the house (${escapeHtml(src.ignored_sensor)}) is set up but `
+      + `${why}, so these figures fall back to the weather feed. That is the safer of the two `
+      + 'while it settles: a sensor that is barely reporting would empty these comparisons '
+      + 'rather than improve them.';
+  }
+  if (src.source === 'sensor') {
+    return 'The gap, excess and transport figures on this page are measured against a sensor '
+      + 'at the house'
+      + (src.name ? ` (${escapeHtml(src.name)})` : '')
+      + ', which is what makes them trustworthy — a vented crawl is effectively a weather '
+      + 'station under the floor, and measuring it against a distant station would let it look '
+      + 'influential simply by knowing the local weather better. (Rainfall, the condensation '
+      + 'history and the winter projection still come from the weather feed.)';
+  }
+  return 'Outdoor conditions come from a weather feed rather than a sensor at the house. '
+    + 'A vented crawl is effectively a weather station under the floor, so it can appear to '
+    + 'drive the indoor air simply by knowing the local weather better than a distant station '
+    + 'does. The temperature-difference check above is the guard against that; an outdoor '
+    + 'sensor at the house would settle it properly.';
+}
+
 function renderCouplingMethod(m) {
   const el = document.getElementById('mo-coupling-method');
   if (!el) return;
@@ -319,13 +374,10 @@ function renderCouplingMethod(m) {
     carries far less information than its length suggests. Every range shown is widened to
     account for that, and the honest count is printed next to it${ah.window_days
       ? ` (window: ${ah.window_days} days)` : ''}.</p>
-    <p class="mo-read micro"><b>What could still fool this:</b> a vented crawl is effectively a
-    weather station under the house, and the outdoor readings come from further away. So the crawl
-    can appear to drive the indoor air simply by knowing the local weather better. The
-    temperature-difference check above is the guard against that, but an outdoor sensor at the
-    house would settle it properly. Hours where the crawl sensor reads 95% humidity or above are
-    left out, because sensors stop being accurate there. A bedroom door closed against the hallway
-    will reduce what actually reaches the room below what the hallway sensor sees.</p>`;
+    <p class="mo-read micro"><b>What could still fool this:</b> ${outdoorSourceNote(ah)}
+    Hours where the crawl sensor reads 95% humidity or above are left out, because sensors stop
+    being accurate there. A bedroom door closed against the hallway will reduce what actually
+    reaches the room below what the hallway sensor sees.</p>`;
 }
 
 /* ------------------------------------------------------------------ */

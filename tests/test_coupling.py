@@ -203,12 +203,25 @@ def test_coupling_refuses_short_window():
     assert out["need_days"] == coupling.MIN_WINDOW_DAYS
 
 
-def test_coupling_refuses_when_coverage_is_thin():
+def test_coupling_refuses_when_coverage_is_thin_and_names_the_thin_series():
+    """Naming the series matters now that outdoor readings can come from a
+    sensor at the house: a patchy outdoor sensor refuses every floor, and
+    "thin coverage" alone points the reader at the crawl or the room."""
     crawl, floor, outdoor = _synthetic()
     floor = [r for i, r in enumerate(floor) if i % 4]     # drop a quarter of hours
     out = coupling.coupling_window(crawl, floor, outdoor, days=30, now=NOW)
     assert out["ready"] is False
     assert out["reason"] == "thin_coverage"
+    assert out["thinnest"] == "floor"
+    assert out["coverage_by_series"]["floor"] < out["coverage_by_series"]["crawl"]
+
+
+def test_a_patchy_outdoor_sensor_is_named_as_the_thin_one():
+    crawl, floor, outdoor = _synthetic()
+    outdoor = [r for i, r in enumerate(outdoor) if i % 4]
+    out = coupling.coupling_window(crawl, floor, outdoor, days=30, now=NOW)
+    assert out["ready"] is False
+    assert out["thinnest"] == "outdoor"
 
 
 def test_coupling_refuses_on_a_long_outage():

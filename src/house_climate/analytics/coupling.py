@@ -349,12 +349,24 @@ def _prepare(crawl, floor, outdoor, days, now, crawl_rh, extra=None):
     coverage_pairs = [b for b in window_buckets
                       if b in crawl_by and b in floor_by and b in out_by]
     coverage = len(coverage_pairs) / hours_in_window if hours_in_window else 0.0
+    # Which series is thin, not just that something is. The outdoor readings
+    # can now come from a sensor at the house rather than a dense weather feed,
+    # so a patchy outdoor sensor can single-handedly refuse every floor — and
+    # "thin coverage" alone would point the reader at the crawl or the room.
+    def _cover(m):
+        return round(len([b for b in window_buckets if b in m]) / hours_in_window, 3) \
+            if hours_in_window else 0.0
+
     info = {"dropped_saturated": dropped, "coverage": round(coverage, 3),
-            "n_window_hours": len(coverage_pairs)}
+            "n_window_hours": len(coverage_pairs),
+            "coverage_by_series": {"crawl": _cover(crawl_by), "floor": _cover(floor_by),
+                                   "outdoor": _cover(out_by)}}
 
     if coverage < MIN_COVERAGE:
+        thinnest = min(info["coverage_by_series"],
+                       key=lambda k: info["coverage_by_series"][k])
         return None, {"ready": False, "reason": "thin_coverage",
-                      "need_coverage": MIN_COVERAGE, **info}
+                      "need_coverage": MIN_COVERAGE, "thinnest": thinnest, **info}
 
     gap = _longest_gap_h(coverage_pairs, since, now)
     info["longest_gap_h"] = gap

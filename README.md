@@ -119,6 +119,42 @@ channel numbers to room names. Everything sensor-driven on the dashboard
 (rooms panel, humidity/moisture analytics, sensor-vs-thermostat deltas)
 lights up automatically.
 
+Two channel names carry meaning:
+
+- a name containing **`crawl`** marks the crawl-space probe, the subject of the
+  whole moisture case;
+- a name containing **`outdoor`** or **`outside`**, and naming no sheltered
+  space, marks an on-site outdoor reference, used in place of the weather feed
+  for the moisture comparisons.
+
+The second is worth doing if you run the moisture analytics. A vented crawl is
+effectively a weather station under the floor, so if outdoor conditions come
+from a station some distance away, the crawl can appear to influence the air
+upstairs simply by knowing the local weather better than the feed does — the
+largest way that measurement can be fooled. Note that the gateway has only ONE
+outdoor slot (the WH32) and a crawl-space install generally spends it on the
+crawl probe, so the on-site outdoor reading comes from an ordinary WN31/WH31
+channel **in a solar radiation shield, mounted in shade** — unshielded, direct
+sun ruins the temperature reading and with it the humidity maths.
+
+Promotion is deliberately hard to trigger by accident, because this is the one
+reading every other moisture figure is measured against:
+
+- the name must say `outdoor`/`outside` **and** name no sheltered space, so
+  `Patio`, `Outdoor Patio`, `Outside Shed` and `Garage Outside Wall` all stay
+  ordinary channels;
+- exactly one channel may claim it — two `Outdoor …` channels is refused rather
+  than resolved by config order;
+- the sensor must have at least a week of well-observed days and still be
+  reporting. A sensor that is barely reporting, or that has stopped, is worse
+  than none — it would empty the comparisons rather than improve them — so the
+  page falls back to the feed and says which sensor it is ignoring, and why.
+
+Rainfall, the condensation history and the winter projection always come from
+the weather feed and the thermostat, whatever sensors exist — a
+temperature/humidity sensor does not measure them. The page states which source
+the figures rest on.
+
 ## Optional: weather
 
 Point `weather_url` at anything serving a `wx.json` snapshot (outdoor temp,
