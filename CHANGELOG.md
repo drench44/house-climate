@@ -10,6 +10,27 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+### Fixed
+- A configured sensor that is not a floor above the crawl — a garage, a shed —
+  made the floor-to-floor path check refuse for every floor, including ones
+  whose names place them perfectly well. Sensors that cannot be placed in the
+  building are now dropped from the ordering rather than blocking it. Found by
+  running the new panel against a real house.
+- Floor names are matched on whole words. Substring matching put a "Cupboard"
+  on an upper floor, a "Playground" on the ground floor and a "Maintenance
+  Room" on the main one — a confidently WRONG order, which is worse than no
+  order, because a wrong order is what makes the check name an expensive
+  repair. An airstream or an outbuilding ("Attic Fan", "Upstairs Garage") is
+  never treated as a floor whatever its name contains.
+- The floor-to-floor verdict now names the floors it compared and the channels
+  it left out. It previously stated "each floor follows the crawl less closely
+  than the one below it" after reasoning over whatever subset survived the
+  ordering — and the excluded channel can be the largest coupling on the page.
+- Renaming a channel now invalidates the cached fit. Names decide which sensors
+  take part in the floor-to-floor check and in what order, but only sensor ids
+  were in the cache key, so a rename served a verdict computed over a different
+  set of floors until the entry expired.
+
 ### Added
 - Absolute humidity (g/m³) as a first-class moisture measure:
   `absolute_humidity_gm3` plus a dew-point variant, and a matching SQL fragment

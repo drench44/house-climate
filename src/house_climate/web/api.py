@@ -1,4 +1,5 @@
 import calendar
+import re
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from .. import db
@@ -863,7 +864,10 @@ def _fits_cached(conn, device_id, cfg, now, crawl_id, floors, interventions,
     — otherwise the page would keep serving a fit spanning the marker as
     current, with no refusal, for as long as the entry lived.
     """
-    key = (device_id, crawl_id, tuple(sid for sid, _ in floors),
+    # Names, not just ids: a channel renamed from "Garage" to "Second Floor"
+    # changes which sensors take part in the floor-to-floor check and in what
+    # order, so a name change has to invalidate the cached verdict too.
+    key = (device_id, crawl_id, tuple(floors),
            tuple(sorted(iv["marked_on"] for iv in interventions)))
     hit = _ah_fit_cache.get(key)
     if hit is not None and (now - hit[0]).total_seconds() < _AH_FIT_TTL_S:
@@ -919,7 +923,9 @@ def _build_fits(conn, device_id, cfg, now, crawl_id, floors):
                 crawl_h, floor_h, outdoor_h, temp_diff_h, days=days, now=now,
                 crawl_rh=crawl_rh_h, interventions=interventions),
         }
-    ordered = _floors_by_height(floors)
+    # Only the channels that could be placed in the building take part — a
+    # garage sensor is a useful gap to show but has no position in a stack.
+    ordered, excluded = _floors_by_height(floors)
     consistency = coupling.consistency_check(
         [{"name": name,
           "ready": bool(per_floor[sid]["coupling"].get("ready")),
@@ -927,7 +933,7 @@ def _build_fits(conn, device_id, cfg, now, crawl_id, floors):
           "ci95": per_floor[sid]["coupling"].get("ci95"),
           "lag": per_floor[sid]["coupling"].get("lag")}
          for sid, name in (ordered or floors)],
-        ordered=ordered is not None)
+        ordered=ordered is not None, excluded=excluded)
     return {"per_floor": per_floor, "consistency": consistency,
             "window_days": days}
 
@@ -935,31 +941,60 @@ def _build_fits(conn, device_id, cfg, now, crawl_id, floors):
 # Words that place a sensor in the building, lowest first. The cross-floor
 # check only means anything if the floors are in height order, and a channel
 # number does not record height — so the order is read from the configured
-# NAMES, and the check is skipped entirely when they do not say.
+# NAMES, and the check is skipped when they do not say.
 _FLOOR_WORDS = [
     ("basement", 0), ("cellar", 0),
-    ("downstairs", 1), ("down", 1), ("main", 1), ("first", 1), ("ground", 1),
-    ("upstairs", 2), ("upper", 2), ("up", 2), ("second", 2), ("master", 2),
-    ("attic", 3), ("loft", 3), ("third", 3),
+    ("downstairs", 1), ("down", 1), ("main", 1), ("ground", 1), ("first floor", 1),
+    ("upstairs", 2), ("upper", 2), ("up", 2), ("master", 2), ("second floor", 2),
+    ("attic", 3), ("loft", 3), ("third floor", 3),
 ]
+# Matched on WHOLE WORDS. Substring matching put "Cupboard" on an upper floor,
+# "Playground" on the ground floor and "Maintenance Room" on the main one —
+# a confidently WRONG order, which is worse than no order, because it is what
+# makes the check announce leaky ducts.
+_FLOOR_PATTERNS = [(re.compile(rf"\b{w}\b"), rank) for w, rank in _FLOOR_WORDS]
+
+# Checked FIRST, and it wins. Two classes of name look like a floor but are
+# not part of the stack of living space above the crawl:
+#   - an airstream: an attic FAN reads hot outdoor-coupled air and would sit at
+#     the top of the stack, exactly the shape that trips the bypass verdict;
+#   - an outbuilding or outdoor space: an "Upstairs Garage" is a garage.
+# Ranking either would put a confidently wrong floor in the order, and a wrong
+# order is worse than no order — it is what makes the check name a repair.
+_NOT_A_FLOOR = re.compile(
+    r"\b(fan|vent|duct|register|plenum|return|supply"
+    r"|garage|shed|barn|greenhouse|carport|patio|porch|deck"
+    r"|outdoor|outside|crawl)\b")
 
 
 def _floors_by_height(floors):
-    """`floors` sorted lowest-first, or None when the names do not say.
+    """(ordered, excluded): the floors whose names place them in the building,
+    sorted lowest-first, and the names of the channels left out. `ordered` is
+    None when fewer than two can be placed.
 
-    Returning None is the honest answer: an inverted list makes
-    consistency_check announce leaky ducts, a specific and expensive repair,
-    on the strength of nothing but config key order."""
-    ranked = []
+    A configured channel need not be a floor above the crawl at all — a garage,
+    a shed, a greenhouse — and a sensor that cannot be placed must not stop the
+    ones that can from being compared. Dropping it is right rather than
+    conservative: the check asks whether crawl air passes the lower floor
+    before the upper one, a question a garage is simply not part of.
+
+    Returning None when fewer than two remain IS the conservative answer: an
+    inverted list makes consistency_check announce leaky ducts, a specific and
+    expensive repair, on the strength of nothing but config key order."""
+    ranked, excluded = [], []
     for sid, name in floors:
         low = str(name).lower()
-        hits = {rank for word, rank in _FLOOR_WORDS if word in low}
-        if len(hits) != 1:
-            return None
-        ranked.append((hits.pop(), sid, name))
+        hits = set() if _NOT_A_FLOOR.search(low) else {
+            rank for pattern, rank in _FLOOR_PATTERNS if pattern.search(low)}
+        if len(hits) == 1:
+            ranked.append((hits.pop(), sid, name))
+        else:
+            excluded.append(name)
+    if len(ranked) < 2:
+        return None, excluded
     if len({r for r, _, _ in ranked}) != len(ranked):
-        return None       # two sensors on the same level: no order to check
-    return [(sid, name) for _, sid, name in sorted(ranked)]
+        return None, excluded  # two sensors on the same level: no order
+    return [(sid, name) for _, sid, name in sorted(ranked)], excluded
 
 
 def _build_ah_section(conn, device_id, cfg, now, allow_fit=True):

@@ -1764,25 +1764,90 @@ def test_transport_gain_reaches_the_payload_on_a_real_window(conn):
 
 def test_floor_order_comes_from_names_and_drives_the_consistency_check(conn):
     """Downstairs must be compared as the lower floor even though it sits on a
-    higher channel number than Upstairs in this config."""
+    higher channel number than Upstairs in this config.
+
+    Asserting the verdict is 'one of three' would pass with the ordering logic
+    deleted, so this pins the ORDER the check actually reasoned over."""
     now = datetime.now(timezone.utc)
     _seed_transport(conn, now)
     ah = api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)["ah"]
-    assert ah["consistency"]["verdict"] in ("consistent", "bypass_suspected",
-                                            "collecting")
+    cons = ah["consistency"]
+    assert cons["verdict"] != "unknown_order", cons
+    assert cons.get("compared") == ["Downstairs", "Upstairs"], cons
+    assert cons.get("excluded") == []
+
+
+def _order(names):
+    """Just the ordered floor names, for readability."""
+    ordered, _ = api._floors_by_height([(f"ch{i}", n) for i, n in enumerate(names)])
+    return None if ordered is None else [n for _, n in ordered]
+
+
+def _excluded(names):
+    return api._floors_by_height([(f"ch{i}", n) for i, n in enumerate(names)])[1]
 
 
 def test_floors_by_height_reads_the_names_not_the_channel_numbers():
     """Pure: no database needed, so it runs on a bare pytest too."""
-    assert [n for _, n in api._floors_by_height(
-        [("ch8", "Upstairs"), ("ch7", "Downstairs")])] == ["Downstairs", "Upstairs"]
-    assert [n for _, n in api._floors_by_height(
-        [("a", "Main Floor"), ("b", "Attic"), ("c", "Basement")])] == [
-            "Basement", "Main Floor", "Attic"]
-    # Names that do not place the sensor, or place two on the same level.
-    assert api._floors_by_height([("a", "Sensor A"), ("b", "Sensor B")]) is None
-    assert api._floors_by_height([("a", "Upstairs"), ("b", "Upper Hall")]) is None
-    assert api._floors_by_height([("a", "Upstairs Downstairs")]) is None
+    assert _order(["Upstairs", "Downstairs"]) == ["Downstairs", "Upstairs"]
+    assert _order(["Main Floor", "Attic", "Basement"]) == ["Basement", "Main Floor", "Attic"]
+    # Names that place two sensors on the same level give no order to check.
+    assert _order(["Upstairs", "Upper Hall"]) is None
+
+
+def test_a_sensor_that_is_not_a_floor_does_not_block_the_ones_that_are():
+    """Found by running this on a real house: a Garage channel made the
+    floor-to-floor check refuse for Upstairs and Downstairs too, even though
+    those two are perfectly placeable. A garage has no position in the stack
+    of floors above a crawl — it is dropped from the ordering, not treated as
+    a reason to give up on it."""
+    assert _order(["Upstairs", "Downstairs", "Garage"]) == ["Downstairs", "Upstairs"]
+    assert _excluded(["Upstairs", "Downstairs", "Garage"]) == ["Garage"]
+
+
+def test_one_placeable_floor_is_still_not_an_order():
+    """Dropping the unplaceable sensors must not leave a single floor being
+    'compared' against nothing."""
+    assert _order(["Upstairs", "Garage"]) is None
+    assert _order(["Garage", "Shed"]) is None
+
+
+def test_an_ambiguous_name_is_dropped_without_stopping_the_others():
+    """A name naming two levels places the sensor at neither. It leaves the
+    ordering rather than refusing it — and is reported as excluded."""
+    assert _order(["Upstairs Downstairs", "Attic", "Basement"]) == ["Basement", "Attic"]
+    assert _excluded(["Upstairs Downstairs", "Attic", "Basement"]) == ["Upstairs Downstairs"]
+
+
+def test_floor_words_match_whole_words_only():
+    """Substring matching put a cupboard on an upper floor, a playground on the
+    ground floor and a maintenance room on the main one — a confidently WRONG
+    order, which is worse than no order because it is what makes the check
+    name an expensive repair."""
+    for impostor in ("Cupboard", "Playground", "Maintenance Room", "Backup Sensor",
+                     "Downspout Sensor", "First Aid Room"):
+        assert _order([impostor, "Basement"]) is None, impostor
+        assert impostor in _excluded([impostor, "Basement"])
+
+
+def test_an_airstream_or_an_outbuilding_is_never_a_floor():
+    """An attic FAN reads hot outdoor-coupled air and would sit at the top of
+    the stack — exactly the shape that trips the bypass verdict. An 'Upstairs
+    Garage' is a garage."""
+    for impostor in ("Attic Fan", "Supply Closet", "Shed Loft", "Upstairs Garage",
+                     "Outdoor Sensor", "Back Porch"):
+        assert _order([impostor, "Basement"]) is None, impostor
+
+
+def test_a_real_floor_name_still_places_in_the_right_order():
+    """Tightening the matching must not stop ordinary names from working."""
+    for lower, upper in (("Basement", "First Floor"),
+                         ("First Floor", "Second Floor"),
+                         ("Main Bedroom", "Master Bedroom"),
+                         ("Second Floor", "Attic"),
+                         ("Downstairs", "Upstairs")):
+        # Listed upper-first, so a pass cannot come from input order.
+        assert _order([upper, lower]) == [lower, upper], (lower, upper)
 
 
 def test_unnameable_floors_refuse_the_consistency_check(conn):

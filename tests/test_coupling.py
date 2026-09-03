@@ -645,3 +645,43 @@ def test_a_window_too_repetitive_to_carry_an_interval_says_so():
     assert out["reason"] == "insufficient_n_eff"
     assert out["n_eff"] < out["n"]
     assert out["beta"] is None, "a refused fit must not leave a number behind"
+
+
+def test_a_verdict_names_the_floors_it_actually_compared():
+    """The old wording — "each floor follows the crawl less closely than the
+    one below it" — was a claim about the whole house, printed after reasoning
+    over whatever subset survived the ordering."""
+    out = coupling.consistency_check(
+        [_floor("Downstairs", 0.5), _floor("Upstairs", 0.3)])
+    assert out["verdict"] == "consistent"
+    assert "Downstairs then Upstairs" in out["text"]
+    assert out["compared"] == ["Downstairs", "Upstairs"]
+
+
+def test_an_excluded_sensor_is_named_in_the_verdict():
+    """The excluded channel can be the LARGEST coupling on the page. Saying
+    'each floor' while leaving it out is a false statement to the one reader
+    who would act on it."""
+    out = coupling.consistency_check(
+        [_floor("Downstairs", 0.5), _floor("Upstairs", 0.3)],
+        excluded=["Garage"])
+    assert out["excluded"] == ["Garage"]
+    assert "Garage" in out["text"]
+    assert "does not say where in the house it sits" in out["text"]
+
+
+def test_an_excluded_sensor_is_named_on_a_bypass_verdict_too():
+    """A bypass verdict sends someone looking for leaky ducts. It must not
+    hide that the reasoning ran on a subset."""
+    out = coupling.consistency_check(
+        [_floor("Downstairs", 0.1, ci=0.05), _floor("Upstairs", 0.6, ci=0.05)],
+        excluded=["Garage"])
+    assert out["verdict"] == "bypass_suspected"
+    assert "Garage" in out["text"]
+
+
+def test_the_unknown_order_verdict_still_carries_its_exclusions():
+    out = coupling.consistency_check(
+        [_floor("A", 0.1), _floor("B", 0.6)], ordered=False, excluded=["A", "B"])
+    assert out["verdict"] == "unknown_order"
+    assert out["excluded"] == ["A", "B"]
