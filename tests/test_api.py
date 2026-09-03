@@ -1941,21 +1941,8 @@ def test_outdoor_moisture_falls_back_to_the_weather_feed(conn):
     now = datetime.now(timezone.utc)
     _seed_moisture(conn, now)
     ah = api.build_moisture(conn, "dev1", CRAWL_CFG, now=now)["ah"]
-    assert ah["outdoor_source"] == {"source": "weather_feed", "name": None}
-
-
-def test_outdoor_moisture_prefers_an_on_site_sensor(conn):
-    now = datetime.now(timezone.utc)
-    _seed_moisture(conn, now)
-    from house_climate.analytics import humidity as hum
-    for i in range(48):
-        ts = now - timedelta(hours=48 - i)
-        db.insert_sensor_reading(conn, "ecowitt_ch2", ts, temp_f=59.0, humidity=72.0,
-                                 dewpoint_f=hum.dew_point_f(59.0, 72.0))
-    cfg = _cfg_with({"8": "Upstairs", "7": "Downstairs", "2": "Outdoor"})
-    ah = api.build_moisture(conn, "dev1", cfg, now=now)["ah"]
-    assert ah["outdoor_source"] == {"source": "sensor", "name": "Outdoor"}
-    assert "Outdoor" not in [f["name"] for f in ah["floors"]]
+    assert ah["outdoor_source"]["source"] == "weather_feed"
+    assert ah["outdoor_source"]["ignored_sensor"] is None, "nothing to ignore"
 
 
 def test_a_configured_but_silent_outdoor_sensor_falls_back(conn):
@@ -2025,6 +2012,8 @@ def test_the_excess_is_actually_measured_against_the_on_site_sensor(conn):
     assert live["outdoor_source"] == {"source": "sensor", "name": "Outdoor",
                                       "ignored_sensor": None, "reason": None}
     assert live["crawl_excess_daily"], "the excess must still be computed"
+    assert "Outdoor" not in [f["name"] for f in live["floors"]], (
+        "the outdoor reference must not also be compared as a floor")
     assert live["crawl_excess_daily"][-1]["excess"] != feed_excess, (
         "the excess did not move when the reference did — is it still using the feed?")
 
