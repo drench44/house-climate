@@ -717,7 +717,7 @@ def prediction_test(beta, beta_ci, d_crawl, d_crawl_ci, d_floor, d_floor_ci):
     return out
 
 
-def consistency_check(floors, ordered=True):
+def consistency_check(floors, ordered=True, excluded=None):
     """Crawl air rising through the building has to pass the lower floor first.
 
     So the floor nearest the crawl should couple at least as hard, and at least
@@ -733,8 +733,16 @@ def consistency_check(floors, ordered=True):
     specific and expensive repair recommendation from nothing but the order
     two channels happen to be listed in.
     """
+    note = ""
+    if excluded:
+        # Saying which sensors took part is not a detail. Without it the
+        # verdict below reads as a statement about the whole house while
+        # having been computed on a subset — and the largest coupling on the
+        # page can be the one that was left out.
+        note = (" Not included: " + ", ".join(excluded)
+                + " — the name does not say where in the house it sits.")
     if not ordered:
-        return {"verdict": "unknown_order",
+        return {"verdict": "unknown_order", "excluded": excluded or [],
                 "text": "Which sensor sits higher in the house is not recorded, "
                         "so the path between floors cannot be checked. Naming the "
                         "channels for their floors (for example 'Downstairs' and "
@@ -745,22 +753,25 @@ def consistency_check(floors, ordered=True):
               if f.get("ready") and f.get("beta") is not None
               and f.get("ci95") is not None]
     if len(usable) < 2:
-        return {"verdict": "collecting",
+        return {"verdict": "collecting", "excluded": excluded or [],
                 "text": "Needs a confident reading on two floors before the "
-                        "path can be checked."}
+                        "path can be checked." + note}
     for lower, upper in zip(usable, usable[1:]):
         gap = upper["beta"] - lower["beta"]
         bar = lower["ci95"] + upper["ci95"]
         if gap > bar:
-            return {"verdict": "bypass_suspected",
+            return {"verdict": "bypass_suspected", "excluded": excluded or [],
+                    "compared": [f["name"] for f in usable],
                     "text": (f"{upper['name']} follows the crawl more closely than "
                              f"{lower['name']} does ({upper['beta']:+.2f} vs "
-                             f"{lower['beta']:+.2f}). Air rising through the floor "
-                             "would have to pass the lower level first, so this "
-                             "points at a shortcut — leaky ducts running through "
-                             "the crawl, or an open chase — rather than the floor "
-                             "itself.")}
-    return {"verdict": "consistent",
-            "text": ("Each floor follows the crawl less closely than the one "
-                     "below it, which is what air working its way up through "
-                     "the building looks like.")}
+                             f"{lower['beta']:+.2f}). Air rising from the crawl "
+                             f"has to pass {lower['name']} before it reaches "
+                             f"{upper['name']}, so this points at a shortcut — "
+                             "leaky ducts running through the crawl, or an open "
+                             "chase — rather than the floor itself." + note)}
+    names = " then ".join(f["name"] for f in usable)
+    return {"verdict": "consistent", "excluded": excluded or [],
+            "compared": [f["name"] for f in usable],
+            "text": (f"Going up through the house ({names}), each floor follows "
+                     "the crawl less closely than the one below it, which is "
+                     "what air working its way up looks like." + note)}
