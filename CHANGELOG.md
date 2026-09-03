@@ -121,7 +121,17 @@ rolls that section to a dated version via `python scripts/release.py`.
   `interventions` (the hand-entered markers the whole before/after case rests
   on) passed — and `interventions` is far too small for the dump's size check
   to notice. It now verifies every table carrying history, via
-  `HC_VERIFY_TABLES`, and fails if any is missing or comes back empty.
+  `HC_VERIFY_TABLES`, and fails if any is missing or comes back with fewer rows
+  than the source had. `tests/test_backup_tables.py` fails if that list and
+  `db/init.sql` ever drift apart, so a table added later cannot quietly go
+  unverified, and CI now seeds every table so the restore job can actually
+  detect row loss rather than comparing empty against empty.
+- The restore check reported "nothing lost" whenever a row count could not be
+  compared. A shell integer test returns an error, not false, on a non-numeric
+  operand — but in an `elif` that reads as "no loss", so an unreadable or
+  duplicated count silently passed a table that had come back empty. Anything
+  that cannot be compared is now a failure, as is an empty table list:
+  verifying nothing must never look like verifying everything.
 
 ## [1.1.0] — 2026-08-17
 

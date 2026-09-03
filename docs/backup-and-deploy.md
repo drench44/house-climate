@@ -21,22 +21,27 @@ throwaway DB (with the TimescaleDB pre/post_restore wrappers) → row-count
 verify. CI runs it on every push, so a backup that can't be restored fails CI
 instead of being discovered in an emergency.
 
-The verify covers **every** table holding history, not just `readings` —
+The verify covers **every** table in `db/init.sql`, not just `readings` —
 `HC_VERIFY_TABLES` lists them, and each has to come back queryable with at
-least as many rows as the source had. A table that is missing entirely, or
-restored empty, fails.
+least as many rows as the source had. A table that is missing entirely, or that
+comes back with fewer rows than the source, fails. (A table legitimately empty
+on both sides passes; there was nothing to lose.)
 
 This matters most for the small tables. `interventions` is a handful of
 hand-entered dates that the whole before/after case and the transport
 prediction hang off, and it could never be reconstructed — but it is far too
 small to move the dump's size check, so a dump that silently dropped it would
 otherwise have looked healthy. `sensor_readings` is the crawl and per-floor
-probe history, and, like the other app-created tables, it is not part of the
-initdb bootstrap, so a restore can lose it while leaving `readings` intact.
+probe history. Proving `readings` survived says nothing about either.
+
+Setting `HC_VERIFY_TABLES` **replaces** the list rather than extending it, so
+an overlay adding its own tables must re-list the defaults too.
 
 The comparison logic is pure and is exercised by `--selftest`, which needs no
 database, so a regression in it fails CI in seconds rather than waiting on the
-container job.
+container job. `tests/test_backup_tables.py` fails if the list and
+`db/init.sql` ever drift apart, so a table added later cannot quietly go
+unverified.
 
 ## No deploy without a fresh backup
 
