@@ -10,6 +10,11 @@ jobs:
     services:
       # Same pinned image as docker-compose.yml — see the comment there for
       # why the tag is nailed down instead of floating.
+      # The health check runs a real query over TCP, not pg_isready over the
+      # socket: the image runs initdb against a temporary server that answers
+      # on the unix socket only and is then shut down, so a socket-based check
+      # can hand a job a database that is about to vanish. The backup-restore
+      # job below hit exactly that.
       db:
         image: timescale/timescaledb:2.29.1-pg16
         env:
@@ -19,7 +24,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U climate"
+          --health-cmd "psql -h 127.0.0.1 -U climate -d climate -c 'select 1'"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -63,7 +68,20 @@ jobs:
           docker run -d --name hc-db \
             -e POSTGRES_USER=climate -e POSTGRES_PASSWORD=climate -e POSTGRES_DB=climate \
             timescale/timescaledb:2.29.1-pg16
-          for i in $(seq 1 30); do docker exec hc-db pg_isready -U climate && break; sleep 2; done
+          # pg_isready is not enough: the image runs initdb against a TEMPORARY
+          # server, then shuts it down and starts the real one. A command
+          # issued in that gap dies with "the database system is shutting
+          # down". The entrypoint starts that temporary server with
+          # listen_addresses='' — unix socket only — so connecting over TCP
+          # makes it invisible and one success is proof, rather than a
+          # three-in-a-row heuristic that a fast restart could still straddle.
+          ready=
+          for i in $(seq 1 60); do
+            if docker exec hc-db psql -h 127.0.0.1 -U climate -d climate -tAc 'select 1' \
+                 >/dev/null 2>&1; then ready=yes; break; fi
+            sleep 2
+          done
+          [ -n "$ready" ] || { echo "postgres never accepted a TCP connection"; docker logs hc-db; exit 1; }
       - name: Load schema + a sample row
         run: |
           cat db/init.sql db/aggregates.sql \

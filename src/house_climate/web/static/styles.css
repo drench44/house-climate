@@ -985,6 +985,8 @@ body {
   border: 1px solid var(--edge-strong); border-radius: 6px; padding: 1px 7px;
 }
 .mo-badge.real { color: var(--mint); border-color: rgba(138, 224, 173, 0.4); }
+/* a change big enough to be real, but the season could explain it */
+.mo-badge.watch { color: var(--warn); border-color: rgba(232, 194, 104, 0.4); }
 .mo-iv-del {
   background: none; border: 0; color: var(--faint); font-size: 15px;
   cursor: pointer; padding: 0 4px; margin-left: auto;

@@ -657,17 +657,27 @@ function setCrawlRange(r) {
    that the crawl has stopped getting damp on its own. */
 function gapStripReason(floors) {
   const reasons = floors.map((f) => f.reason).filter(Boolean);
-  if (reasons.indexOf('outage') !== -1) {
-    return 'Readings are missing for more than a day &mdash; check the sensors';
+  const has = (r) => reasons.indexOf(r) !== -1;
+  if (has('outage') || has('thin_coverage') || has('no_data')) {
+    return 'Readings are missing &mdash; check the sensors';
   }
-  if (reasons.indexOf('inconsistent_sign') !== -1) {
+  if (has('inconsistent_sign')) {
     return 'The crawl and the floors above are moving in ways that do not add up';
   }
   if (reasons.length && reasons.every((r) => r === 'weak_signal')) {
     return 'The crawl no longer gets damp on its own &mdash; nothing left to trace upstairs';
   }
-  if (reasons.indexOf('straddles_intervention') !== -1) {
+  if (has('straddles_intervention')) {
     return 'Measuring separately either side of the work in the crawl';
+  }
+  /* A failed fit is not a healthy wait. The moisture page has said so since
+     these reasons were introduced; the dashboard is the surface people
+     actually look at, and it was reporting the failure as patience. */
+  if (has('no_fit')) {
+    return 'The readings are too alike to separate &mdash; no figure rather than a noisy one';
+  }
+  if (has('not_computed')) {
+    return 'Not worked out since the server restarted &mdash; back on the next refresh';
   }
   return 'Still working out whether crawl air is reaching the floors above';
 }
@@ -704,7 +714,10 @@ function renderGapStrip(summary) {
       : `${escapeHtml(f.name)}: too little crawl air reaching this floor to measure`
     )).join(' &middot; ');
   } else {
-    note = gapStripReason(withData);
+    /* All floors, not just the ones with a gap: a floor whose sensor is dead
+       has no gap to show, so filtering it out drops the one reason that
+       explains why nothing is shown. */
+    note = gapStripReason(floors);
   }
   el.innerHTML = tiles.join('')
     + `<div class="gap-note">${note} &mdash; <a href="/moisture.html">see the evidence</a></div>`;

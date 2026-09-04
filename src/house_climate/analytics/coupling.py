@@ -327,6 +327,11 @@ def _prepare(crawl, floor, outdoor, days, now, crawl_rh, extra=None):
     out_by = _hourly_map(outdoor)
     extra_by = {name: _hourly_map(s, key) for name, (s, key) in (extra or {}).items()}
 
+    # Kept before the saturation filter runs: coverage has to answer "did the
+    # sensor report?", which is a different question from "were the readings
+    # usable?". Conflating them reports a crawl that is soaking wet — the very
+    # condition this page exists to surface — as a sensor that has stopped.
+    crawl_reported = dict(crawl_by)
     dropped = 0
     if crawl_rh:
         for r in crawl_rh:
@@ -349,12 +354,37 @@ def _prepare(crawl, floor, outdoor, days, now, crawl_rh, extra=None):
     coverage_pairs = [b for b in window_buckets
                       if b in crawl_by and b in floor_by and b in out_by]
     coverage = len(coverage_pairs) / hours_in_window if hours_in_window else 0.0
+    # Which series is thin, not merely that something is. Coverage is counted
+    # across crawl, floor and outdoor together, so one patchy sensor refuses
+    # every floor — and "thin coverage" alone points the reader at whichever
+    # sensor they happen to suspect rather than the one actually missing.
+    def _cover(m):
+        return round(len([b for b in window_buckets if b in m]) / hours_in_window, 3) \
+            if hours_in_window else 0.0
+
     info = {"dropped_saturated": dropped, "coverage": round(coverage, 3),
-            "n_window_hours": len(coverage_pairs)}
+            "n_window_hours": len(coverage_pairs),
+            "crawl_usable_coverage": _cover(crawl_by),
+            "coverage_by_series": {"crawl": _cover(crawl_reported),
+                                   "floor": _cover(floor_by),
+                                   "outdoor": _cover(out_by)}}
 
     if coverage < MIN_COVERAGE:
+        # A crawl that reported faithfully and was simply too wet to read is a
+        # RESULT, not a broken sensor, and must not send anyone to check a
+        # sensor that is working perfectly.
+        if info["coverage_by_series"]["crawl"] >= MIN_COVERAGE and dropped > 0:
+            return None, {"ready": False, "reason": "crawl_saturated",
+                          "need_coverage": MIN_COVERAGE, **info}
+        by_series = info["coverage_by_series"]
+        # Every series at the minimum, not an arbitrary one of them: naming a
+        # single sensor when two are equally absent sends half the search in
+        # the wrong direction.
+        floor_val = min(by_series.values())
+        thin = [k for k, v in by_series.items() if v == floor_val]
         return None, {"ready": False, "reason": "thin_coverage",
-                      "need_coverage": MIN_COVERAGE, **info}
+                      "need_coverage": MIN_COVERAGE,
+                      "thinnest": thin[0], "thin_series": thin, **info}
 
     gap = _longest_gap_h(coverage_pairs, since, now)
     info["longest_gap_h"] = gap
