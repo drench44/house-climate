@@ -10,7 +10,48 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+### Changed
+- A coverage refusal in the transport measurement now names which readings were
+  thin — crawl, indoor or outdoor. Coverage is counted across all three series
+  together, so one patchy sensor refuses every floor, and "thin coverage" alone
+  left the reader guessing which sensor to go and look at.
+
 ### Fixed
+- Four more display paths asserted something specific and false when they met a
+  result they had no wording for, all found by reviewing the fix below:
+  a metric downgraded as season-confounded printed "collecting (34+41 days,
+  need 10 each)" in the column beside its own n=34 and n=41; the intervention
+  badge showed that same case as "collecting"; a projection refused for
+  collinear predictors said "84 of 45 days collected", telling the reader to
+  wait for data they already had, for a condition more days cannot fix; and the
+  dashboard strip reported a failed fit as "still working out". Each now has
+  its own wording, and an unrecognised value is named rather than hedged.
+- The "Wetting" finding gave a green "surfaces are staying dry" from a week in
+  which nothing was observed — `|| 0` turned missing data into a measured zero.
+  It now requires a day's worth of readings before it will give the all-clear,
+  and the daily rollup carries the observed-hours figure that makes that
+  possible.
+- The findings strip is blanked before it re-renders. It assigned its content
+  only at the end, so a failure part-way left the previous poll's findings on
+  screen indefinitely — on the highest-stakes panel.
+- A coverage refusal no longer blames the crawl sensor for a crawl that is
+  simply too wet to read. Saturated hours are excluded from the readings by
+  design, which deflated the crawl's apparent coverage and reported the wettest
+  possible crawl — the exact thing the page exists to surface — as a sensor
+  that had stopped reporting.
+- An intervention change that could not be checked against the outside air was
+  displayed as "within the day-to-day noise" — an affirmative claim that the
+  work did nothing, when the measurement said it cleared the noise and simply
+  could not be confirmed. The verdict already existed; the page had no wording
+  for it and fell through to the "no change" branch. This is the number someone
+  decides on, so the two must not read alike.
+- CI jobs could be handed a database that was about to vanish ("the database
+  system is shutting down"). The Postgres image runs initdb against a temporary
+  server before shutting it down and starting the real one, and `pg_isready`
+  answers for that temporary server. Both the `backup-restore` readiness loop
+  and the `test` job's service health check now run a real query over TCP —
+  the temporary server listens on the unix socket only, so a TCP connection
+  cannot reach it and a single success is proof rather than a heuristic.
 - A configured sensor that is not a floor above the crawl — a garage, a shed —
   made the floor-to-floor path check refuse for every floor, including ones
   whose names place them perfectly well. Sensors that cannot be placed in the

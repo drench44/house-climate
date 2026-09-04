@@ -67,7 +67,7 @@ test('every refusal reason is explained in plain words', () => {
     'weak_signal', 'straddles_intervention', 'inconsistent_sign', 'not_configured',
     'not_computed', 'no_fit', 'no_data', 'collecting'];
   for (const reason of reasons) {
-    const text = couplingReason({ reason, need_days: 21 });
+    const text = couplingReason({ reason, need_days: 21, thinnest: 'outdoor' });
     assert.ok(text.length > 20, `${reason} needs a real explanation`);
     assert.ok(!/unavailable|error|failed|n\/a/i.test(text),
       `${reason} must say what it is waiting for, not that something broke: ${text}`);
@@ -282,6 +282,38 @@ test('the dashboard strip does not state a share it cannot distinguish from zero
   assert.match(html, /too little crawl air/);
 });
 
+test('the dashboard strip does not report a failed fit as a healthy wait', () => {
+  /* The moisture page has said "the sums could not be solved" since these
+     reasons existed; the dashboard is the surface people actually look at,
+     and it reported the failure as patience. */
+  renderGapStrip({ available: true, floors: [
+    { name: 'Upstairs', gap_now: 2.4, trend_7d: null, coupling_ready: false,
+      beta: null, reason: 'no_fit' },
+  ] });
+  const html = dash.document.getElementById('gap-strip').innerHTML;
+  assert.match(html, /too alike to separate/);
+  assert.ok(!/Still working out/.test(html), html);
+});
+
+test('the dashboard strip explains a cold cache as a server state', () => {
+  renderGapStrip({ available: true, floors: [
+    { name: 'Upstairs', gap_now: 2.4, trend_7d: null, coupling_ready: false,
+      beta: null, reason: 'not_computed' },
+  ] });
+  assert.match(dash.document.getElementById('gap-strip').innerHTML, /since the server restarted/);
+});
+
+test('a floor with no gap still contributes its reason', () => {
+  /* A dead sensor has no gap to show, so filtering those floors out dropped
+     the one reason that explains why nothing is shown. */
+  renderGapStrip({ available: true, floors: [
+    { name: 'Upstairs', gap_now: 2.4, trend_7d: null, coupling_ready: false, beta: null },
+    { name: 'Downstairs', gap_now: null, trend_7d: null, coupling_ready: false,
+      beta: null, reason: 'outage' },
+  ] });
+  assert.match(dash.document.getElementById('gap-strip').innerHTML, /check the sensors/);
+});
+
 test('the dashboard strip distinguishes an outage from ordinary waiting', () => {
   renderGapStrip({ available: true, floors: [
     { name: 'Upstairs', gap_now: 2.4, trend_7d: null, coupling_ready: false,
@@ -306,4 +338,130 @@ test('a floor damper than the crawl is flagged, not shown as healthy', () => {
 
 test('dashboard gap severity bands match the moisture page', () => {
   for (const v of [null, -2.5, 0.5, 2, 5]) assert.equal(crawlGapClass(v), gapClass(v));
+});
+
+
+// ------------------------------------- intervention verdict wording
+
+const { gapVerdictText, renderGapLead } =
+  vm.runInContext('({gapVerdictText, renderGapLead})', mo.sandbox);
+
+test('an unchecked change is not reported as no change at all', () => {
+  /* It used to fall through to the "within the noise" wording, which says the
+     work did nothing — the opposite of what was measured. */
+  const text = gapVerdictText('unchecked');
+  assert.match(text, /bigger than the day-to-day noise/);
+  assert.match(text, /not yet proof/);
+  assert.notEqual(text, gapVerdictText('noise'));
+});
+
+test('each intervention verdict has its own wording', () => {
+  const seen = new Set(['real', 'confounded', 'unchecked', 'noise'].map(gapVerdictText));
+  assert.equal(seen.size, 4, 'two verdicts share wording');
+});
+
+test('each verdict is pinned to ITS OWN wording, not just a distinct one', () => {
+  /* Distinctness alone would not catch a swap. These four came from an inline
+     ternary that was transcribed into a switch, which is exactly where a
+     mapping slips. */
+  assert.match(gapVerdictText('real'), /^bigger than the day-to-day noise$/);
+  assert.match(gapVerdictText('noise'), /^within the day-to-day noise$/);
+  assert.match(gapVerdictText('confounded'), /outside air moved with it/);
+  assert.ok(!/outside air moved with it/.test(gapVerdictText('real')), 'real/confounded swapped');
+  assert.match(gapVerdictText('unchecked'), /not enough outdoor data/);
+});
+
+test('an unrecognised verdict is named, not hedged into silence', () => {
+  /* Swallowing a new server-side verdict into a plausible phrase is the
+     mechanism that produced the bug this function exists to fix. */
+  const text = gapVerdictText('something_new');
+  assert.match(text, /something new/);
+  assert.match(text, /cannot interpret/);
+});
+
+test('an unchecked verdict reaches the page with its own wording', () => {
+  renderGapLead({ ah: { available: true, settle_days: 7, floors: [{
+    name: 'Upstairs', gap_daily: [], gap_now: 1.0,
+    interventions: [{ label: 'Vapor barrier',
+                      metric: { verdict: 'unchecked', diff: -2.0, ci95: 0.3 } }],
+  }] } });
+  const html = mo.document.getElementById('mo-gap-lead').innerHTML;
+  assert.match(html, /not yet proof/);
+  assert.ok(!/within the day-to-day noise/.test(html), html);
+});
+
+test('thin coverage names which readings are missing', () => {
+  assert.match(couplingReason({ reason: 'thin_coverage', thinnest: 'outdoor' }),
+    /outdoor readings/);
+  assert.match(couplingReason({ reason: 'thin_coverage', thinnest: 'crawl' }),
+    /crawl readings/);
+  /* An older server that does not send `thinnest` must still read sensibly. */
+  assert.match(couplingReason({ reason: 'thin_coverage' }), /sensor readings/);
+});
+
+
+// ------------------------------- other verdicts on the same page
+
+const { ivMetricRow, renderProjection, renderVerdicts } =
+  vm.runInContext('({ivMetricRow, renderProjection, renderVerdicts})', mo.sandbox);
+
+test('a confounded metric is not reported as a short sample', () => {
+  /* It printed "collecting (34+41 days, need 10 each)" in the column beside
+     n=34 and n=41 — a checkable, false claim that the sample was short, when
+     the analysis had run and found a real change the season could explain. */
+  const html = ivMetricRow('dew point', {
+    verdict: 'confounded', diff: -3.2, ci95: 1.1, baseline_mean: 62, baseline_sd: 1,
+    baseline_n: 34, post_mean: 58.8, post_sd: 1, post_n: 41 });
+  assert.ok(!/collecting/.test(html), html);
+  assert.match(html, /outside air moved with it/);
+});
+
+test('every metric verdict the server can send has its own wording', () => {
+  /* The whole verdict cell, compared as a string — the row layout is
+     identical across verdicts, so any difference is the wording. */
+  const verdicts = ['real', 'noise', 'confounded', 'unchecked', 'collecting'];
+  const cells = verdicts.map((v) => ivMetricRow('m', {
+    verdict: v, diff: -1, ci95: 0.2, baseline_mean: 1, baseline_sd: 1, baseline_n: 20,
+    post_mean: 1, post_sd: 1, post_n: 20 }));
+  assert.equal(new Set(cells).size, verdicts.length, 'two verdicts render identically');
+  /* And each says the right thing, not merely a different thing. */
+  const say = (v) => cells[verdicts.indexOf(v)];
+  assert.match(say('real'), /real improvement/);
+  assert.match(say('noise'), /within noise/);
+  assert.match(say('confounded'), /outside air moved with it/);
+  assert.match(say('unchecked'), /not checkable/);
+  assert.match(say('collecting'), /collecting/);
+  assert.ok(!/collecting/.test(say('confounded')), 'confounded still reads as a short sample');
+});
+
+test('an unrecognised metric verdict is named', () => {
+  const html = ivMetricRow('m', { verdict: 'brand_new', diff: -1, baseline_n: 20, post_n: 20 });
+  assert.match(html, /unrecognised result/);
+  assert.match(html, /brand new/);
+});
+
+test('a singular projection fit is not reported as needing more days', () => {
+  /* "84 of 45 days collected" told the reader to wait for data they already
+     had, for a condition more days will never fix. */
+  renderProjection({ projection: { ready: false, reason: 'collinear', n_days: 84,
+                                   need_days: 45, temp_span_f: 20, need_span_f: 30 } });
+  const html = mo.document.getElementById('mo-projection').innerHTML;
+  assert.ok(!/84 of 45/.test(html), html);
+  assert.match(html, /change in the weather, not more days/);
+});
+
+test('the wetting verdict is not a green all-clear from no observations', () => {
+  /* A crawl sensor offline all week produced zero risk-hours, which rendered
+     as "surfaces at air temperature are staying dry". */
+  renderVerdicts({ condensation: { obs_hours_7d: 3, hours_7d: 0, duct_hours_7d: 0 },
+                   attribution: {}, rain: {}, delta: {} });
+  const html = mo.document.getElementById('mo-verdicts').innerHTML;
+  assert.ok(!/staying dry/.test(html), html);
+  assert.match(html, /not enough to say|Collecting/);
+});
+
+test('the wetting verdict still gives the all-clear on a fully observed week', () => {
+  renderVerdicts({ condensation: { obs_hours_7d: 168, hours_7d: 0, duct_hours_7d: 0 },
+                   attribution: {}, rain: {}, delta: {} });
+  assert.match(mo.document.getElementById('mo-verdicts').innerHTML, /staying dry/);
 });

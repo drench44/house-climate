@@ -55,7 +55,14 @@ function couplingReason(c) {
     case 'window_too_short':
       return `Needs about ${need} days of readings before this can be worked out. Collecting.`;
     case 'thin_coverage':
-      return 'Too many hours missing from the record to trust the answer. Collecting.';
+      return `Too many hours missing from the ${seriesWords(c)} readings to trust the `
+           + 'answer. Collecting.';
+    case 'crawl_saturated':
+      /* The sensor is fine. The crawl is wet — which is the finding, not a
+         fault, and must not send anyone to check a working sensor. */
+      return 'The crawl sat at 95% humidity or above for most of this stretch. Readings stop '
+           + 'being accurate up there so they are left out, which leaves too few to work '
+           + 'with. The sensor is fine — a crawl that wet is itself the finding.';
     case 'outage':
       return 'There is a gap of more than a day in the readings. Waiting for a clean stretch.';
     case 'insufficient_n_eff':
@@ -86,6 +93,18 @@ function couplingReason(c) {
       return `Not shown \u2014 the server reported "${reasonLabel(c.reason)}", which this page `
            + 'does not have an explanation for.';
   }
+}
+
+/* Which sensors are short of readings, in the reader's words. Names every
+   series at the minimum: saying "crawl" when the crawl and the outdoor feed
+   are equally absent sends half the search in the wrong direction. */
+function seriesWords(c) {
+  const words = { crawl: 'crawl', floor: 'indoor', outdoor: 'outdoor' };
+  const list = (c.thin_series && c.thin_series.length ? c.thin_series
+    : [c.thinnest]).map((k) => words[k]).filter(Boolean);
+  if (!list.length) return 'sensor';
+  if (list.length === 1) return list[0];
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
 }
 
 function reasonLabel(reason) {
@@ -173,6 +192,30 @@ function drawGapChart(m) {
   moMarkers(svg, xOf, winStart, winEnd, top, bot);
 }
 
+/* An `unchecked` change cleared the day-to-day noise but could not be tested
+   against the outside air — usually because outdoor readings do not reach far
+   enough back on both sides of the marker. It used to fall through to the
+   "within the noise" wording, which says the work did NOTHING: the opposite of
+   what was measured, on the one number someone would act on. */
+function gapVerdictText(verdict) {
+  switch (verdict) {
+    case 'real':
+      return 'bigger than the day-to-day noise';
+    case 'confounded':
+      return 'but the outside air moved with it, so this is not proof';
+    case 'unchecked':
+      return 'bigger than the day-to-day noise, but there was not enough outdoor '
+           + 'data either side to rule out the season, so this is not yet proof';
+    case 'noise':
+      return 'within the day-to-day noise';
+    default:
+      /* Named, not hedged. Swallowing a new server-side verdict into a
+         plausible phrase is the mechanism that produced the bug this
+         function exists to fix. */
+      return `reported as "${reasonLabel(verdict)}", which this page cannot interpret`;
+  }
+}
+
 function renderGapLead(m) {
   const el = document.getElementById('mo-gap-lead');
   if (!el) return;
@@ -190,9 +233,7 @@ function renderGapLead(m) {
     ivs.push(`<li><b>${escapeHtml(f.name)}</b> after ${escapeHtml(iv.label)}: `
       + `${mm.diff > 0 ? 'widened' : 'closed'} by ${Math.abs(mm.diff).toFixed(2)} g/m&sup3;`
       + (mm.ci95 != null ? ` (&plusmn;${mm.ci95.toFixed(2)})` : '')
-      + ` &mdash; ${mm.verdict === 'real' ? 'bigger than the day-to-day noise'
-          : mm.verdict === 'confounded' ? 'but the outside air moved with it, so this is not proof'
-          : 'within the day-to-day noise'}.</li>`);
+      + ` &mdash; ${gapVerdictText(mm.verdict)}.</li>`);
   }));
   if (ivs.length) {
     parts.push(`<p class="mo-read">Since the work was marked (first ${ah.settle_days} days `
@@ -286,6 +327,19 @@ function renderPrediction(m) {
         + 'called either way. Not evidence for or against.</li>');
       return;
     }
+    if (p.verdict !== 'confirmed' && p.verdict !== 'not_confirmed') {
+      /* The negative branch tells someone the crawl is not worth spending
+         money on. An unrecognised verdict must never fall into it. */
+      rows.push(`<li><b>${escapeHtml(f.name)}</b> after ${escapeHtml(p.label)} &mdash; `
+        + `the server reported "${reasonLabel(p.verdict)}", which this page cannot `
+        + 'interpret, so nothing is claimed either way.</li>');
+      return;
+    }
+    if (p.predicted == null || p.ci95 == null || p.observed == null) {
+      rows.push(`<li><b>${escapeHtml(f.name)}</b> after ${escapeHtml(p.label)} &mdash; `
+        + 'the numbers behind this test are incomplete, so it is not being called.</li>');
+      return;
+    }
     const ok = p.verdict === 'confirmed';
     rows.push(`<li><b>${escapeHtml(f.name)}</b> after ${escapeHtml(p.label)} &mdash; `
       + `expected this floor to dry out by ${Math.abs(p.predicted).toFixed(2)} g/m&sup3; `
@@ -334,6 +388,10 @@ function renderCouplingMethod(m) {
 
 function renderVerdicts(m) {
   const el = document.getElementById('mo-verdicts');
+  /* Blank first: this panel assigns innerHTML only at the end, so a throw
+     part-way left the PREVIOUS poll's findings on screen indefinitely,
+     indistinguishable from current ones — on the highest-stakes panel. */
+  if (el) el.innerHTML = '';
   const items = [];
 
   const attr = m.attribution && m.attribution.verdict;
@@ -354,14 +412,21 @@ function renderVerdicts(m) {
   });
 
   const c = m.condensation || {};
+  /* Zero risk-hours means nothing if nothing was observed. `|| 0` turns "no
+     data" into "measured zero", and this is the one verdict on the strip that
+     fails toward reassurance — a sensor offline all week produced a green
+     "surfaces are staying dry". */
+  const condSeen = (c.obs_hours_7d || 0) >= 24;
   const condBad = (c.hours_7d || 0) > 0 || (c.duct_hours_7d || 0) > 0;
   items.push({
-    k: 'Wetting', cls: condBad ? 'bad' : 'ok',
-    text: condBad
-      ? `${c.hours_7d}h of condensation-risk conditions in the last 7 days` +
-        ((c.duct_hours_7d || 0) > 0 ? `, plus ~${c.duct_hours_7d}h of likely duct sweat while the AC ran (assumes ${Math.round(c.assumed_duct_f)}${DEG}F duct surface)` : '') +
-        ' — surfaces are getting wet.'
-      : 'No condensation-risk hours in the last 7 days — surfaces at air temperature are staying dry.',
+    k: 'Wetting', cls: !condSeen ? '' : (condBad ? 'bad' : 'ok'),
+    text: !condSeen
+      ? `Only ${c.obs_hours_7d || 0}h of crawl readings in the last 7 days — not enough to say whether surfaces are wetting. Collecting.`
+      : condBad
+        ? `${c.hours_7d}h of condensation-risk conditions in the last 7 days` +
+          ((c.duct_hours_7d || 0) > 0 ? `, plus ~${c.duct_hours_7d}h of likely duct sweat while the AC ran (assumes ${Math.round(c.assumed_duct_f)}${DEG}F duct surface)` : '') +
+          ' — surfaces are getting wet.'
+        : 'No condensation-risk hours in the last 7 days — surfaces at air temperature are staying dry.',
   });
 
   el.innerHTML = `<div class="panel-head"><span class="micro" style="color:var(--dim)">Findings</span>` +
@@ -633,10 +698,31 @@ function renderThresholds(m) {
 function ivMetricRow(name, mm) {
   const d = mm.diff;
   const fmt = (v) => (v == null ? '—' : `${v > 0 ? '+' : ''}${v}`);
+  /* Every verdict the Python can emit gets its own wording. `confounded` used
+     to fall into the "collecting" branch and print "collecting (34+41 days,
+     need 10 each)" in the column beside n=34 and n=41 — a specific, checkable,
+     false claim that the sample was short, when in truth the analysis had run,
+     found a real change, and downgraded it because the season moved with it. */
   let verdict;
-  if (mm.verdict === 'real') verdict = `<b class="${d < 0 ? 'v-ok' : 'v-out'}">real ${d < 0 ? 'improvement' : 'worsening'}</b>`;
-  else if (mm.verdict === 'noise') verdict = `<span class="mo-dim">within noise</span>`;
-  else verdict = `<span class="mo-dim">collecting (${mm.baseline_n}+${mm.post_n} days, need ${10} each)</span>`;
+  switch (mm.verdict) {
+    case 'real':
+      verdict = `<b class="${d < 0 ? 'v-ok' : 'v-out'}">real ${d < 0 ? 'improvement' : 'worsening'}</b>`;
+      break;
+    case 'noise':
+      verdict = '<span class="mo-dim">within noise</span>';
+      break;
+    case 'confounded':
+      verdict = '<b class="v-watch">real-sized, but the outside air moved with it</b>';
+      break;
+    case 'unchecked':
+      verdict = '<b class="v-watch">real-sized, outside air not checkable</b>';
+      break;
+    case 'collecting':
+      verdict = `<span class="mo-dim">collecting (${mm.baseline_n}+${mm.post_n} days)</span>`;
+      break;
+    default:
+      verdict = `<span class="mo-dim">unrecognised result "${reasonLabel(mm.verdict)}"</span>`;
+  }
   return `<tr><td>${name}</td>` +
     `<td>${mm.baseline_mean != null ? mm.baseline_mean : '—'}<span class="mo-chipsub"> ±${mm.baseline_sd != null ? mm.baseline_sd : '—'} · n=${mm.baseline_n}</span></td>` +
     `<td>${mm.post_mean != null ? mm.post_mean : '—'}<span class="mo-chipsub"> ±${mm.post_sd != null ? mm.post_sd : '—'} · n=${mm.post_n}</span></td>` +
@@ -653,9 +739,13 @@ function renderInterventions(m) {
     return;
   }
   el.innerHTML = ivs.map((iv) => {
+    /* `confounded` is only reached when EVERY real result was downgraded — the
+       case where the reader most needs to know the season is in play, and the
+       one the old badge hid behind "collecting". */
     const badge = iv.overall === 'real_change' ? '<span class="mo-badge real">real change</span>'
-      : iv.overall === 'no_change_detected' ? '<span class="mo-badge">no change detected</span>'
-        : '<span class="mo-badge">collecting</span>';
+      : iv.overall === 'confounded' ? '<span class="mo-badge watch">season may explain it</span>'
+        : iv.overall === 'no_change_detected' ? '<span class="mo-badge">no change detected</span>'
+          : '<span class="mo-badge">collecting</span>';
     return `<div class="mo-iv num">
       <div class="mo-iv-head"><b>${escapeHtml(iv.label)}</b>
         <span class="mo-dim">${moFmtDay(iv.marked_on)}</span>${badge}
@@ -677,9 +767,17 @@ function renderProjection(m) {
   const el = document.getElementById('mo-projection');
   const p = m.projection || {};
   if (!p.ready) {
-    const why = p.reason === 'narrow_temp_range'
-      ? `the data so far only spans ${p.temp_span_f}${DEG}F of outdoor temperature (needs ${p.need_span_f}${DEG}F — cooler weather must arrive first)`
-      : `${p.n_days || 0} of ${p.need_days} days of paired daily means collected`;
+    /* `collinear` means outdoor temperature and dew point could not be told
+       apart in the fit. It is not a sample-size problem — n is already past
+       the bar when it fires — so printing "84 of 45 days collected" tells the
+       reader to wait for data they already have, for a condition more days
+       will never fix. */
+    const why = p.reason === 'collinear'
+      ? 'outdoor temperature and dew point have moved together so far, so their separate '
+        + 'effects cannot be told apart. That needs a change in the weather, not more days'
+      : p.reason === 'narrow_temp_range'
+        ? `the data so far only spans ${p.temp_span_f}${DEG}F of outdoor temperature (needs ${p.need_span_f}${DEG}F — cooler weather must arrive first)`
+        : `${p.n_days || 0} of ${p.need_days} days of paired daily means collected`;
     el.innerHTML = `<p class="mo-read mo-dim">A winter projection would be a guess right now: ${why}. ` +
       `The fit (crawl dew point vs outdoor temp + dew point) will appear here with a confidence interval once it is actually supported.</p>`;
     return;
