@@ -280,6 +280,11 @@ def condensation_summary(daily_stats, outdoor_days, crawl_daily_dp):
         del x["_date"]
     return {
         "days": days,
+        # Hours actually OBSERVED in the window. Without it, zero
+        # condensation hours from a sensor that was offline all week is
+        # indistinguishable from a week of genuinely dry surfaces, and the
+        # page says the surfaces are staying dry.
+        "obs_hours_7d": round(sum(x["obs_hours"] for x in last7), 1),
         "hours_7d": round(sum(x["hours"] for x in last7), 1),
         "duct_hours_7d": round(sum(x["duct_hours"] for x in last7), 1),
         "spread_f": CONDENSATION_SPREAD_F,
