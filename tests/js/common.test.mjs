@@ -23,7 +23,7 @@ const {
   timePath, hoverTargetMs, nearestByMs,
   tempClass, rhClass, crawlRhClass, crawlTempClass,
   equipmentState, bandTierLabel, pmChip, peakStripHtml, smokeBannerHtml,
-  backupBadge,
+  backupBadge, aqiIsEstimate,
 } = sandbox;
 const { GAP_MS } = vm.runInContext('({ GAP_MS })', sandbox);
 // Arrays/objects born inside the vm carry the vm realm's prototypes, which
@@ -362,6 +362,48 @@ test('smokeBannerHtml: a custom aqi_unhealthy is honored over the fallback', () 
 test('smokeBannerHtml: null/missing humidity or AQI renders nothing', () => {
   assert.equal(smokeBannerHtml(null, 101), '');
   assert.equal(smokeBannerHtml({ outdoor_aqi: null }, 101), '');
+});
+
+// ------------------------------------------------------------ aqiIsEstimate
+// resolve_outdoor_aqi() falls back from the pushed monitor value to the
+// weather feed's MODEL after 30 quiet minutes, and the two disagree in the
+// direction that matters (2026-08-31: model 113 "Unhealthy" vs monitor 85
+// "Moderate"). These pin the predicate every display surface shares.
+
+test('aqiIsEstimate: only an explicit monitor source counts as measured', () => {
+  assert.equal(aqiIsEstimate('airnow'), false);
+  assert.equal(aqiIsEstimate('weather'), true);
+});
+
+test('aqiIsEstimate: unknown provenance is an estimate, not a measurement', () => {
+  // The dangerous default. A missing/renamed/new source must fail toward
+  // "we are not sure", never toward an unearned claim of a real reading.
+  for (const source of [null, undefined, '', 'purpleair', 'AIRNOW', 0]) {
+    assert.equal(aqiIsEstimate(source), true, `source ${JSON.stringify(source)}`);
+  }
+});
+
+test('smokeBannerHtml: a modeled AQI is marked as an estimate', () => {
+  const html = smokeBannerHtml(
+    { outdoor_aqi: 180, aqi_category: 'Unhealthy', aqi_source: 'weather' }, 101);
+  assert.ok(html.includes('estimate, not a monitor'), html);
+  assert.ok(html.includes('AQI 180'), html);
+});
+
+test('smokeBannerHtml: a real monitor reading carries no estimate caveat', () => {
+  const html = smokeBannerHtml(
+    { outdoor_aqi: 180, aqi_category: 'Unhealthy', aqi_source: 'airnow' }, 101);
+  assert.ok(html.length > 0, html);
+  assert.ok(!html.includes('estimate'), html);
+});
+
+test('smokeBannerHtml: a modeled AQI is MARKED, never suppressed', () => {
+  // Deliberate: during a monitor outage the model is the only evidence of
+  // smoke there is, and hiding a real event costs more than a hedged banner.
+  const html = smokeBannerHtml(
+    { outdoor_aqi: 300, aqi_category: 'Hazardous', aqi_source: 'weather' }, 101);
+  assert.ok(html.includes('smoke-banner'), html);
+  assert.ok(html.includes('Windows closed'), html);
 });
 
 // ------------------------------------------------------------- backupBadge

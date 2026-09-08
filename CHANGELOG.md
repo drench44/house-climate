@@ -11,6 +11,18 @@ rolls that section to a dated version via `python scripts/release.py`.
 ## [Unreleased]
 
 ### Changed
+- The outdoor AQI now says on screen whether it is a real monitor reading or
+  the weather feed's estimate. `resolve_outdoor_aqi` silently falls back to the
+  feed's modeled `wx_aqi` after 30 quiet minutes, and the two disagree in the
+  direction that matters, so the number was presented identically either way.
+  The wall chip, the compact kiosk chip, the smoke banner and the unhealthy-air
+  push all mark a modeled value now; a monitor reading stays unqualified. The
+  smoke banner is MARKED, never suppressed: during a monitor outage the model
+  is the only evidence of smoke there is.
+- `scripts/release.py` stamps the `?v=` cache-busts on every static page, not
+  only `index.html`. `square.html` and `moisture.html` were pinned at a
+  hand-written `?v=2` that no release ever moved, so a change to the shared
+  `common.js` reached the dashboard and never reached the wall kiosk.
 - A coverage refusal in the transport measurement now names which readings were
   thin — crawl, indoor or outdoor. Coverage is counted across all three series
   together, so one patchy sensor refuses every floor, and "thin coverage" alone

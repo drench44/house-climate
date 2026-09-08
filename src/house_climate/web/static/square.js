@@ -30,7 +30,10 @@ function sqAqi(hum) {
   if (!hum || !hum.available || hum.outdoor_aqi == null) return '';
   const n = Math.round(hum.outdoor_aqi);
   const cat = hum.aqi_category ? ` ${escapeHtml(hum.aqi_category.toLowerCase())}` : '';
-  return `<span class="aqi num ${aqiChipClass(n)}">AQI ${n}${cat}</span>`;
+  // This chip never carried provenance at all -- the kiosk's most-glanced
+  // surface was the one most able to pass a model off as a measurement.
+  const est = aqiIsEstimate(hum.aqi_source) ? ' est.' : '';
+  return `<span class="aqi num ${aqiChipClass(n)}">AQI ${n}${cat}${est}</span>`;
 }
 
 /* The humidity engine's windows verdict, one short line. The engine
