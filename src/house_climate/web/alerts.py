@@ -61,13 +61,14 @@ def _alert_context(conn, device_id, cfg, since, rows):
                 _filter_due_cache = False
 
     outdoor_aqi = None
+    aqi_source = None
     try:
         wx_aqi = rows[-1].get("wx_aqi") if rows else None
-        outdoor_aqi, _ = api.resolve_outdoor_aqi(conn, wx_aqi)
+        outdoor_aqi, aqi_source = api.resolve_outdoor_aqi(conn, wx_aqi)
     except Exception:
         log.exception("AQI resolution failed")
 
-    return crawl_rows, _filter_due_cache, outdoor_aqi
+    return crawl_rows, _filter_due_cache, outdoor_aqi, aqi_source
 
 
 @dataclass(frozen=True)
@@ -134,7 +135,8 @@ def _recovering(rows, minutes):
 
 
 def evaluate(rows, cfg, poll_errors_recent, now=None, *,
-             crawl_rows=None, filter_due=None, outdoor_aqi=None) -> list[Alert]:
+             crawl_rows=None, filter_due=None, outdoor_aqi=None,
+             aqi_source=None) -> list[Alert]:
     """Evaluate all alert conditions against the recent thermostat readings.
 
     Extra context (kept optional so the pure function stays easy to test, and
@@ -148,6 +150,12 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
                       dashboard shows. None -> filter alert skipped.
       outdoor_aqi  -- the effective outdoor AQI (AirNow-preferred, resolved by
                       the caller). None -> falls back to the reading's wx_aqi.
+      aqi_source   -- provenance of that number, from resolve_outdoor_aqi:
+                      "airnow" (a real monitor) or "weather" (the feed's
+                      MODEL). Anything other than "airnow", None included, is
+                      treated as modeled and says so in the message. Defaulting
+                      an unknown provenance to "trustworthy" is precisely the
+                      claim we cannot make.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -270,8 +278,18 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
     # feed omits wx_aqi); fall back to the reading's own wx_aqi.
     aqi = outdoor_aqi if outdoor_aqi is not None else latest.get("wx_aqi")
     if aqi is not None and aqi >= a.get("aqi_unhealthy", 101):
+        # Say WHICH number this is. `resolve_outdoor_aqi` silently falls back
+        # from the pushed monitor value to the weather feed's own model after
+        # 30 quiet minutes, and the two disagree in the direction that matters:
+        # on 2026-08-31 the model read 113 "Unhealthy" against a monitor's 85
+        # "Moderate". A push that reads identically either way turns a monitor
+        # outage into a confident false claim on someone's phone. When the
+        # resolver could not run at all (aqi_source is None but the reading
+        # carried its own wx_aqi), that is the modeled feed too.
+        est = "" if aqi_source == "airnow" else ", estimated from the weather feed, not a monitor"
         out.append(Alert("air_quality", "warning",
-                          f"Outdoor air unhealthy (AQI {int(round(aqi))}): keep windows closed, run purifiers"))
+                          f"Outdoor air unhealthy (AQI {int(round(aqi))}{est}):"
+                          " keep windows closed, run purifiers"))
     if (latest.get("wx_alert_count") or 0) > 0:
         out.append(Alert("weather_alert", "warning", "Active NWS weather alert for your area"))
 
@@ -390,9 +408,11 @@ def alert_loop(cfg, secrets):
                 "SELECT count(*) FROM poll_errors WHERE ts > now() - interval '20 minutes'"
                 " AND kind LIKE 'daikin%'"
             ).fetchone()[0]
-            crawl_rows, filter_due, outdoor_aqi = _alert_context(conn, device_id, cfg, since, rows)
+            crawl_rows, filter_due, outdoor_aqi, aqi_source = _alert_context(
+                conn, device_id, cfg, since, rows)
             fired = evaluate(rows, cfg, errs, crawl_rows=crawl_rows,
-                             filter_due=filter_due, outdoor_aqi=outdoor_aqi)
+                             filter_due=filter_due, outdoor_aqi=outdoor_aqi,
+                             aqi_source=aqi_source)
             _dispatch(sink, fired, last_sent, cooldown, datetime.now(timezone.utc))
         except Exception:
             log.exception("alert loop error")

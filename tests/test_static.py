@@ -236,6 +236,57 @@ def test_app_js_has_peak_strip():
     assert "bandTierLabel(" not in src.split("function renderRail")[1][:2000]  # band label is the square tile's, not the rail's
 
 
+def test_every_page_cache_busts_at_the_current_version():
+    """square.html and moisture.html carried a hand-written `?v=2` that no
+    release ever moved, so a change to the SHARED common.js shipped to the
+    dashboard and not to the wall kiosk: the HTML is no-cache and re-fetched,
+    but it kept pointing at an unchanged asset URL the browser was free to
+    serve from cache. Every page must bust at the current VERSION, and
+    scripts/release.py must keep them all there."""
+    version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
+    pages = sorted(STATIC.glob("*.html"))
+    assert pages, "no static pages found -- this guard would pass vacuously"
+    for page in pages:
+        stamps = set(re.findall(r"\?v=([0-9A-Za-z._-]+)", page.read_text()))
+        assert stamps <= {version}, (
+            f"{page.name} cache-busts at {sorted(stamps - {version})} but VERSION is "
+            f"{version} -- a shared-asset change would not reach this page"
+        )
+
+
+def test_every_aqi_surface_marks_a_modeled_reading_visibly():
+    """`resolve_outdoor_aqi` silently swaps a real monitor reading for the
+    weather feed's MODEL after 30 quiet minutes, and the two disagree in the
+    direction that matters (2026-08-31: the model read 113 "Unhealthy" against
+    a monitor's 85 "Moderate"). Every surface that prints the number has to say
+    which one it is.
+
+    `aqiIsEstimate` is behaviour-tested in tests/js/common.test.mjs; app.js and
+    square.js run top-level DOM code so they cannot be vm-loaded, hence these
+    grep contracts. The visibility half is the point: square.js carried NO
+    provenance at all, and app.js disclosed it only in a `title` tooltip, which
+    on a wall kiosk nobody hovers is a caveat nobody reads."""
+    assert "function aqiIsEstimate" in COMMON_JS, "aqiIsEstimate left common.js"
+    for name, src in (("app.js", APP_JS), ("square.js", SQ_JS)):
+        assert f"function aqiIsEstimate" not in src, \
+            f"{name} redefines aqiIsEstimate -- single-source it in common.js"
+        assert "aqiIsEstimate(" in src, \
+            f"{name} prints an AQI without saying whether it is a measurement"
+
+    # The marker must reach the VISIBLE label, not just the hover text. Both
+    # chips build a `label`/inline span; assert the estimate flag is spliced
+    # into the rendered string rather than only into the `title=` attribute.
+    for name, src, fn in (("app.js", APP_JS, "function aqiChip"),
+                          ("square.js", SQ_JS, "function sqAqi")):
+        body = src.split(fn, 1)[1][:900]
+        assert "aqiIsEstimate(" in body, f"{name}: {fn} does not consult aqiIsEstimate"
+        visible = [ln for ln in body.splitlines()
+                   if "${est}" in ln and "title=" not in ln]
+        assert visible, \
+            f"{name}: the estimate marker never reaches the visible label (tooltip-only " \
+            "disclosure is what this test exists to prevent)"
+
+
 def test_app_js_has_smoke_banner():
     """smokeBannerHtml lives in common.js (shared, testable); app.js only
     calls it — 2026-08-13 move (mirrors peakStripHtml) so it could get real

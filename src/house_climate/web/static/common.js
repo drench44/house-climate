@@ -198,6 +198,19 @@ function peakStripHtml(cost, precool) {
   return `<div id="peak-strip" class="peak-strip ${cls}"><b>${head}</b><span>${sub}</span></div>`;
 }
 
+/* Is the AQI on screen a real monitor reading, or the weather feed's MODEL?
+   `resolve_outdoor_aqi` silently falls back from the pushed monitor value to
+   the feed's own `wx_aqi` once the monitor has been quiet for 30 minutes, and
+   the two are not interchangeable: on 2026-08-31 the modeled source read 113
+   "Unhealthy" while the regulatory monitor said 85 "Moderate". Every surface
+   that prints the number has to say which one it is, or an outage turns a
+   guess into a confident claim. Anything that is not an explicit monitor
+   source counts as an estimate -- an unknown provenance is not a known-good
+   one. */
+function aqiIsEstimate(source) {
+  return source !== 'airnow';
+}
+
 /* Smoke-banner decision — decoupled from `rooms`/Ecowitt on purpose: a
    rooms/Ecowitt outage must never suppress an outdoor-smoke warning, so
    this reads ONLY from the `humidity` object (never `rooms`). Mirrors the
@@ -210,8 +223,13 @@ function smokeBannerHtml(humidity, fallbackThreshold) {
   const threshold = (humidity && humidity.aqi_unhealthy != null) ? humidity.aqi_unhealthy : fallbackThreshold;
   if (aqiVal < threshold) return '';
   const aqiCat = humidity ? humidity.aqi_category : null;
+  // Marked, never SUPPRESSED. A modeled AQI is weak evidence of smoke, but
+  // during a monitor outage it is the only evidence there is, and the cost of
+  // hiding a real smoke event beats the cost of an over-cautious banner.
+  const est = aqiIsEstimate(humidity ? humidity.aqi_source : null)
+    ? ' (estimate, not a monitor)' : '';
   return `<div class="smoke-banner">Smoky outside — AQI ${Math.round(aqiVal)}` +
-    `${aqiCat ? `, ${escapeHtml(aqiCat)}` : ''}. ` +
+    `${aqiCat ? `, ${escapeHtml(aqiCat)}` : ''}${est}. ` +
     `Windows closed; purifiers should be running.</div>`;
 }
 

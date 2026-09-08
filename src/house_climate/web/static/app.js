@@ -167,7 +167,12 @@ function tickClock() {
 function aqiChip(aqi, category, source) {
   if (aqi == null) return '';
   const n = Math.round(aqi);
-  const label = category ? `${n} · ${category}` : `${n}`;
+  // The `est.` is VISIBLE, not tooltip-only. This chip lives on a wall kiosk
+  // that nobody hovers, so a provenance caveat hidden in `title` is a caveat
+  // nobody ever reads -- which is how a modeled 113 passed for a monitor
+  // reading of 85.
+  const est = aqiIsEstimate(source) ? ' est.' : '';
+  const label = `${category ? `${n} · ${category}` : `${n}`}${est}`;
   const sourceText = source === 'airnow' ? 'from AirNow'
     : source === 'weather' ? 'from the weather feed (estimate)'
     : 'from the weather feed';

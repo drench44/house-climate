@@ -530,7 +530,7 @@ def test_mold_alert_end_to_end_through_db(conn, monkeypatch):
         fdb.insert_sensor_reading(conn, sid, now - timedelta(minutes=off),
                                   temp_f=68.0, humidity=80.0)
     since = now - timedelta(hours=3)
-    crawl_rows, _due, _aqi = alerts._alert_context(conn, "dev", CFG, since, rows=[])
+    crawl_rows, _due, _aqi, _src = alerts._alert_context(conn, "dev", CFG, since, rows=[])
     assert crawl_rows and len(crawl_rows) >= 30
     out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl_rows)
     assert any(a.key == "crawl_mold" for a in out)
@@ -564,6 +564,57 @@ def test_air_quality_does_not_fire_when_airnow_below_threshold():
     out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"],
                           outdoor_aqi=CFG.alerts["aqi_unhealthy"] - 1)
     assert not any(a.key == "air_quality" for a in out)
+
+
+def _aq_message(out):
+    return next(a.message for a in out if a.key == "air_quality")
+
+
+def test_air_quality_push_names_a_modeled_aqi_as_an_estimate():
+    """resolve_outdoor_aqi silently swaps the monitor reading for the weather
+    feed's MODEL after 30 quiet minutes, and the two disagree in the direction
+    that matters: on 2026-08-31 the model read 113 "Unhealthy" against a
+    monitor's 85 "Moderate". A push that reads identically either way turns a
+    monitor outage into a confident false claim on someone's phone."""
+    rows = [_row(0)]
+    out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"],
+                          outdoor_aqi=CFG.alerts["aqi_unhealthy"] + 20,
+                          aqi_source="weather")
+    assert "estimated from the weather feed" in _aq_message(out)
+
+
+def test_air_quality_push_from_a_real_monitor_carries_no_caveat():
+    """The non-vacuous companion: hedging every push would train the reader to
+    ignore the hedge, so a real monitor reading must stay unqualified."""
+    rows = [_row(0)]
+    out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"],
+                          outdoor_aqi=CFG.alerts["aqi_unhealthy"] + 20,
+                          aqi_source="airnow")
+    msg = _aq_message(out)
+    assert "estimated" not in msg, msg
+
+
+def test_air_quality_push_treats_unknown_provenance_as_modeled():
+    """The dangerous default. `_alert_context` leaves aqi_source None when the
+    resolver raised, and callers predating this argument omit it entirely --
+    both cases still print a number. Unknown provenance must fail toward "we
+    are not sure", never toward an unearned claim of a real reading."""
+    rows = [_row(0)]
+    rows[-1]["wx_aqi"] = CFG.alerts["aqi_unhealthy"] + 5
+    out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"])   # no aqi_source
+    assert "estimated from the weather feed" in _aq_message(out)
+
+
+def test_alert_context_returns_the_aqi_source_alongside_the_value():
+    """The value and its provenance must travel together out of the context
+    helper -- returning the number alone is what let the loop print it
+    unqualified for a year."""
+    import inspect
+    src = inspect.getsource(alerts._alert_context)
+    assert "return crawl_rows, _filter_due_cache, outdoor_aqi, aqi_source" in src
+    loop = inspect.getsource(alerts.alert_loop)
+    assert "aqi_source=aqi_source" in loop, \
+        "the alert loop resolves the provenance but never passes it to evaluate()"
 
 
 # --- NtfySink: a non-2xx response must RAISE (the CRITICAL fix) --------------
