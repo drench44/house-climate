@@ -130,11 +130,13 @@ def test_main_dry_run_writes_nothing(tmp_path, monkeypatch):
     cf = tmp_path / "CHANGELOG.md"
     cf.write_text("# Changelog\n\n## [Unreleased]\n\n### Added\n- a change\n\n"
                   "## [1.2.3] — 2026-01-01\n\n### Added\n- prior\n")
-    hf = tmp_path / "index.html"
+    static = tmp_path / "static"
+    static.mkdir()
+    hf = static / "index.html"
     hf.write_text('<link href="styles.css?v=1.2.3">\n')
     monkeypatch.setattr(release, "VERSION_FILE", vf)
     monkeypatch.setattr(release, "CHANGELOG_FILE", cf)
-    monkeypatch.setattr(release, "INDEX_HTML", hf)
+    monkeypatch.setattr(release, "STATIC_DIR", static)
     before = [f.read_bytes() for f in (vf, cf, hf)]
     rc = release.main(["patch", "--dry-run"])
     assert rc == 0, "dry-run against a releasable tree succeeds"
@@ -186,7 +188,6 @@ def _release_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "VERSION_FILE", repo / "VERSION")
     monkeypatch.setattr(release, "CHANGELOG_FILE", repo / "CHANGELOG.md")
     monkeypatch.setattr(release, "STATIC_DIR", static)
-    monkeypatch.setattr(release, "INDEX_HTML", static / "index.html")
     return repo
 
 

@@ -211,6 +211,53 @@ function aqiIsEstimate(source) {
   return source !== 'airnow';
 }
 
+/* The one place the marker's wording lives, so the dashboard chip, the kiosk
+   chip and any future surface cannot drift apart on it. */
+function aqiEstimateSuffix(source) {
+  return aqiIsEstimate(source) ? ' est.' : '';
+}
+
+/* Both AQI chips live here, beside the predicate they depend on, for the same
+   reason peakStripHtml and smokeBannerHtml were moved: a builder that returns
+   a string from app.js/square.js cannot be executed by the test suite (those
+   files run top-level DOM code), so it could only ever be grep-tested -- and a
+   grep that looks at an intermediate `label` variable does NOT see whether the
+   return statement uses it. A reviewer proved exactly that against the first
+   version of this fix: deleting `${label}` from aqiChip's return reintroduced
+   the original bug with the whole suite green. Real functions, real tests. */
+
+/* Full chip for the dashboard. */
+function aqiChipHtml(aqi, category, source) {
+  if (aqi == null) return '';
+  const n = Math.round(aqi);
+  // The `est.` is VISIBLE, not tooltip-only. This chip lives on a wall kiosk
+  // that nobody hovers, so a provenance caveat hidden in `title` is a caveat
+  // nobody ever reads -- which is how a modeled 113 passed for a monitor
+  // reading of 85.
+  const label = `${category ? `${n} · ${category}` : `${n}`}${aqiEstimateSuffix(source)}`;
+  // The tooltip must not out-claim the label: for an unknown source the visible
+  // chip hedges, so the hover text cannot name a specific feed as fact.
+  const sourceText = source === 'airnow' ? 'from AirNow'
+    : source === 'weather' ? 'from the weather feed (estimate)'
+    : 'from an unknown source — treat it as an estimate';
+  const tip = `Outdoor Air Quality Index (US AQI ${n}${category ? `, ${category}` : ''}) `
+    + `${sourceText} — a unitless 0–500 scale. 0–50 good, 51–100 `
+    + 'moderate, 101+ unhealthy. Above 100, keep windows shut regardless of humidity.';
+  return `<span class="aqi num ${aqiChipClass(aqi)}" title="${escapeHtml(tip)}">`
+    + `Outdoor AQI ${escapeHtml(label)}</span>`;
+}
+
+/* Compact chip for the square kiosk tile. */
+function aqiChipCompactHtml(hum) {
+  if (!hum || !hum.available || hum.outdoor_aqi == null) return '';
+  const n = Math.round(hum.outdoor_aqi);
+  const cat = hum.aqi_category ? ` ${escapeHtml(hum.aqi_category.toLowerCase())}` : '';
+  // This chip never carried provenance at all -- the kiosk's most-glanced
+  // surface was the one most able to pass a model off as a measurement.
+  return `<span class="aqi num ${aqiChipClass(n)}">`
+    + `AQI ${n}${cat}${aqiEstimateSuffix(hum.aqi_source)}</span>`;
+}
+
 /* Smoke-banner decision — decoupled from `rooms`/Ecowitt on purpose: a
    rooms/Ecowitt outage must never suppress an outdoor-smoke warning, so
    this reads ONLY from the `humidity` object (never `rooms`). Mirrors the

@@ -15,10 +15,19 @@ rolls that section to a dated version via `python scripts/release.py`.
   the weather feed's estimate. `resolve_outdoor_aqi` silently falls back to the
   feed's modeled `wx_aqi` after 30 quiet minutes, and the two disagree in the
   direction that matters, so the number was presented identically either way.
-  The wall chip, the compact kiosk chip, the smoke banner and the unhealthy-air
-  push all mark a modeled value now; a monitor reading stays unqualified. The
-  smoke banner is MARKED, never suppressed: during a monitor outage the model
-  is the only evidence of smoke there is.
+  The wall chip, the compact kiosk chip, the smoke banner, the windows verdict
+  and the unhealthy-air push all mark a modeled value now; a monitor reading
+  stays unqualified. The smoke banner is MARKED, never suppressed: during a
+  monitor outage the model is the only evidence of smoke there is. Both AQI
+  chips moved into `common.js` so they are executable-tested rather than
+  grep-tested.
+- The air-quality push's cooldown keys on the provenance as well as the alert
+  key, so a corrected, caveated message is no longer swallowed as a duplicate
+  of the unqualified one already on the phone.
+- `resolve_outdoor_aqi` logs at WARNING when it rejects a monitor row (stale,
+  malformed, or stamped in the future) instead of swapping in the model in
+  total silence, and a future-stamped row is no longer trusted as fresh
+  forever.
 - `scripts/release.py` stamps the `?v=` cache-busts on every static page, not
   only `index.html`. `square.html` and `moisture.html` were pinned at a
   hand-written `?v=2` that no release ever moved, so a change to the shared

@@ -23,7 +23,8 @@ const {
   timePath, hoverTargetMs, nearestByMs,
   tempClass, rhClass, crawlRhClass, crawlTempClass,
   equipmentState, bandTierLabel, pmChip, peakStripHtml, smokeBannerHtml,
-  backupBadge, aqiIsEstimate,
+  backupBadge, aqiIsEstimate, aqiEstimateSuffix,
+  aqiChipHtml, aqiChipCompactHtml,
 } = sandbox;
 const { GAP_MS } = vm.runInContext('({ GAP_MS })', sandbox);
 // Arrays/objects born inside the vm carry the vm realm's prototypes, which
@@ -381,6 +382,60 @@ test('aqiIsEstimate: unknown provenance is an estimate, not a measurement', () =
   for (const source of [null, undefined, '', 'purpleair', 'AIRNOW', 0]) {
     assert.equal(aqiIsEstimate(source), true, `source ${JSON.stringify(source)}`);
   }
+});
+
+// Both chips moved into common.js so these could exist. The previous version
+// left them in app.js/square.js behind a grep contract, and a reviewer proved
+// the grep passed while aqiChip's return dropped the marker entirely -- the
+// original bug, verbatim, with a green suite. These execute the real builders.
+
+test('aqiChipHtml: a modeled reading is marked in the VISIBLE label', () => {
+  const html = aqiChipHtml(113, 'Unhealthy', 'weather');
+  // Not merely "somewhere in the string": the marker must be in the chip's
+  // text, not only inside the title= attribute nobody hovers on a kiosk.
+  const text = html.replace(/<[^>]*>/g, '').trim();
+  assert.ok(text.includes('est.'), text);
+  assert.ok(text.includes('113'), text);
+});
+
+test('aqiChipHtml: a real monitor reading is not hedged', () => {
+  const text = aqiChipHtml(113, 'Unhealthy', 'airnow').replace(/<[^>]*>/g, '').trim();
+  assert.ok(!text.includes('est.'), text);
+  assert.ok(text.includes('113 · Unhealthy'), text);
+});
+
+test('aqiChipHtml: an unknown source is hedged in the tooltip too, not just the label', () => {
+  // The label and the hover text must not disagree. The old tooltip stated
+  // "from the weather feed" as fact for a source it had never been told.
+  const html = aqiChipHtml(113, 'Unhealthy', null);
+  assert.ok(html.includes('est.'), html);
+  assert.ok(html.includes('unknown source'), html);
+  assert.ok(!html.includes('from the weather feed —'), html);
+});
+
+test('aqiChipHtml: nothing to show when there is no AQI', () => {
+  assert.equal(aqiChipHtml(null, 'Good', 'airnow'), '');
+});
+
+test('aqiChipCompactHtml: the kiosk chip carries the same marker', () => {
+  const est = aqiChipCompactHtml(
+    { available: true, outdoor_aqi: 113, aqi_category: 'Unhealthy', aqi_source: 'weather' });
+  assert.ok(est.replace(/<[^>]*>/g, '').includes('est.'), est);
+  const real = aqiChipCompactHtml(
+    { available: true, outdoor_aqi: 113, aqi_category: 'Unhealthy', aqi_source: 'airnow' });
+  assert.ok(!real.includes('est.'), real);
+});
+
+test('aqiChipCompactHtml: hidden when unavailable or AQI-less', () => {
+  assert.equal(aqiChipCompactHtml(null), '');
+  assert.equal(aqiChipCompactHtml({ available: false, outdoor_aqi: 113 }), '');
+  assert.equal(aqiChipCompactHtml({ available: true, outdoor_aqi: null }), '');
+});
+
+test('aqiEstimateSuffix: one wording, so the two chips cannot drift apart', () => {
+  assert.equal(aqiEstimateSuffix('airnow'), '');
+  assert.equal(aqiEstimateSuffix('weather'), aqiEstimateSuffix(null));
+  assert.ok(aqiEstimateSuffix('weather').includes('est.'));
 });
 
 test('smokeBannerHtml: a modeled AQI is marked as an estimate', () => {

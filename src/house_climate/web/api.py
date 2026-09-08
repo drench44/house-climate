@@ -1,10 +1,13 @@
 import calendar
+import logging
 import re
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from .. import db
 from ..analytics import (runtime, cost, correlation, humidity, moisture, thermal,
                         precool, coupling)
+
+log = logging.getLogger("house_climate.api")
 
 _RANGES = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
 
@@ -344,15 +347,40 @@ def resolve_outdoor_aqi(conn, wx_aqi, now=None):
     AirNow value Home Assistant pushes (kv "ha_outdoor_aqi") when it's present
     and not stale, else the weather feed's wx_aqi. Shared by the humidity panel
     and the air-quality alert so both agree on which number is authoritative.
-    Returns (aqi, source) where source is "airnow" | "weather" | None."""
+    Returns (aqi, source) where source is "airnow" | "weather" | None.
+
+    The swap is not neutral: the two sources disagree in the direction that
+    matters (2026-08-31, a modeled 113 "Unhealthy" against a monitor's 85
+    "Moderate"), so every caller must carry `source` through to whatever it
+    prints. It used to happen in total silence; a REJECTED AirNow row now logs
+    at WARNING, because a monitor that has gone quiet and one that is posting
+    garbage are different problems and both used to look like an ordinary
+    fallback."""
     now = now or datetime.now(timezone.utc)
     outdoor_aqi, aqi_source = wx_aqi, ("weather" if wx_aqi is not None else None)
     _an = db.kv_get(conn, "ha_outdoor_aqi")
-    if _an is not None and isinstance(_an["value"], dict):
-        age = (now - _an["updated_at"]).total_seconds()
-        aqi_val = _an["value"].get("aqi")
-        if aqi_val is not None and age <= _AIRNOW_STALE_S:
-            outdoor_aqi, aqi_source = aqi_val, "airnow"
+    if _an is not None:
+        if not isinstance(_an["value"], dict):
+            log.warning("ha_outdoor_aqi is %s, not a dict -- ignoring it and "
+                        "falling back to the modeled weather feed",
+                        type(_an["value"]).__name__)
+        else:
+            # A negative age means a clock-skewed or future-stamped row, which
+            # `age <= _AIRNOW_STALE_S` would otherwise treat as fresh forever.
+            age = (now - _an["updated_at"]).total_seconds()
+            aqi_val = _an["value"].get("aqi")
+            if aqi_val is None:
+                log.warning("ha_outdoor_aqi carries no 'aqi' key -- falling back "
+                            "to the modeled weather feed")
+            elif age < 0:
+                log.warning("ha_outdoor_aqi is stamped %.0fs in the FUTURE "
+                            "(clock skew?) -- refusing to treat it as fresh", -age)
+            elif age > _AIRNOW_STALE_S:
+                log.warning("ha_outdoor_aqi is %.0fs old (limit %ds) -- the "
+                            "monitor has gone quiet, falling back to the modeled "
+                            "weather feed", age, _AIRNOW_STALE_S)
+            else:
+                outdoor_aqi, aqi_source = aqi_val, "airnow"
     return outdoor_aqi, aqi_source
 
 
@@ -374,7 +402,11 @@ def build_humidity(conn, device_id, cfg) -> dict:
         dew_point_delta = round(indoor_dp - outdoor_dp, 1)
 
     outdoor_aqi, aqi_source = resolve_outdoor_aqi(conn, latest.get("wx_aqi"))
-    window = humidity.window_advice(indoor_dp, outdoor_dp, outdoor_temp, outdoor_aqi=outdoor_aqi)
+    # Pass the provenance, not just the number: this verdict prints the AQI in
+    # a full sentence and issues an instruction, so it is the LAST place that
+    # should be allowed to state a modeled value as a measured one.
+    window = humidity.window_advice(indoor_dp, outdoor_dp, outdoor_temp,
+                                    outdoor_aqi=outdoor_aqi, aqi_source=aqi_source)
 
     ac_stats = humidity.avg_rh_by_state(rows)
     ac_effect = None

@@ -1885,3 +1885,62 @@ def test_gap_trend_uses_calendar_weeks_not_row_positions():
     assert api._gap_trend(fresh, today) is not None
     stale = [{"day": today - timedelta(days=i * 5), "gap": 2.0} for i in range(14)]
     assert api._gap_trend(stale, today) is None
+
+
+# --- resolve_outdoor_aqi: the swap that every provenance claim rests on ------
+# These run WITHOUT a database (db.kv_get monkeypatched), because the wire-level
+# aqi_source assertions elsewhere in this file all take the `conn` fixture and
+# therefore skip on a bare pytest run. The rule the whole branch depends on --
+# "airnow" means a real monitor, anything else means the weather feed's model
+# -- had zero executed Python coverage until these.
+
+def _resolved(monkeypatch, kv, wx_aqi=42, age_s=0):
+    now = datetime.now(timezone.utc)
+    row = None if kv is None else {"value": kv,
+                                   "updated_at": now - timedelta(seconds=age_s)}
+    monkeypatch.setattr(api.db, "kv_get", lambda conn, key: row)
+    return api.resolve_outdoor_aqi(None, wx_aqi, now=now)
+
+
+def test_resolve_prefers_a_fresh_monitor_reading(monkeypatch):
+    assert _resolved(monkeypatch, {"aqi": 85}, age_s=60) == (85, "airnow")
+
+
+def test_resolve_falls_back_to_the_model_when_the_monitor_is_stale(monkeypatch):
+    """The whole reason provenance has to travel: past the staleness line the
+    number silently becomes the weather feed's estimate."""
+    assert _resolved(monkeypatch, {"aqi": 85},
+                     age_s=api._AIRNOW_STALE_S + 1) == (42, "weather")
+
+
+def test_resolve_refuses_a_future_stamped_monitor_row(monkeypatch):
+    """A clock-skewed or future-stamped row makes `age <= limit` true forever,
+    so a wrong value would be trusted as fresh indefinitely."""
+    assert _resolved(monkeypatch, {"aqi": 85}, age_s=-3600) == (42, "weather")
+
+
+@pytest.mark.parametrize("kv", [None, {}, {"aqi": None}, 85, "85", ["85"]])
+def test_resolve_falls_back_on_a_missing_or_malformed_monitor_row(monkeypatch, kv):
+    """An HA automation that starts posting a bare number, or null, degrades the
+    house to modeled AQI. It must be REPORTED as modeled, not passed off as a
+    reading -- that mislabel is the entire bug this branch exists to fix."""
+    assert _resolved(monkeypatch, kv) == (42, "weather")
+
+
+def test_resolve_reports_no_source_when_there_is_no_number_at_all(monkeypatch):
+    """A null source must mean "no AQI", never "an AQI we forgot to vouch for"
+    -- the JS predicate treats unknown as an estimate on that understanding."""
+    assert _resolved(monkeypatch, None, wx_aqi=None) == (None, None)
+
+
+def test_resolve_logs_when_it_silently_swaps_in_the_model(monkeypatch, caplog):
+    """It used to swap in total silence, so a monitor that had been dead for a
+    week left no trace anywhere but a two-character marker on a wall kiosk."""
+    with caplog.at_level("WARNING", logger="house_climate.api"):
+        _resolved(monkeypatch, {"aqi": 85}, age_s=api._AIRNOW_STALE_S + 1)
+    assert any("gone quiet" in r.getMessage() for r in caplog.records), caplog.text
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="house_climate.api"):
+        _resolved(monkeypatch, {"aqi": 85}, age_s=60)
+    assert not caplog.records, "a healthy monitor read must not log a warning"

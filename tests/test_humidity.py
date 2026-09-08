@@ -199,3 +199,46 @@ def test_absolute_humidity_from_dew_point_matches_direct():
 def test_absolute_humidity_from_dew_point_none_when_missing():
     assert humidity.absolute_humidity_from_dew_point_gm3(None, 50) is None
     assert humidity.absolute_humidity_from_dew_point_gm3(72, None) is None
+
+
+# --- the windows verdict must say what KIND of AQI it acted on ---------------
+# resolve_outdoor_aqi silently swaps a real monitor reading for the weather
+# feed's MODEL after 30 quiet minutes, and this verdict is the most declarative
+# thing on the page: it prints the number in a full sentence AND gives an
+# order. It sits inches below a chip that now says "est."; leaving it
+# unqualified was the surface the first pass of this fix missed entirely.
+
+def _aqi_reason(source):
+    res = humidity.window_advice(indoor_dp=60, outdoor_dp=55, outdoor_temp_f=65,
+                                 outdoor_aqi=humidity.AQI_UNHEALTHY + 12,
+                                 aqi_source=source)
+    assert res["action"] == "keep_closed", res
+    return res["reason"]
+
+
+def test_window_advice_marks_a_modeled_aqi_as_estimated():
+    assert "estimated" in _aqi_reason("weather")
+
+
+def test_window_advice_does_not_hedge_a_real_monitor_reading():
+    """Non-vacuous companion: hedging every verdict would train the reader to
+    ignore the hedge."""
+    reason = _aqi_reason("airnow")
+    assert "estimated" not in reason
+    assert str(humidity.AQI_UNHEALTHY + 12) in reason
+
+
+def test_window_advice_treats_unknown_provenance_as_estimated():
+    """The dangerous default, and the one that actually fires: every caller
+    predating the argument omits it. Unknown provenance must fail toward "we
+    are not sure", never toward an unearned claim of a real reading."""
+    assert "estimated" in _aqi_reason(None)
+
+
+def test_window_advice_aqi_override_still_beats_dew_point():
+    """The mark must not change the DECISION -- this fixture is a textbook
+    "open the windows" dew-point case, and unhealthy air still overrides it."""
+    dry_and_mild = humidity.window_advice(indoor_dp=60, outdoor_dp=55,
+                                          outdoor_temp_f=65)
+    assert dry_and_mild["action"] == "open"
+    assert _aqi_reason("weather")   # same inputs + bad air -> keep_closed

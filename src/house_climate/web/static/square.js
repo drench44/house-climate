@@ -25,16 +25,8 @@ function sqStateLine(n) {
   return 'idle';
 }
 
-/* Compact outdoor AQI chip (band logic shared via aqiChipClass). */
-function sqAqi(hum) {
-  if (!hum || !hum.available || hum.outdoor_aqi == null) return '';
-  const n = Math.round(hum.outdoor_aqi);
-  const cat = hum.aqi_category ? ` ${escapeHtml(hum.aqi_category.toLowerCase())}` : '';
-  // This chip never carried provenance at all -- the kiosk's most-glanced
-  // surface was the one most able to pass a model off as a measurement.
-  const est = aqiIsEstimate(hum.aqi_source) ? ' est.' : '';
-  return `<span class="aqi num ${aqiChipClass(n)}">AQI ${n}${cat}${est}</span>`;
-}
+/* The compact AQI chip is aqiChipCompactHtml() in common.js — shared with
+   the dashboard's provenance rules and executable-tested there. */
 
 /* The humidity engine's windows verdict, one short line. The engine
    (humidity.window_advice) emits 'open' | 'keep_closed' | 'neutral' — matching
@@ -69,7 +61,7 @@ function renderHero(n, hum) {
     <div class="sq-hero-out">
       <div class="sq-big2 num">${fmtTemp(n.wx_outdoor_temp_f)}&deg;</div>
       <div class="sq-outmeta"><span class="sq-outlabel">outside</span>${cond ? ` · ${cond}` : ''}</div>
-      <div class="sq-outchips">${sqAqi(hum)}</div>
+      <div class="sq-outchips">${aqiChipCompactHtml(hum)}</div>
       <div class="sq-outmeta">${sqWindows(hum)}</div>
     </div>`;
 }

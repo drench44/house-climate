@@ -33,7 +33,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 VERSION_FILE = REPO_ROOT / "VERSION"
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.md"
 STATIC_DIR = REPO_ROOT / "src" / "house_climate" / "web" / "static"
-INDEX_HTML = STATIC_DIR / "index.html"
 # EVERY page with cache-busted assets, not just index.html. square.html and
 # moisture.html were stuck at a hand-written `?v=2` and no release ever moved
 # them, so a change to common.js shipped to the dashboard and NOT to the wall
@@ -101,7 +100,7 @@ def roll_changelog(changelog: str, new_version: str, date: str) -> str:
 
 
 def stamp_assets(html: str, version: str) -> str:
-    """Rewrite every ``?v=...`` cache-bust in index.html to ``?v=<version>``."""
+    """Rewrite every ``?v=...`` cache-bust in one page's HTML to ``?v=<version>``."""
     return _CACHE_BUST.sub(rf"\g<1>{version}", html)
 
 
@@ -179,9 +178,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             # The restore itself failed — DON'T claim a clean tree the operator
             # would trust and re-run release on top of. Say so plainly.
+            # Name the real set: after the multi-page stamping change this is
+            # VERSION, CHANGELOG and every static page, and an operator who
+            # only checks index.html would miss a modified square.html.
             print(f"release: commit failed ({e.stderr or e}) AND the restore also "
                   f"failed ({restore.stderr.strip() or restore.returncode}) — "
-                  "VERSION/CHANGELOG/index.html may still be modified and staged; "
+                  f"{', '.join(rel_paths)} may still be modified and staged; "
                   "check `git status` before re-running.", file=sys.stderr)
         return 1
 
