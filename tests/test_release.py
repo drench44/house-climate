@@ -130,11 +130,13 @@ def test_main_dry_run_writes_nothing(tmp_path, monkeypatch):
     cf = tmp_path / "CHANGELOG.md"
     cf.write_text("# Changelog\n\n## [Unreleased]\n\n### Added\n- a change\n\n"
                   "## [1.2.3] — 2026-01-01\n\n### Added\n- prior\n")
-    hf = tmp_path / "index.html"
+    static = tmp_path / "static"
+    static.mkdir()
+    hf = static / "index.html"
     hf.write_text('<link href="styles.css?v=1.2.3">\n')
     monkeypatch.setattr(release, "VERSION_FILE", vf)
     monkeypatch.setattr(release, "CHANGELOG_FILE", cf)
-    monkeypatch.setattr(release, "INDEX_HTML", hf)
+    monkeypatch.setattr(release, "STATIC_DIR", static)
     before = [f.read_bytes() for f in (vf, cf, hf)]
     rc = release.main(["patch", "--dry-run"])
     assert rc == 0, "dry-run against a releasable tree succeeds"
@@ -167,9 +169,15 @@ def _release_repo(tmp_path, monkeypatch):
     (repo / "CHANGELOG.md").write_text(
         "## [Unreleased]\n### Added\n- a shipped-this-cycle thing\n\n"
         "## [1.0.0] — 2026-08-17\n### Added\n- base\n", encoding="utf-8")
-    (repo / "src" / "house_climate" / "web" / "static" / "index.html").write_text(
+    static = repo / "src" / "house_climate" / "web" / "static"
+    (static / "index.html").write_text(
         '<link href="styles.css?v=1.0.0"><script src="app.js?v=1.0.0"></script>\n',
         encoding="utf-8")
+    # A SECOND page, stuck at the hand-written stamp that no release ever
+    # moved. This is the real 2026-09-07 bug: a change to the shared common.js
+    # reached index.html and silently never reached the wall kiosk.
+    (static / "square.html").write_text(
+        '<script src="common.js?v=2"></script>\n', encoding="utf-8")
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "T")
@@ -179,8 +187,7 @@ def _release_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "REPO_ROOT", repo)
     monkeypatch.setattr(release, "VERSION_FILE", repo / "VERSION")
     monkeypatch.setattr(release, "CHANGELOG_FILE", repo / "CHANGELOG.md")
-    monkeypatch.setattr(release, "INDEX_HTML",
-                        repo / "src" / "house_climate" / "web" / "static" / "index.html")
+    monkeypatch.setattr(release, "STATIC_DIR", static)
     return repo
 
 
@@ -197,9 +204,13 @@ def test_main_release_commits_and_tags_despite_the_pre_commit_hook(tmp_path, mon
     assert _git(repo, "tag", "--list", "v1.1.0").strip() == "v1.1.0"
     # tree is clean (everything committed, nothing half-written)
     assert _git(repo, "status", "--porcelain").strip() == ""
-    # the cache-busts were stamped to the new version
-    assert "?v=1.1.0" in (repo / "src" / "house_climate" / "web" / "static"
-                          / "index.html").read_text(encoding="utf-8")
+    # the cache-busts were stamped to the new version -- on EVERY page, not
+    # just index.html
+    static = repo / "src" / "house_climate" / "web" / "static"
+    assert "?v=1.1.0" in (static / "index.html").read_text(encoding="utf-8")
+    square = (static / "square.html").read_text(encoding="utf-8")
+    assert "?v=1.1.0" in square, "square.html was left behind at its old stamp"
+    assert "?v=2" not in square
 
 
 def test_main_refuses_when_tag_already_exists(tmp_path, monkeypatch):
