@@ -163,19 +163,8 @@ function tickClock() {
 /* the scene (hero)                                                       */
 /* ---------------------------------------------------------------------- */
 
-/* aqiChipClass() comes from common.js (shared with square.js) */
-function aqiChip(aqi, category, source) {
-  if (aqi == null) return '';
-  const n = Math.round(aqi);
-  const label = category ? `${n} · ${category}` : `${n}`;
-  const sourceText = source === 'airnow' ? 'from AirNow'
-    : source === 'weather' ? 'from the weather feed (estimate)'
-    : 'from the weather feed';
-  const tip = `Outdoor Air Quality Index (US AQI ${n}${category ? `, ${category}` : ''}) `
-    + `${sourceText} — a unitless 0–500 scale. 0–50 good, 51–100 `
-    + 'moderate, 101+ unhealthy. Above 100, keep windows shut regardless of humidity.';
-  return `<span class="aqi num ${aqiChipClass(aqi)}" title="${escapeHtml(tip)}">Outdoor AQI ${escapeHtml(label)}</span>`;
-}
+/* aqiChipHtml()/aqiChipClass() come from common.js (shared with square.js,
+   and executable-tested there — see tests/js/common.test.mjs). */
 
 function sceneEmpty() {
   root.setAttribute('data-state', 'idle');
@@ -254,7 +243,7 @@ function renderScene(n, rooms, air, humidity) {
   const aqiCat = humidity ? humidity.aqi_category : null;
   const aqiSource = humidity ? humidity.aqi_source : null;
   const smoke = smokeBannerHtml(humidity, AQI_UNHEALTHY);
-  const aqi = aqiChip(aqiVal, aqiCat, aqiSource);
+  const aqi = aqiChipHtml(aqiVal, aqiCat, aqiSource);
   document.getElementById('scene-outdoor').innerHTML =
     smoke +
     `<span class="sun" style="--solar:${solar.toFixed(2)}" aria-hidden="true"></span>` +

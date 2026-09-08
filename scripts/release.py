@@ -10,7 +10,7 @@ Steps, in order (aborting loudly on any precondition):
   2. Bump ``VERSION`` by the given SemVer part.
   3. Roll ``## [Unreleased]`` in CHANGELOG.md into ``## [x.y.z] — <today>`` and
      open a fresh empty ``[Unreleased]`` above it.
-  4. Stamp every ``?v=`` cache-bust in index.html to the new version — one
+  4. Stamp every ``?v=`` cache-bust in EVERY static page to the new version — one
      writer, one number, so the css/js busts can never drift again.
   5. ``git commit`` the three files, then ``git tag vX.Y.Z``.
 
@@ -32,7 +32,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VERSION_FILE = REPO_ROOT / "VERSION"
 CHANGELOG_FILE = REPO_ROOT / "CHANGELOG.md"
-INDEX_HTML = REPO_ROOT / "src" / "house_climate" / "web" / "static" / "index.html"
+STATIC_DIR = REPO_ROOT / "src" / "house_climate" / "web" / "static"
+# EVERY page with cache-busted assets, not just index.html. square.html and
+# moisture.html were stuck at a hand-written `?v=2` and no release ever moved
+# them, so a change to common.js shipped to the dashboard and NOT to the wall
+# kiosk -- the browser kept serving the cached file behind an unchanged URL.
+# Discovered 2026-09-07 when an AQI provenance fix would not have reached the
+# kiosk. Glob rather than list: a new page must not be able to opt out by
+# being forgotten here.
+def stamped_pages():
+    """Resolved at call time, not import time, so STATIC_DIR stays patchable
+    (the release tests run against a throwaway repo) and so a page added after
+    import is still picked up."""
+    return sorted(STATIC_DIR.glob("*.html"))
 
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 _UNRELEASED = re.compile(r"^##\s*\[Unreleased\]\s*$", re.MULTILINE | re.IGNORECASE)
@@ -88,7 +100,7 @@ def roll_changelog(changelog: str, new_version: str, date: str) -> str:
 
 
 def stamp_assets(html: str, version: str) -> str:
-    """Rewrite every ``?v=...`` cache-bust in index.html to ``?v=<version>``."""
+    """Rewrite every ``?v=...`` cache-bust in one page's HTML to ``?v=<version>``."""
     return _CACHE_BUST.sub(rf"\g<1>{version}", html)
 
 
@@ -126,7 +138,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ReleaseError(f"tag v{new} already exists — refusing to re-release")
         today = dt.date.today().isoformat()
         changelog = roll_changelog(CHANGELOG_FILE.read_text(encoding="utf-8"), new, today)
-        html = stamp_assets(INDEX_HTML.read_text(encoding="utf-8"), new)
+        pages = stamped_pages()
+        if not pages:
+            raise ReleaseError(f"no static pages found under {STATIC_DIR} to stamp")
+        stamped = {f: stamp_assets(f.read_text(encoding="utf-8"), new) for f in pages}
     except ReleaseError as e:
         print(f"release: {e}", file=sys.stderr)
         return 1
@@ -136,10 +151,12 @@ def main(argv: list[str] | None = None) -> int:
         print("release: --dry-run, nothing written")
         return 0
 
-    rel_paths = ["VERSION", "CHANGELOG.md", str(INDEX_HTML.relative_to(REPO_ROOT))]
+    rel_paths = ["VERSION", "CHANGELOG.md",
+                 *[str(f.relative_to(REPO_ROOT)) for f in stamped]]
     VERSION_FILE.write_text(new + "\n", encoding="utf-8")
     CHANGELOG_FILE.write_text(changelog, encoding="utf-8")
-    INDEX_HTML.write_text(html, encoding="utf-8")
+    for f, html in stamped.items():
+        f.write_text(html, encoding="utf-8")
 
     # Phase 1: stage + commit. If EITHER fails, the release commit did not land,
     # so restore the tree to HEAD and say so truthfully. `git checkout HEAD --`
@@ -161,9 +178,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             # The restore itself failed — DON'T claim a clean tree the operator
             # would trust and re-run release on top of. Say so plainly.
+            # Name the real set: after the multi-page stamping change this is
+            # VERSION, CHANGELOG and every static page, and an operator who
+            # only checks index.html would miss a modified square.html.
             print(f"release: commit failed ({e.stderr or e}) AND the restore also "
                   f"failed ({restore.stderr.strip() or restore.returncode}) — "
-                  "VERSION/CHANGELOG/index.html may still be modified and staged; "
+                  f"{', '.join(rel_paths)} may still be modified and staged; "
                   "check `git status` before re-running.", file=sys.stderr)
         return 1
 
