@@ -236,55 +236,78 @@ def test_app_js_has_peak_strip():
     assert "bandTierLabel(" not in src.split("function renderRail")[1][:2000]  # band label is the square tile's, not the rail's
 
 
-def test_every_page_cache_busts_at_the_current_version():
+def test_every_page_cache_busts_every_local_asset_at_the_current_version():
     """square.html and moisture.html carried a hand-written `?v=2` that no
     release ever moved, so a change to the SHARED common.js shipped to the
     dashboard and not to the wall kiosk: the HTML is no-cache and re-fetched,
     but it kept pointing at an unchanged asset URL the browser was free to
-    serve from cache. Every page must bust at the current VERSION, and
-    scripts/release.py must keep them all there."""
-    version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
+    serve from cache.
+
+    Checked per ASSET, not per page. A reviewer showed the first version of
+    this guard passed vacuously when every `?v=` was stripped from a page --
+    an asset with no cache-bust at all is the strictly worse version of the
+    bug, so absence has to fail too."""
+    version = (ROOT / "VERSION").read_text().strip()
     pages = sorted(STATIC.glob("*.html"))
     assert pages, "no static pages found -- this guard would pass vacuously"
+    local_asset = re.compile(r'(?:src|href)="([^"]+\.(?:js|css)(?:\?[^"]*)?)"')
+    checked = 0
     for page in pages:
-        stamps = set(re.findall(r"\?v=([0-9A-Za-z._-]+)", page.read_text()))
-        assert stamps <= {version}, (
-            f"{page.name} cache-busts at {sorted(stamps - {version})} but VERSION is "
-            f"{version} -- a shared-asset change would not reach this page"
-        )
+        for ref in local_asset.findall(page.read_text()):
+            if "//" in ref:          # a CDN/external URL is not ours to stamp
+                continue
+            checked += 1
+            m = re.search(r"\?v=([0-9A-Za-z._-]+)$", ref)
+            assert m, (f"{page.name} loads {ref!r} with no ?v= cache-bust -- a change "
+                       "to that asset can be served stale from the browser cache")
+            assert m.group(1) == version, (
+                f"{page.name} busts {ref!r} at {m.group(1)!r} but VERSION is {version} "
+                "-- run scripts/release.py, don't hand-edit ?v=")
+    assert checked >= len(pages), "no local assets matched -- the regex has rotted"
 
 
-def test_every_aqi_surface_marks_a_modeled_reading_visibly():
+def _strip_js_comments(src):
+    """Block and line comments out, so a grep contract cannot be satisfied by a
+    comment that merely NAMES the function it is meant to find a call to."""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return re.sub(r"(?<!:)//[^\n]*", "", src)
+
+
+def test_no_page_script_builds_its_own_aqi_label():
     """`resolve_outdoor_aqi` silently swaps a real monitor reading for the
     weather feed's MODEL after 30 quiet minutes, and the two disagree in the
     direction that matters (2026-08-31: the model read 113 "Unhealthy" against
-    a monitor's 85 "Moderate"). Every surface that prints the number has to say
-    which one it is.
+    a monitor's 85 "Moderate"). Both chips therefore live in common.js, where
+    tests/js/common.test.mjs can EXECUTE them -- the first version of this fix
+    kept them in app.js/square.js and grep-tested them, and a reviewer showed
+    the grep passed while the bug was reintroduced verbatim.
 
-    `aqiIsEstimate` is behaviour-tested in tests/js/common.test.mjs; app.js and
-    square.js run top-level DOM code so they cannot be vm-loaded, hence these
-    grep contracts. The visibility half is the point: square.js carried NO
-    provenance at all, and app.js disclosed it only in a `title` tooltip, which
-    on a wall kiosk nobody hovers is a caveat nobody reads."""
-    assert "function aqiIsEstimate" in COMMON_JS, "aqiIsEstimate left common.js"
-    for name, src in (("app.js", APP_JS), ("square.js", SQ_JS)):
-        assert f"function aqiIsEstimate" not in src, \
-            f"{name} redefines aqiIsEstimate -- single-source it in common.js"
-        assert "aqiIsEstimate(" in src, \
-            f"{name} prints an AQI without saying whether it is a measurement"
+    What is left to grep is the thing a behavioural test cannot see: that no
+    page script grows its own copy. Globbed, not listed -- the release stamper
+    one function over says "a new page must not be able to opt out by being
+    forgotten here", and the same reasoning applies to a new page printing an
+    AQI."""
+    for fn in ("aqiIsEstimate", "aqiEstimateSuffix", "aqiChipHtml",
+               "aqiChipCompactHtml"):
+        assert f"function {fn}" in COMMON_JS, f"{fn} left common.js"
 
-    # The marker must reach the VISIBLE label, not just the hover text. Both
-    # chips build a `label`/inline span; assert the estimate flag is spliced
-    # into the rendered string rather than only into the `title=` attribute.
-    for name, src, fn in (("app.js", APP_JS, "function aqiChip"),
-                          ("square.js", SQ_JS, "function sqAqi")):
-        body = src.split(fn, 1)[1][:900]
-        assert "aqiIsEstimate(" in body, f"{name}: {fn} does not consult aqiIsEstimate"
-        visible = [ln for ln in body.splitlines()
-                   if "${est}" in ln and "title=" not in ln]
-        assert visible, \
-            f"{name}: the estimate marker never reaches the visible label (tooltip-only " \
-            "disclosure is what this test exists to prevent)"
+    scripts = sorted(p for p in STATIC.glob("*.js") if p.name != "common.js")
+    assert scripts, "no page scripts found -- this guard would pass vacuously"
+    for path in scripts:
+        # Strip comments first. Without this the guard reads a "see
+        # aqiChipCompactHtml() in common.js" POINTER as proof of the call, and
+        # a mutation that replaced the real call with a bare number passed.
+        src = _strip_js_comments(path.read_text())
+        for fn in ("aqiIsEstimate", "aqiEstimateSuffix", "aqiChipHtml",
+                   "aqiChipCompactHtml"):
+            assert f"function {fn}" not in src, \
+                f"{path.name} redefines {fn} -- single-source it in common.js"
+        if "outdoor_aqi" not in src and "aqiChipClass" not in src:
+            continue
+        assert "aqiChipHtml(" in src or "aqiChipCompactHtml(" in src, (
+            f"{path.name} touches the outdoor AQI but builds its own label -- use the "
+            "shared chips so the estimate marker cannot be dropped on one page"
+        )
 
 
 def test_app_js_has_smoke_banner():
@@ -342,15 +365,6 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_version_file_is_clean_semver():
     v = (ROOT / "VERSION").read_text().strip()
     assert re.fullmatch(r"\d+\.\d+\.\d+", v), f"VERSION must be clean SemVer, got {v!r}"
-
-
-def test_every_index_cache_bust_equals_the_version():
-    version = (ROOT / "VERSION").read_text().strip()
-    busts = re.findall(r"\?v=([\w.]+)", INDEX_HTML)
-    assert busts, "index.html should carry ?v= cache-busts on its assets"
-    drifted = sorted({b for b in busts if b != version})
-    assert not drifted, (f"index.html cache-busts must all equal VERSION ({version}); "
-                         f"drifted: {drifted} — run scripts/release.py, don't hand-edit ?v=")
 
 
 def test_dunder_version_matches_the_version_file():

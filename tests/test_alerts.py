@@ -1,6 +1,8 @@
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
+import types
+
 import pytest
 
 from house_climate.config import load_config
@@ -605,16 +607,96 @@ def test_air_quality_push_treats_unknown_provenance_as_modeled():
     assert "estimated from the weather feed" in _aq_message(out)
 
 
-def test_alert_context_returns_the_aqi_source_alongside_the_value():
-    """The value and its provenance must travel together out of the context
-    helper -- returning the number alone is what let the loop print it
-    unqualified for a year."""
+def _ctx(monkeypatch, resolver):
+    """Drive _alert_context with the crawl/filter work stubbed out, so the
+    assertions are about the AQI plumbing and nothing else. Mirrors the
+    existing _alert_context tests above, which already run without a DB."""
+    import types
+    monkeypatch.setattr(alerts, "_filter_due_cache", False)
+    monkeypatch.setattr(alerts, "_filter_due_at", float("inf"))
+    monkeypatch.setattr(alerts.api, "_crawl_sensor_id", lambda cfg: (None, None))
+    monkeypatch.setattr(alerts.api, "resolve_outdoor_aqi", resolver)
+    cfg = types.SimpleNamespace(alerts={})
+    return alerts._alert_context(None, "dev", cfg,
+                                 datetime.now(timezone.utc) - timedelta(hours=3),
+                                 rows=[{"wx_aqi": 40}])
+
+
+def test_alert_context_carries_the_provenance_out_with_the_value(monkeypatch):
+    """BEHAVIOURAL, not a grep. The first version of this test string-matched
+    the return statement; a reviewer inserted `aqi_source = None` right after
+    the resolver call and the ENTIRE suite stayed green while every push --
+    real monitor readings included -- got hedged as an estimate."""
+    _crawl, _due, aqi, source = _ctx(monkeypatch, lambda *a, **k: (150, "airnow"))
+    assert (aqi, source) == (150, "airnow")
+
+
+def test_alert_context_reports_no_provenance_when_the_resolver_raises(monkeypatch):
+    """The swallow must not invent a provenance. None flows on to evaluate(),
+    which treats unknown as modeled -- the safe direction."""
+    def boom(*a, **k):
+        raise RuntimeError("kv table is on fire")
+    _crawl, _due, aqi, source = _ctx(monkeypatch, boom)
+    assert (aqi, source) == (None, None)
+
+
+def test_alert_context_does_not_blame_the_resolver_for_a_bad_rows_shape(monkeypatch):
+    """The `rows[-1]` read sits OUTSIDE the try on purpose: reporting a row-shape
+    change as "AQI resolution failed" sends the next debugger to the kv table
+    instead of to the caller that changed the rows."""
+    import types
+    monkeypatch.setattr(alerts, "_filter_due_cache", False)
+    monkeypatch.setattr(alerts, "_filter_due_at", float("inf"))
+    monkeypatch.setattr(alerts.api, "_crawl_sensor_id", lambda cfg: (None, None))
+    monkeypatch.setattr(alerts.api, "resolve_outdoor_aqi", lambda *a, **k: (1, "airnow"))
+    with pytest.raises(AttributeError):
+        alerts._alert_context(None, "dev", types.SimpleNamespace(alerts={}),
+                              datetime.now(timezone.utc), rows=["not-a-dict"])
+
+
+def test_alert_loop_passes_the_provenance_to_evaluate():
+    """No cheap behavioural substitute: alert_loop owns a live DB connection and
+    an infinite loop. Grep is the honest tool here, and it is the LAST link in
+    the chain -- everything either side of it is behaviour-tested above."""
     import inspect
-    src = inspect.getsource(alerts._alert_context)
-    assert "return crawl_rows, _filter_due_cache, outdoor_aqi, aqi_source" in src
-    loop = inspect.getsource(alerts.alert_loop)
-    assert "aqi_source=aqi_source" in loop, \
+    assert "aqi_source=aqi_source" in inspect.getsource(alerts.alert_loop), \
         "the alert loop resolves the provenance but never passes it to evaluate()"
+
+
+def test_a_provenance_flip_is_not_swallowed_by_the_cooldown():
+    """The cooldown used to key on `Alert.key` alone. Timeline: the monitor
+    reads 105 and an UNQUALIFIED push lands on the phone; the monitor then goes
+    quiet, the model says 113, and the corrected message carrying "estimated
+    from the weather feed" is dropped as a duplicate. The reader is left
+    holding the unhedged claim -- the exact failure the caveat exists to
+    prevent."""
+    sent = []
+    sink = types.SimpleNamespace(send=sent.append)
+    last_sent, cooldown = {}, timedelta(hours=1)
+    now = datetime.now(timezone.utc)
+
+    measured = alerts.Alert("air_quality", "warning", "AQI 105", variant="airnow")
+    modeled = alerts.Alert("air_quality", "warning", "AQI 113, estimated",
+                           variant="estimate")
+    alerts._dispatch(sink, [measured], last_sent, cooldown, now)
+    alerts._dispatch(sink, [modeled], last_sent, cooldown, now + timedelta(minutes=1))
+    assert [a.message for a in sent] == ["AQI 105", "AQI 113, estimated"]
+
+    # ...and the cooldown still works WITHIN one provenance, or the flip fix
+    # would just have turned the alert into a per-tick buzzer.
+    alerts._dispatch(sink, [modeled], last_sent, cooldown, now + timedelta(minutes=2))
+    assert len(sent) == 2
+
+
+def test_a_modeled_number_cannot_be_relabelled_as_a_measurement():
+    """`evaluate` falls back to the reading's own wx_aqi when the resolver gave
+    it nothing -- and that value IS the model, whatever `aqi_source` claims.
+    Provenance has to follow the branch that produced the number."""
+    rows = [_row(0)]
+    rows[-1]["wx_aqi"] = CFG.alerts["aqi_unhealthy"] + 5
+    out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"],
+                          outdoor_aqi=None, aqi_source="airnow")
+    assert "estimated from the weather feed" in _aq_message(out)
 
 
 # --- NtfySink: a non-2xx response must RAISE (the CRITICAL fix) --------------
@@ -654,19 +736,22 @@ def test_dispatch_failed_send_not_marked_and_does_not_block_others():
     sink = _Sink(fail_keys={"a"})
     last_sent = {}
     now = _BASE
-    fired = [alerts.Alert("a", "warning", "x"), alerts.Alert("b", "warning", "y")]
-    alerts._dispatch(sink, fired, last_sent, timedelta(hours=1), now)
-    assert sink.sent == ["b"]          # b still attempted despite a failing
-    assert "a" not in last_sent        # a left unsent -> retries next cycle
-    assert "b" in last_sent
+    a, b = alerts.Alert("a", "warning", "x"), alerts.Alert("b", "warning", "y")
+    alerts._dispatch(sink, [a, b], last_sent, timedelta(hours=1), now)
+    assert sink.sent == ["b"]                  # b still attempted despite a failing
+    assert a.dedupe_key not in last_sent       # a left unsent -> retries next cycle
+    assert b.dedupe_key in last_sent
 
 
 def test_dispatch_respects_cooldown():
     sink = _Sink()
     now = _BASE
-    last_sent = {"a": now}
-    alerts._dispatch(sink, [alerts.Alert("a", "warning", "x")],
-                     last_sent, timedelta(hours=1), now + timedelta(minutes=5))
+    al = alerts.Alert("a", "warning", "x")
+    # Keyed on `dedupe_key` (key + variant), not the bare key -- see
+    # test_a_provenance_flip_is_not_swallowed_by_the_cooldown for why.
+    last_sent = {al.dedupe_key: now}
+    alerts._dispatch(sink, [al], last_sent, timedelta(hours=1),
+                     now + timedelta(minutes=5))
     assert sink.sent == []             # within cooldown -> not resent
 
 

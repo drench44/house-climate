@@ -60,13 +60,27 @@ def _alert_context(conn, device_id, cfg, since, rows):
             if _filter_due_cache is None:
                 _filter_due_cache = False
 
+    # OUTSIDE the try: a bad `rows` shape is not an AQI-resolution failure, and
+    # letting it be reported as one sends the next debugger to the kv table
+    # instead of to the caller that changed the row shape.
+    wx_aqi = rows[-1].get("wx_aqi") if rows else None
     outdoor_aqi = None
     aqi_source = None
     try:
-        wx_aqi = rows[-1].get("wx_aqi") if rows else None
         outdoor_aqi, aqi_source = api.resolve_outdoor_aqi(conn, wx_aqi)
     except Exception:
-        log.exception("AQI resolution failed")
+        # Deliberately still broad: this runs in the alert loop, and an
+        # unforeseen resolver error must not take the crawl/offline/filter
+        # alerts down with it. But be honest about what the swallow costs --
+        # `evaluate` then falls back to the reading's own wx_aqi, and when the
+        # weather feed omits that (common) NO unhealthy-air push fires at all,
+        # even during a real event. The monitor going dark is separately
+        # alarmed upstream in Home Assistant, which is why this is a logged
+        # WARNING here rather than a second push that would double-buzz the
+        # same outage.
+        log.exception("AQI resolution failed; falling back to the reading's own "
+                      "wx_aqi (%s) -- an unhealthy-air push may be suppressed "
+                      "entirely if that is null", wx_aqi)
 
     return crawl_rows, _filter_due_cache, outdoor_aqi, aqi_source
 
@@ -76,6 +90,19 @@ class Alert:
     key: str
     severity: str
     message: str
+    # Extra dimension for the cooldown key, empty for almost every alert. It
+    # exists because the same `key` can carry a MATERIALLY different message:
+    # an air-quality push sourced from a real monitor and one sourced from the
+    # weather feed's model say different things, and keying the cooldown on
+    # `key` alone meant the corrected, caveated message was swallowed as a
+    # duplicate of the unqualified one already on the phone. That left the
+    # reader holding the unhedged claim -- the exact failure the caveat exists
+    # to prevent. `key` stays the stable identity everything else asserts on.
+    variant: str = ""
+
+    @property
+    def dedupe_key(self):
+        return (self.key, self.variant)
 
 
 _SUSTAINED_MAX_GAP_S = 900   # a bigger hole means the condition wasn't OBSERVED
@@ -277,6 +304,12 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
     # caller-resolved AirNow AQI (fresher, and present even when the weather
     # feed omits wx_aqi); fall back to the reading's own wx_aqi.
     aqi = outdoor_aqi if outdoor_aqi is not None else latest.get("wx_aqi")
+    # Provenance follows the branch that produced the NUMBER, not the caller's
+    # label. When the resolver gave us nothing and we fell back to the
+    # reading's own wx_aqi, that value is the weather feed's model no matter
+    # what `aqi_source` says -- so an `aqi_source="airnow"` passed alongside
+    # `outdoor_aqi=None` cannot relabel a modeled number as a measurement.
+    from_monitor = outdoor_aqi is not None and aqi_source == "airnow"
     if aqi is not None and aqi >= a.get("aqi_unhealthy", 101):
         # Say WHICH number this is. `resolve_outdoor_aqi` silently falls back
         # from the pushed monitor value to the weather feed's own model after
@@ -286,10 +319,11 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
         # outage into a confident false claim on someone's phone. When the
         # resolver could not run at all (aqi_source is None but the reading
         # carried its own wx_aqi), that is the modeled feed too.
-        est = "" if aqi_source == "airnow" else ", estimated from the weather feed, not a monitor"
+        est = "" if from_monitor else ", estimated from the weather feed, not a monitor"
         out.append(Alert("air_quality", "warning",
                           f"Outdoor air unhealthy (AQI {int(round(aqi))}{est}):"
-                          " keep windows closed, run purifiers"))
+                          " keep windows closed, run purifiers",
+                          variant="airnow" if from_monitor else "estimate"))
     if (latest.get("wx_alert_count") or 0) > 0:
         out.append(Alert("weather_alert", "warning", "Active NWS weather alert for your area"))
 
@@ -378,11 +412,11 @@ def _dispatch(sink, fired, last_sent, cooldown, now):
     alert left UNSENT — last_sent is not updated, so it retries next cycle
     instead of being suppressed — and never blocks the remaining alerts."""
     for al in fired:
-        if now - last_sent.get(al.key, _EPOCH_START) < cooldown:
+        if now - last_sent.get(al.dedupe_key, _EPOCH_START) < cooldown:
             continue
         try:
             sink.send(al)
-            last_sent[al.key] = now
+            last_sent[al.dedupe_key] = now
         except Exception:
             log.exception("failed to send alert %s; will retry", al.key)
 

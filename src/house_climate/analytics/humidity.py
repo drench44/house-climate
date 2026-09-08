@@ -139,15 +139,26 @@ def avg_rh_by_state(readings):
     }
 
 
-def window_advice(indoor_dp, outdoor_dp, outdoor_temp_f, outdoor_aqi=None):
+def window_advice(indoor_dp, outdoor_dp, outdoor_temp_f, outdoor_aqi=None,
+                  aqi_source=None):
     """Whether opening windows would help, based on dew point (not RH) —
     dew point is the moisture measure that doesn't move with temperature.
 
     Outdoor AQI, when given, is checked FIRST and overrides the dew-point
-    comparison entirely once air quality is unhealthy: smoke beats moisture."""
+    comparison entirely once air quality is unhealthy: smoke beats moisture.
+
+    `aqi_source` is that number's provenance from resolve_outdoor_aqi:
+    "airnow" (a real monitor) or anything else (the weather feed's MODEL, or
+    unknown). This verdict is the most declarative thing on the page — it
+    prints the number AND gives an order — so it has to say which kind of
+    number it acted on, exactly like the chip sitting above it. Anything but
+    an explicit monitor source is marked; an unknown provenance is not a
+    known-good one."""
     if outdoor_aqi is not None and outdoor_aqi >= AQI_UNHEALTHY:
+        est = "" if aqi_source == "airnow" else ", estimated"
         return {"action": "keep_closed",
-                "reason": f"Outdoor air is poor (AQI {int(round(outdoor_aqi))}, {aqi_category(outdoor_aqi)}) "
+                "reason": f"Outdoor air is poor (AQI {int(round(outdoor_aqi))}, "
+                          f"{aqi_category(outdoor_aqi)}{est}) "
                           "— keep windows shut and run purifiers."}
     have_both_dp = indoor_dp is not None and outdoor_dp is not None
     if (have_both_dp
