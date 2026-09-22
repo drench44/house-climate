@@ -670,7 +670,7 @@ function drawRainChart(m) {
       ? `Only ${r.wet_days || 0} wet day${(r.wet_days || 0) === 1 ? '' : 's'} on record — the correlation stays unscored until ${r.need_wet || 3}+ real rains have been observed. No verdict is better than a fake one.`
       : `Needs ${r.need_days || 10}+ overlapping days of rainfall and crawl data before scoring. Collecting.`}</p>`;
   readEl.innerHTML = lagTable + verdict +
-    `<p class="mo-foot-note">Rain source: solid bars = the house's own gauge; hollow = Open-Meteo gridded backfill (pre-station days only).</p>`;
+    `<p class="mo-foot-note">Rain source: solid bars = a full day from the rain gauge; hollow = an estimate (Open-Meteo gridded data, a forecast model, or a day the gauge only partly covered).</p>`;
 }
 
 /* ------------------------------------------------------------------ */

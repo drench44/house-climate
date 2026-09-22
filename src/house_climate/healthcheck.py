@@ -5,7 +5,11 @@ the boot loop retries forever on bad Daikin credentials and a wedged tick can
 hang — either way the container looks healthy over an empty/stale DB. This
 probe checks the heartbeat the poll loop writes each tick (kv "poller_heartbeat")
 and exits non-zero when it is missing or older than POLLER_HEARTBEAT_MAX_AGE_S,
-so Docker's restart-on-unhealthy actually fires.
+so Docker marks the container "unhealthy". That is all Docker does with it:
+plain Docker Compose never restarts an unhealthy container (restart policies
+act only when the process exits). Something outside the stack, such as an
+autoheal container or your own monitoring, has to watch the health status
+and act on it.
 
 Run as: python -m house_climate.healthcheck
 """
