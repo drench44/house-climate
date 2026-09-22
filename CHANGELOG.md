@@ -10,6 +10,8 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-22
+
 ### Added
 - Webhook heartbeat: every `relay_heartbeat_hours` (default 24, `0` = off)
   the webhook channel posts a `heartbeat` so the receiver can alarm when
