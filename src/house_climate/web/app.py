@@ -116,7 +116,10 @@ def health():
                             status_code=503)
     now = datetime.now(timezone.utc)
     try:
-        row = _db().execute("SELECT max(ts) FROM readings").fetchone()
+        # Thermostat freshness: weather-only rows (thermostat unreachable)
+        # must not make a dead thermostat look current.
+        row = _db().execute("SELECT max(ts) FROM readings"
+                            f" WHERE {db.THERMOSTAT_ROW_SQL}").fetchone()
         latest = row[0] if row else None
         checks["latest_reading_age_s"] = int((now - latest).total_seconds()) if latest else None
     except Exception:

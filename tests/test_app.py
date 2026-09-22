@@ -173,3 +173,19 @@ def test_read_endpoints_smoke_on_empty_db(conn):
                  "/api/thermal", "/api/timeline", "/api/health", "/api/backup"]:
         r = client.get(path)
         assert r.status_code == 200, f"{path}: {r.status_code} {r.text}"
+
+
+def test_health_reading_age_ignores_weather_only_rows(conn):
+    # A weather-only row (thermostat unreachable, weather kept) is not a fresh
+    # thermostat reading; /health must keep reporting the thermostat's age.
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    row = {c: None for c in db.READING_COLUMNS}
+    row.update(ts=now - timedelta(hours=2), device_id="dev1", equipment_status="idle",
+               mode="cool", indoor_temp_f=70.0, weather_ok=True)
+    db.insert_reading(conn, row)
+    wx_only = {c: None for c in db.READING_COLUMNS}
+    wx_only.update(ts=now, device_id="dev1", wx_outdoor_temp_f=60.0, weather_ok=True)
+    db.insert_reading(conn, wx_only)
+    body = client.get("/health").json()
+    assert body["checks"]["latest_reading_age_s"] >= 7000
