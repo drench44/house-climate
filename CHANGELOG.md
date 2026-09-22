@@ -10,6 +10,17 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+### Added
+- Backups keep the first dump of every month for two years
+  (`HC_KEEP_MONTHLY`), on top of the 14 dailies. Damage nobody notices for
+  two weeks used to be in every backup by the time anyone looked.
+- Each nightly dump now saves the row count of every table beside it, and
+  `house-climate-backup.sh --verify-dump latest` restores the newest real dump
+  into a throwaway container and checks those counts and the newest reading.
+  Before this, only a fresh test dump was ever restored, never the files you
+  would actually use. CI runs it, including a check that it fails on a dump
+  missing rows.
+
 ### Changed
 - The outdoor AQI now says on screen whether it is a real monitor reading or
   the weather feed's estimate. `resolve_outdoor_aqi` silently falls back to the
