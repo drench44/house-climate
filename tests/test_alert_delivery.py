@@ -310,3 +310,140 @@ def test_kv_prefix_escapes_like_wildcards(conn):
     keys = {k for k, _ in db.kv_prefix(conn, "alert_sent:")}
     assert "alert_sent:crawl_mold|" in keys
     assert "alertXsent:freeze|" not in keys
+
+
+# --- re-arm after a condition clears (2026-09-22) ---------------------------
+#
+# The cooldown stops a STANDING condition re-buzzing. It must not swallow a
+# new occurrence of something that had cleared: with a 12 h cooldown, a
+# morning event silenced any repeat that afternoon.
+
+_GRACE = timedelta(minutes=60)
+
+
+def _cycle(sink, fired, last_sent, cleared, now, cooldown=timedelta(hours=12), cfg=None):
+    alerts._rearm_cleared(fired, last_sent, cleared, _GRACE, now)
+    alerts._dispatch(sink, fired, last_sent, cooldown, now)
+
+
+def test_a_cleared_alert_pushes_again_when_it_returns():
+    sink, last, cleared = _Rec(), {}, {}
+    al = alerts.Alert("short_cycling", "warning", "x")
+    _cycle(sink, [al], last, cleared, _NOW)                          # pushes
+    _cycle(sink, [], last, cleared, _NOW + timedelta(hours=1))       # clears
+    _cycle(sink, [], last, cleared, _NOW + timedelta(hours=2))       # 60 min clear: re-armed
+    _cycle(sink, [al], last, cleared, _NOW + timedelta(hours=3))     # new occurrence
+    assert len(sink.sent) == 2
+
+
+def test_a_standing_condition_stays_quiet_inside_the_cooldown():
+    sink, last, cleared = _Rec(), {}, {}
+    al = alerts.Alert("filter_due", "warning", "x")
+    for h in range(0, 11):
+        _cycle(sink, [al], last, cleared, _NOW + timedelta(hours=h))
+    assert len(sink.sent) == 1
+
+
+def test_a_flicker_shorter_than_the_grace_does_not_rearm():
+    sink, last, cleared = _Rec(), {}, {}
+    al = alerts.Alert("crawl_condensation", "warning", "x")
+    _cycle(sink, [al], last, cleared, _NOW)
+    _cycle(sink, [], last, cleared, _NOW + timedelta(minutes=3))      # blips off
+    _cycle(sink, [al], last, cleared, _NOW + timedelta(minutes=6))    # and back
+    _cycle(sink, [], last, cleared, _NOW + timedelta(minutes=40))
+    _cycle(sink, [al], last, cleared, _NOW + timedelta(minutes=80))   # off only 40 min
+    assert len(sink.sent) == 1
+
+
+def test_a_suppressed_alert_still_counts_as_firing_for_rearm():
+    """Re-arm looks at everything evaluated, not only what was pushed, so a
+    record is never dropped just because a key is suppressed."""
+    last, cleared = {("offline", ""): _NOW}, {}
+    alerts._rearm_cleared([alerts.Alert("offline", "critical", "x")], last, cleared,
+                          _GRACE, _NOW + timedelta(hours=5))
+    assert ("offline", "") in last
+
+
+def test_rearm_clears_the_persisted_record(conn):
+    al = alerts.Alert("peak_surge", "warning", "x", variant="rearm-test")
+    alerts.record_sent(conn, al.dedupe_key, _NOW)
+    last = alerts.load_last_sent(conn)
+    cleared = {}
+    forget = lambda k: alerts.forget_sent(conn, k)
+    alerts._rearm_cleared([], last, cleared, _GRACE, _NOW, on_rearm=forget)
+    assert al.dedupe_key in alerts.load_last_sent(conn)             # grace not over
+    alerts._rearm_cleared([], last, cleared, _GRACE, _NOW + _GRACE, on_rearm=forget)
+    assert al.dedupe_key not in alerts.load_last_sent(conn)
+    assert al.dedupe_key not in last
+
+
+def test_rearm_survives_a_failing_kv_delete():
+    last, cleared = {("freeze", "frost"): _NOW}, {}
+
+    def boom(k):
+        raise RuntimeError("db down")
+    alerts._rearm_cleared([], last, cleared, _GRACE, _NOW, on_rearm=boom)
+    alerts._rearm_cleared([], last, cleared, _GRACE, _NOW + _GRACE, on_rearm=boom)
+    assert ("freeze", "frost") not in last
+
+
+# --- new events under one key -----------------------------------------------
+
+def _eval_with(**latest):
+    now = datetime.now(timezone.utc)
+    row = {"ts": now, "indoor_temp_f": 70, "indoor_humidity": 40,
+           "heat_setpoint_f": 68, "cool_setpoint_f": 76, "equipment_status": "idle",
+           "mode": "auto", "wx_outdoor_temp_f": 50, "wx_alert_count": 0,
+           "weather_ok": True}
+    row.update(latest)
+    return {a.key: a for a in alerts.evaluate([row], CFG, 0, now)}
+
+
+def test_a_colder_freeze_band_is_a_new_event():
+    frost = _eval_with(wx_outdoor_temp_f=33)["freeze"]
+    hard = _eval_with(wx_outdoor_temp_f=15)["freeze"]
+    assert frost.dedupe_key != hard.dedupe_key
+    assert hard.severity == "critical"
+    sink, last, cleared = _Rec(), {}, {}
+    _cycle(sink, [frost], last, cleared, _NOW)
+    _cycle(sink, [hard], last, cleared, _NOW + timedelta(hours=8))
+    assert [a.variant for a in sink.sent] == ["frost", "hard"]
+
+
+def test_a_second_nws_alert_is_a_new_event():
+    one = _eval_with(wx_alert_count=1)["weather_alert"]
+    two = _eval_with(wx_alert_count=2)["weather_alert"]
+    assert one.dedupe_key != two.dedupe_key
+    assert "2 active NWS weather alerts" in two.message
+
+
+# --- relay heartbeat ----------------------------------------------------------
+
+def test_heartbeat_goes_only_to_a_webhook(monkeypatch):
+    posted = []
+    monkeypatch.setattr(alerts.requests, "post",
+                        lambda url, **kw: posted.append(kw["json"]) or _Resp(200))
+    assert alerts._send_heartbeat(alerts.WebhookSink("http://hook.example/x")) is True
+    assert posted == [{"key": "heartbeat", "severity": "info",
+                       "title": "house-climate: heartbeat",
+                       "message": "house-climate alert relay heartbeat"}]
+    assert alerts._send_heartbeat(alerts.NoopSink()) is False
+
+
+def test_heartbeat_is_due_daily_and_when_unreadable(conn):
+    conn.execute("DELETE FROM kv WHERE k = 'alert_relay_heartbeat'")
+    every = timedelta(hours=24)
+    assert alerts._heartbeat_due(conn, every, _NOW)
+    from house_climate import db
+    db.kv_set(conn, "alert_relay_heartbeat", {"ts": _NOW.isoformat()})
+    assert not alerts._heartbeat_due(conn, every, _NOW + timedelta(hours=23))
+    assert alerts._heartbeat_due(conn, every, _NOW + timedelta(hours=24))
+    db.kv_set(conn, "alert_relay_heartbeat", {"garbage": 1})
+    assert alerts._heartbeat_due(conn, every, _NOW)
+
+
+@pytest.mark.parametrize("opt", ["rearm_after_clear_minutes", "relay_heartbeat_hours"])
+@pytest.mark.parametrize("bad", [0, -1, "1", True])
+def test_rearm_and_heartbeat_settings_must_be_positive(tmp_path, opt, bad):
+    with pytest.raises(ValueError, match=opt):
+        _load(tmp_path, **{opt: bad})

@@ -145,7 +145,14 @@ firewall changes, works even if the thermostat sits on an isolated IoT VLAN.
     never pushed, for alerts another system already sends you. Unknown keys
     are rejected at startup.
   - A pushed alert is not re-sent within `cooldown_minutes`, and that holds
-    across restarts and deploys.
+    across restarts and deploys. The cooldown only quiets a condition that is
+    still going: once an alert has stopped firing for
+    `rearm_after_clear_minutes` (default 60), its next occurrence pushes at
+    once. A colder freeze band and a new NWS alert count as new events.
+  - With `"webhook"`, a `{"key": "heartbeat", ...}` POST goes out every
+    `relay_heartbeat_hours` (default 24). It is not an alert: have the
+    receiver record it silently and warn you when it stops, since that is the
+    only way to know the push path still works end to end.
 
 ## Optional: per-room sensors (the hardware we run)
 

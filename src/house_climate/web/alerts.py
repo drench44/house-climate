@@ -311,12 +311,22 @@ def _thermostat_alerts(rows, cfg, now):
         outdoor_t = latest.get("daikin_outdoor_temp_f")
     freeze_at = a.get("freeze_temp_f", 34)
     if outdoor_t is not None and outdoor_t <= freeze_at:
-        out.append(Alert("freeze", "warning",
+        # The band is the variant, so a colder band is a NEW event: a 34°F
+        # frost at dawn must not hold back the push for a 15°F hard freeze
+        # that evening under the same cooldown.
+        band = "hard" if outdoor_t <= 20 else "freeze" if outdoor_t <= 28 else "frost"
+        out.append(Alert("freeze", "critical" if band == "hard" else "warning",
                          f"Freeze risk: outdoor {int(round(outdoor_t))}°F (at or below {freeze_at}°F)."
-                         " Protect pipes and unheated zones."))
+                         " Protect pipes and unheated zones.", variant=band))
 
-    if (latest.get("wx_alert_count") or 0) > 0:
-        out.append(Alert("weather_alert", "warning", "Active NWS weather alert for your area"))
+    n_wx = latest.get("wx_alert_count") or 0
+    if n_wx > 0:
+        # The count is the variant: a new NWS alert issued while an earlier
+        # one is active (a morning Wind Advisory, an afternoon Flash Flood
+        # Warning) is a new event, not a repeat of the first.
+        out.append(Alert("weather_alert", "warning",
+                         f"{n_wx} active NWS weather alert{'s' if n_wx != 1 else ''} for your area",
+                         variant=str(n_wx)))
 
     # Peak-hour surge (README's promised "peak-hour surge" alert; config key
     # peak_surge_ratio was previously read by nothing). Single-reading, like
@@ -513,6 +523,22 @@ class NoopSink:
     def send(self, alert): log.info("ALERT(noop) %s: %s", alert.key, alert.message)
 
 
+def _send_heartbeat(sink):
+    """Proof of life for the push path. A webhook receiver can answer 200
+    while doing nothing (Home Assistant does, for an unknown webhook id), so
+    the receiver stamps each heartbeat and alerts when they stop arriving.
+    Only a WebhookSink has a receiver that can do that; returns False for
+    the others."""
+    if not isinstance(sink, WebhookSink):
+        return False
+    sink.send(Alert(HEARTBEAT_KEY, "info", "house-climate alert relay heartbeat"))
+    return True
+
+
+# Not an alert: the receiver must stamp it and stay silent.
+HEARTBEAT_KEY = "heartbeat"
+
+
 def make_sink(cfg, env=None):
     """Build the configured push sink. Raises ValueError when the channel
     cannot actually deliver (webhook with no usable URL): the web app builds
@@ -543,6 +569,30 @@ def pushable(fired, cfg):
 
 
 _EPOCH_START = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _rearm_cleared(fired, last_sent, cleared_since, grace, now, on_rearm=None):
+    """Forget the send record of any alert that has stopped firing for at
+    least `grace`, so its NEXT occurrence pushes at once. The cooldown exists
+    to stop a standing condition (a filter overdue for weeks) re-buzzing; it
+    must not swallow a new occurrence of something that had cleared. The
+    grace keeps a condition flickering at its threshold from buzzing on every
+    flicker. `fired` is every alert evaluated (pushed or suppressed)."""
+    live = {al.dedupe_key for al in fired}
+    for dk in list(last_sent):
+        if dk in live:
+            cleared_since.pop(dk, None)
+            continue
+        since = cleared_since.setdefault(dk, now)
+        if now - since >= grace:
+            del last_sent[dk]
+            cleared_since.pop(dk, None)
+            if on_rearm is not None:
+                try:
+                    on_rearm(dk)
+                except Exception:
+                    log.exception("could not clear the stored send time for alert %s;"
+                                  " it stays quiet until its cooldown runs out", dk[0])
 
 
 def _dispatch(sink, fired, last_sent, cooldown, now, on_sent=None):
@@ -584,6 +634,25 @@ def _sent_kv_key(dedupe_key):
 
 def record_sent(conn, dedupe_key, ts):
     db.kv_set(conn, _sent_kv_key(dedupe_key), {"ts": ts.isoformat()})
+
+
+def forget_sent(conn, dedupe_key):
+    db.kv_delete(conn, _sent_kv_key(dedupe_key))
+
+
+_HEARTBEAT_KV = "alert_relay_heartbeat"
+
+
+def _heartbeat_due(conn, every, now):
+    """True when no heartbeat has been sent within `every`. An unreadable kv
+    reads as due: a spare heartbeat costs nothing, a missing one alarms."""
+    try:
+        row = db.kv_get(conn, _HEARTBEAT_KV)
+        last = datetime.fromisoformat(row["value"]["ts"]) if row else None
+    except Exception:
+        log.exception("could not read the last relay heartbeat; sending one")
+        return True
+    return last is None or now - last >= every
 
 
 def load_last_sent(conn):
@@ -646,7 +715,10 @@ def alert_loop(cfg, secrets):
     conn = db.connect(secrets.db_dsn)
     sink = make_sink(cfg)
     cooldown = timedelta(minutes=cfg.alerts["cooldown_minutes"])
+    grace = timedelta(minutes=cfg.alerts.get("rearm_after_clear_minutes", 60))
+    heartbeat_every = timedelta(hours=cfg.alerts.get("relay_heartbeat_hours", 24))
     last_sent = load_last_sent(conn)
+    cleared_since = {}
     while True:
         try:
             # Self-heal a dead connection (DB restart) — retrying the same
@@ -657,9 +729,17 @@ def alert_loop(cfg, secrets):
             device_id = os.environ.get("DEVICE_ID") or db.latest_device_id(conn) or "unknown"
             fired = evaluate_current(conn, device_id, cfg)
             live = conn
-            _dispatch(sink, pushable(fired, cfg), last_sent, cooldown,
-                      datetime.now(timezone.utc),
+            now = datetime.now(timezone.utc)
+            _rearm_cleared(fired, last_sent, cleared_since, grace, now,
+                           on_rearm=lambda k: forget_sent(live, k))
+            _dispatch(sink, pushable(fired, cfg), last_sent, cooldown, now,
                       on_sent=lambda k, ts: record_sent(live, k, ts))
+            if _heartbeat_due(conn, heartbeat_every, now):
+                try:
+                    if _send_heartbeat(sink):
+                        db.kv_set(conn, _HEARTBEAT_KV, {"ts": now.isoformat()})
+                except Exception:
+                    log.exception("relay heartbeat failed; will retry next cycle")
         except Exception:
             log.exception("alert loop error")
             try:
