@@ -12,6 +12,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 CFG_PATH = str(next(p for p in (_ROOT / "config.json",
                                 _ROOT / "config.example.json") if p.exists()))
 
+# A deployment config may use the webhook channel, which (correctly) refuses
+# to start without ALERT_WEBHOOK_URL. Tests import the web app, so give them a
+# URL that can never deliver anything: port 9 on loopback refuses at once.
+os.environ.setdefault("ALERT_WEBHOOK_URL", "http://127.0.0.1:9/tests-never-deliver")
+
 TEST_DSN = os.environ.get("TEST_DB_DSN")  # e.g. postgresql://climate:climate@localhost:5433/climate
 
 

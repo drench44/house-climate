@@ -174,10 +174,14 @@ def test_holiday_runtime_is_billed_with_the_weekend_bands():
     tz = ZoneInfo(TZ)
     rows = [{"ts": datetime(2026, 9, 7, 18, m, tzinfo=tz).astimezone(timezone.utc),
              "equipment_status": "cooling"} for m in (0, 10)]
-    plain = cost.compute(rows, CFG.tou, 3.0, TZ)
-    holiday_tou = dataclasses.replace(CFG.tou, holiday_rules=("labor_day",),
-                                      holiday_observed="none")
+    # CFG may be an operator's config.json with holidays of its own (the
+    # deploy runs this suite against the house config), so "plain" must
+    # explicitly have none.
+    plain_tou = dataclasses.replace(CFG.tou, holiday_rules=(), holiday_dates=frozenset(),
+                                    holiday_observed="none")
+    plain = cost.compute(rows, plain_tou, 3.0, TZ)
+    holiday_tou = dataclasses.replace(plain_tou, holiday_rules=("labor_day",))
     holiday = cost.compute(rows, holiday_tou, 3.0, TZ)
-    weekend_rate = CFG.tou.band_for(datetime(2026, 9, 5, 18, 0, tzinfo=tz))[1]
+    weekend_rate = plain_tou.band_for(datetime(2026, 9, 5, 18, 0, tzinfo=tz))[1]
     assert plain.by_band.keys() == {"peak"}
     assert holiday.total_dollars == pytest.approx(10 / 60 * 3.0 * weekend_rate)
