@@ -117,3 +117,51 @@ def test_fetch_fallback_both_unreachable_returns_null():
     s = weather.fetch("http://127.0.0.1:1/", "http://127.0.0.1:2/")
     assert s == weather._NULL
     assert s.ok is False
+
+
+# --- rainSource: only a real gauge reading may become the authoritative daily
+# total. The weather-dashboard feed sends rainSource "gauge" when rainToday is
+# the gauge's own running total, and "partial"/"model" when rainToday is a
+# forecast-model number (the gauge leg is down or only covers other fields).
+
+def test_parse_rain_source_gauge_is_trusted():
+    s = weather.parse({"temp": 60, "rainToday": 0.25, "rainSource": "gauge"})
+    assert s.rain_today_in == 0.25
+    assert s.rain_source == "gauge"
+
+
+def test_parse_rain_source_partial_and_model_are_model():
+    for src in ("partial", "model"):
+        s = weather.parse({"temp": 60, "rainToday": 0.0, "rainSource": src})
+        assert s.rain_today_in == 0.0
+        assert s.rain_source == "model", src
+
+
+def test_parse_rain_source_unknown_value_is_not_trusted():
+    # A provenance string we do not recognise must fail safe to "model".
+    s = weather.parse({"temp": 60, "rainToday": 0.1, "rainSource": "radar"})
+    assert s.rain_source == "model"
+
+
+def test_parse_rain_source_absent_keeps_old_contract():
+    # A feed that does not declare provenance at all keeps the original
+    # contract: rainToday is the station's own gauge.
+    s = weather.parse({"temp": 60, "rainToday": 0.1})
+    assert s.rain_source == "gauge"
+
+
+def test_parse_rain_source_none_without_a_rain_value():
+    s = weather.parse({"temp": 60, "rainSource": "gauge"})
+    assert s.rain_today_in is None
+    assert s.rain_source is None
+
+
+def test_parse_rain_source_unknown_value_warns(caplog):
+    import logging
+    weather._warned_rain_sources.clear()
+    with caplog.at_level(logging.WARNING, logger="house_climate.weather"):
+        weather.parse({"temp": 60, "rainToday": 0.1, "rainSource": "Gauge"})
+        weather.parse({"temp": 60, "rainToday": 0.1, "rainSource": "Gauge"})
+        weather.parse({"temp": 60, "rainToday": 0.1, "rainSource": "partial"})
+    warns = [r for r in caplog.records if "Gauge" in r.getMessage()]
+    assert len(warns) == 1   # once per value, and none for the known "partial"

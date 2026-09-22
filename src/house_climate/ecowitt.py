@@ -21,6 +21,22 @@ def _num(v):
         return None
 
 
+def _temp_f(v, unit):
+    """Parse a temperature and return it in Fahrenheit. The gateway tags each
+    temperature with its display unit; a gateway switched to metric reports
+    Celsius, which stored as-is would silently read as a cold snap. A missing
+    unit is treated as F (the gateway default, and older payloads without the
+    tag). Any other unit raises, so poll_ecowitt records a poll_error instead
+    of storing numbers in an unknown scale."""
+    t = _num(v)
+    u = str(unit).strip().upper().lstrip("\u00b0") if unit is not None else "F"
+    if u in ("F", "\u2109"):
+        return t
+    if u in ("C", "\u2103"):
+        return None if t is None else t * 9 / 5 + 32
+    raise ValueError(f"unsupported Ecowitt temperature unit {unit!r}")
+
+
 def fetch_livedata(gateway_url, timeout=6) -> dict:
     r = requests.get(f"{gateway_url.rstrip('/')}/get_livedata_info", timeout=timeout)
     r.raise_for_status()
@@ -66,9 +82,13 @@ def signal_by_sensor_id(sensors_info: list) -> dict:
 
 
 # The single outdoor T&H sensor (WH32) reports in `common_list`, keyed by
-# Ecowitt field id: 0x02 = outdoor temp, 0x07 = outdoor humidity.
+# Ecowitt field id: 0x02 = outdoor temp, 0x07 = outdoor humidity, 0x03 =
+# outdoor dew point. The GW1100 puts the sensor's battery flag on the 0x03
+# entry, not on 0x02/0x07, so all three are this sensor's own entries.
 _OUTDOOR_TEMP_ID = "0x02"
 _OUTDOOR_HUM_ID = "0x07"
+_OUTDOOR_DEWPOINT_ID = "0x03"
+_OUTDOOR_IDS = (_OUTDOOR_TEMP_ID, _OUTDOOR_HUM_ID, _OUTDOOR_DEWPOINT_ID)
 
 
 def parse_outdoor(data: dict, name: str):
@@ -78,13 +98,13 @@ def parse_outdoor(data: dict, name: str):
     battery_low = False
     for c in data.get("common_list", []):
         cid = str(c.get("id"))
-        if cid not in (_OUTDOOR_TEMP_ID, _OUTDOOR_HUM_ID):
+        if cid not in _OUTDOOR_IDS:
             continue   # battery must come from THIS sensor's entries only —
                        # any other common_list accessory reporting battery>=1
                        # would flag the crawl probe low forever
         if cid == _OUTDOOR_TEMP_ID:
-            temp = _num(c.get("val"))
-        else:
+            temp = _temp_f(c.get("val"), c.get("unit"))
+        elif cid == _OUTDOOR_HUM_ID:
             hum = _num(c.get("val"))
         batt = _num(c.get("battery"))
         if batt is not None and batt >= 1:
@@ -113,7 +133,7 @@ def parse_channels(data: dict, channels: dict) -> list[dict]:
             "channel": ch,
             "sensor_id": f"ecowitt_ch{ch}",
             "name": channels[ch],
-            "temp_f": _num(s.get("temp")),
+            "temp_f": _temp_f(s.get("temp"), s.get("unit")),
             "humidity": _num(s.get("humidity")),
             "battery_low": batt is not None and batt >= 1,
         })

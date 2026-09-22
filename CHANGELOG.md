@@ -11,6 +11,64 @@ rolls that section to a dated version via `python scripts/release.py`.
 ## [Unreleased]
 
 ### Added
+- New `"webhook"` alert channel: each alert is POSTed as JSON (key, severity,
+  title, message) to the URL in the `ALERT_WEBHOOK_URL` environment variable,
+  for example a Home Assistant webhook automation. A failed delivery is
+  retried, and a missing URL stops the web service at startup with a clear
+  message instead of alerts quietly going nowhere.
+- `alerts.push_suppress`: alert keys that are still checked and shown on the
+  wall but not pushed, for alerts another system already sends. Unknown keys
+  and unknown channels are rejected when the config loads.
+- A `crawl_sensor_offline` alert when the crawl probe stops reporting for
+  `alerts.crawl_offline_minutes` (default 45).
+- The humidity, outdoor and moisture payloads now say how old their "now"
+  values are (`age_s`, `obs_age_s`, `crawl_age_s` and friends).
+
+### Fixed
+- A monitor AQI reading stamped a few milliseconds "in the future" (the DB
+  and web app clocks differ slightly) was thrown out as suspect and the
+  modeled estimate shown instead. Up to 5 seconds of skew is now tolerated.
+- Every alert was pushed twice: the web app started two alert loops, each
+  with its own cooldown. Now there is exactly one.
+- A restart or deploy no longer re-sends every active alert. The last-sent
+  time is kept in the database; if it cannot be read, alerts still go out.
+- The wall's alert strip now uses the same data as the push alerts, so it can
+  show crawl, filter-due and monitor air-quality alerts, and the two can no
+  longer disagree.
+- A thermostat outage no longer silences the crawl-space alerts, which come
+  from a separate sensor. Only checks that read the thermostat's own data are
+  skipped while it is offline.
+- A dead crawl probe no longer keeps the mold alert firing on its last
+  readings; the crawl alerts need recent data. If the crawl readings cannot be
+  read at all, that raises an alert too instead of going quiet.
+- If the wall cannot fetch its alerts, the strip says so instead of going
+  blank (which looked like "nothing wrong").
+- The humidity panel no longer shows an old indoor reading and "open the
+  windows" advice as current when the poller has stopped; it says the data
+  is stale.
+- Outdoor freshness is measured from when the weather station took the
+  reading, not from when we fetched it, so an hour-old station report no
+  longer reads as seconds old.
+- The moisture page no longer shows a dead sensor's last dew point, or a
+  days-old crawl-to-floor gap, as "now". The dashboard's gap strip has the
+  same check.
+- When the cost summary is unavailable the cost rail says so, instead of
+  freezing the previous numbers on screen.
+- The kiosk no longer colors stale rooms, and if a price fetch fails it drops
+  the old band label once that band has ended, so "on-peak until 9pm" can't
+  outlast 9pm.
+- The cost split and tomorrow's forecast line follow the configured rate
+  bands and peak hours instead of assuming bands named peak/midpeak/offpeak
+  and a 5-9pm peak.
+- "Tomorrow" in the forecast now uses tomorrow's forecast high. It was using
+  today's. If the weather feed is down or has no forecast for tomorrow, the
+  rail says the forecast is unavailable and why.
+- Forecast peak cost no longer runs low on weekdays: days without a peak
+  window (weekends) are left out of the peak fit, and a day with no peak
+  window forecasts zero peak cost.
+
+- `house-climate-backup.sh` refuses an unknown argument. A mistyped mode used
+  to run a full nightly backup, exit 0 and look like the mode had worked.
 - Backups keep the first dump of every month for two years
   (`HC_KEEP_MONTHLY`), on top of the 14 dailies. Damage nobody notices for
   two weeks used to be in every backup by the time anyone looked.
@@ -102,6 +160,39 @@ rolls that section to a dated version via `python scripts/release.py`.
   the same hours of the day (each with at least three readings of each
   kind), instead of hot afternoons against nights, and no longer says
   cooling "pulls" RH down.
+
+- Rain from the weather feed's forecast model is no longer stored as a real
+  rain gauge total. The feed says where `rainToday` came from (`rainSource`);
+  only a gauge value can now become the day's authoritative total, and an
+  unrecognized `rainSource` is logged. A model
+  number is kept as a low-ranked placeholder that the next day's Open-Meteo
+  total replaces.
+- A day the poller stopped partway through no longer keeps its partial rain
+  total forever. The next day it is marked partial, and the Open-Meteo
+  backfill replaces it, keeping the gauge's number if it was already higher.
+  Existing partial days are healed the same way the first day after
+  upgrading. The backfill now asks for each stretch of missing days
+  separately, so one range Open-Meteo cannot serve no longer blocks the rest.
+- The "was the whole day seen" rain check now looks at the last hour that
+  actually had a gauge reading, not the last hour of any reading.
+- An internet outage no longer stops the poller from recording the local
+  Ecowitt sensors, writing its heartbeat, or logging the error. Network
+  failures talking to Daikin are now recorded as `daikin_network` poll
+  errors (which the thermostat-offline alert counts). At startup the poller
+  retries with a growing delay instead of crashing, and if Daikin is
+  unreachable but the poller already knows the thermostat, it starts polling
+  right away. A credentials error still keeps it in the retry loop, so the
+  healthcheck still flags it.
+- A thermostat outage no longer throws away the weather fetched on the same
+  tick. That weather is stored with the thermostat fields left empty; runtime,
+  cost, alerts, the 30-day chart and `/health` ignore those rows.
+- The crawl-space (outdoor slot) sensor's low-battery flag now works: the
+  gateway reports it on the dew point entry, which the parser skipped.
+- Ecowitt temperatures reported in Celsius are converted to Fahrenheit, and
+  an unknown unit is recorded as an error instead of being stored.
+- The poller healthcheck comments no longer claim Docker restarts an
+  unhealthy container. Compose only marks it unhealthy; an outside watchdog
+  has to act on it.
 - Four more display paths asserted something specific and false when they met a
   result they had no wording for, all found by reviewing the fix below:
   a metric downgraded as season-confounded printed "collecting (34+41 days,

@@ -162,6 +162,149 @@ function bandTierLabel(cost) {
            until };
 }
 
+/* ---------------------------------------------------------------------- */
+/* wall-state rules shared by app.js and square.js (tested in              */
+/* tests/js/wall_state.test.mjs)                                           */
+/* ---------------------------------------------------------------------- */
+
+/* Range colors for one Ecowitt room row. A STALE room is never colored: a
+   green "fine" on a reading from hours ago is a claim nobody measured. The
+   dashboard already cleared it; the kiosk only dimmed it. */
+function roomValueClasses(rm, heat, cool) {
+  if (!rm || rm.stale) return { t: '', h: '' };
+  const isCrawl = rm.channel === 'outdoor' || /crawl/i.test(rm.name || '');
+  return {
+    t: isCrawl ? crawlTempClass(rm.temp_f) : tempClass(rm.temp_f, heat, cool),
+    h: isCrawl ? crawlRhClass(rm.humidity) : rhClass(rm.humidity),
+  };
+}
+
+/* The cost rail's state: 'waiting' (no payload yet / fetch failed),
+   'unavailable' (the server said it cannot price today, e.g. a TOU gap) or
+   'ok'. The rail used to read cost.today.dollars unguarded, throw on an
+   unavailable payload, and leave the previous numbers frozen on screen. */
+function costRailState(cost) {
+  if (!cost) return 'waiting';
+  if (cost.available === false || !cost.today || cost.today.dollars == null) return 'unavailable';
+  return 'ok';
+}
+
+function costUnavailableHtml(cost) {
+  const why = cost && cost.reason === 'tou_gap'
+    ? 'the rate table does not cover this time'
+    : 'the server could not price today';
+  return `<span class="micro">Cost</span><p class="loading">Cost unavailable &mdash; ${escapeHtml(why)}.</p>`;
+}
+
+/* The kiosk's price-band label. A fresh payload wins. When the fetch fails,
+   the last label is kept ONLY until the band it names ends (its own
+   next_change_at): "on-peak until 9pm" must not outlast 9pm. Returns
+   { label: bandTierLabel()|null, last: the cost payload to remember }. */
+function kioskBand(cost, lastGood, nowMs) {
+  const fresh = cost && cost.available !== false ? bandTierLabel(cost) : null;
+  if (fresh) return { label: fresh, last: cost };
+  if (lastGood && lastGood.next_change_at) {
+    const end = Date.parse(lastGood.next_change_at);
+    if (Number.isFinite(end) && nowMs < end) return { label: bandTierLabel(lastGood), last: lastGood };
+  }
+  return { label: null, last: null };
+}
+
+const TIER_LABELS = { peak: 'on-peak', mid: 'mid-peak', off: 'off-peak', flat: 'flat rate' };
+const TIER_CLASSES = { peak: 'b-peak', mid: 'b-mid', off: 'b-off', flat: 'b-off' };
+
+/* Today's cost split, one row per configured band (cost.bands: today's
+   season, {name, tier, rate}), highest rate first. Built from whatever the
+   TOU config calls its bands: the old rail summed only 'peak', 'midpeak' and
+   'offpeak', so any other naming showed $0 everywhere. A row is labelled by
+   its tier unless two bands share a tier, then by its own name. A band that
+   ran today but is missing from the list (a season edge) still shows. */
+function bandSplitRows(cost) {
+  const by = (cost && cost.today && cost.today.by_band) || {};
+  const bands = (cost && Array.isArray(cost.bands)) ? cost.bands.slice() : [];
+  const seen = new Set(bands.map((b) => b.name));
+  Object.keys(by).forEach((name) => {
+    if (!seen.has(name)) bands.push({ name, tier: null, rate: -1 });
+  });
+  bands.sort((a, b) => (b.rate || 0) - (a.rate || 0));
+  const tierCount = {};
+  bands.forEach((b) => { if (b.tier) tierCount[b.tier] = (tierCount[b.tier] || 0) + 1; });
+  const dollars = (name) => (by[name] && by[name].dollars) || 0;
+  const total = bands.reduce((acc, b) => acc + dollars(b.name), 0);
+  return bands.map((b) => ({
+    name: b.name,
+    label: b.tier && tierCount[b.tier] === 1 ? TIER_LABELS[b.tier] : b.name,
+    cls: TIER_CLASSES[b.tier] || 'b-off',
+    dollars: dollars(b.name),
+    pct: total > 0 ? (dollars(b.name) / total) * 100 : 0,
+  }));
+}
+
+/* "17:00" -> "5pm", "16:30" -> "4:30pm" (config times are 24h HH:MM). */
+function fmtClockHHMM(hhmm) {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  const ap = h < 12 ? 'am' : 'pm';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return m ? `${h12}:${String(m).padStart(2, '0')}${ap}` : `${h12}${ap}`;
+}
+
+function fmtWindow(w) {
+  const s = fmtClockHHMM(w.start), e = fmtClockHHMM(w.end);
+  const sAp = s.slice(-2), eAp = e.slice(-2);
+  return `${sAp === eAp ? s.slice(0, -2) : s}&ndash;${e}`;
+}
+
+/* Tomorrow's peak line for the rail, from the forecast's own has_peak and
+   peak_windows (both derived from the TOU config for tomorrow's date), never
+   a hardcoded "5-9pm" or a band name. */
+function forecastPeakText(fc) {
+  if (!fc || fc.has_peak === false) return 'and no on-peak window tomorrow';
+  const wins = Array.isArray(fc.peak_windows) ? fc.peak_windows : [];
+  const when = wins.length ? wins.map(fmtWindow).join(' and ') : '';
+  const inWin = when ? `the ${when} peak window` : 'the peak window';
+  if (fc.predicted_peak_dollars == null) {
+    return `peak cost for ${inWin} unknown (not enough history on peak days yet)`;
+  }
+  return `<b>$${fc.predicted_peak_dollars.toFixed(2)}</b> of it in ${inWin} if nothing shifts`;
+}
+
+/* The kiosk's one-word version. */
+function forecastPeakWord(fc) {
+  if (!fc || !fc.has_peak) return 'no peak';
+  return fc.predicted_peak_dollars == null ? 'peak cost unknown' : 'in peak';
+}
+
+/* The wall's alert strip. null means the /api/anomalies fetch FAILED, which
+   must not read as "nothing is wrong": say the alerts are unavailable. */
+function alertsStripHtml(list) {
+  if (list == null) {
+    return '<div class="alert"><span class="sev">warning</span>' +
+      '<span>Alerts unavailable: could not reach the server.</span></div>';
+  }
+  if (!Array.isArray(list) || list.length === 0) return '';
+  return list.map((a) => {
+    const sev = (a.severity || 'warning').toLowerCase();
+    const crit = sev === 'critical' || sev === 'crit';
+    return `<div class="alert${crit ? ' crit' : ''}"><span class="sev">${escapeHtml(crit ? 'critical' : 'warning')}</span>` +
+      `<span>${escapeHtml(a.message || a.key || 'Alert')}</span></div>`;
+  }).join('');
+}
+
+/* One line for an unavailable forecast, by reason; '' when there is none to
+   explain (no history yet is not worth a line). */
+function forecastUnavailableText(fc) {
+  if (!fc || fc.available !== false) return '';
+  if (fc.reason === 'feed_unreachable') return 'Tomorrow: forecast unavailable (weather feed unreachable).';
+  if (fc.reason === 'no_tomorrow_forecast') return 'Tomorrow: forecast unavailable (no forecast for tomorrow yet).';
+  return '';
+}
+
+/* The humidity panel's stale line: '' while fresh. */
+function humidityStaleNote(h) {
+  if (!h || !h.stale) return '';
+  return `Stale &middot; last thermostat reading ${fmtAge(h.age_s)} old`;
+}
+
 /* Generic peak-cost guidance strip. All copy derives from rate TIERS
    (off/mid/peak/flat), never band names or fixed hours, so any utility
    works — including a one-rate (flat) utility with no peak concept at all. */

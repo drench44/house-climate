@@ -521,8 +521,12 @@ def _seed_forecast_history(conn):
         wx_aqi=32, wx_alert_count=0, weather_ok=True))
 
 
-def test_forecast_available(conn):
+def test_forecast_available(conn, monkeypatch):
     _seed_forecast_history(conn)
+    # Tomorrow's high comes from the live feed's dated daily forecast.
+    tomorrow = (datetime.now(TZ) + timedelta(days=1)).date().isoformat()
+    monkeypatch.setattr(api, "_live_feed", lambda cfg: {
+        "fcStale": False, "fcDaily": [{"date": tomorrow, "hi": 96}]})
     fc = api.build_forecast(conn, "dev1", CFG)
     assert fc["available"] is True
     assert fc["predicted_peak_dollars"] >= 0
@@ -562,8 +566,13 @@ def test_forecast_history_counts_minutes_like_the_bill(conn, monkeypatch):
     def fake_predict(fc_high, history, *a, **k):
         seen["history"] = history
         return {"predicted_cool_minutes": 0, "predicted_peak_cool_minutes": 0,
-                "predicted_peak_dollars": 0, "peak_band": "peak", "basis": "stub"}
+                "predicted_peak_dollars": 0, "peak_band": "peak", "basis": "stub",
+                "has_peak": True, "peak_windows": [], "peak_days_of_history": 0}
     monkeypatch.setattr(api.correlation, "predict_peak_cost", fake_predict)
+    # the forecast needs tomorrow's high from the live feed before it fits
+    tomorrow = (datetime.now(TZ) + timedelta(days=1)).date()
+    monkeypatch.setattr(api, "_live_feed", lambda cfg: {
+        "fcStale": False, "fcDaily": [{"date": tomorrow.isoformat(), "hi": 95}]})
     api.build_forecast(conn, "dev1", CFG)
     weekday_days = sum(1 for d in days if d.weekday() < 5)
     hist = seen["history"]
@@ -588,8 +597,10 @@ def test_humidity_unavailable_when_empty(conn):
 def _seed_humidity(conn):
     # 15 cooling + 15 idle readings (>= AC_EFFECT_MIN_SAMPLES each) with a
     # deliberate indoor/outdoor moisture gap so window guidance is non-neutral,
-    # plus a mild outdoor temp so the "open" branch is reachable.
-    base = datetime.now(timezone.utc) - timedelta(hours=5)
+    # plus a mild outdoor temp so the "open" branch is reachable. The newest
+    # row lands at "now": the panel withholds present-tense values from a
+    # reading older than _HUMIDITY_STALE_S.
+    base = datetime.now(timezone.utc) - timedelta(minutes=290)
     for i in range(30):
         db.insert_reading(conn, dict(
             ts=base + timedelta(minutes=10 * i), device_id="dev1",
@@ -723,7 +734,17 @@ def test_humidity_airnow_age_one_second_past_threshold_is_stale(conn, monkeypatc
     db.kv_set(conn, "ha_outdoor_aqi", {"aqi": 142.0})
     updated_at = conn.execute(
         "SELECT updated_at FROM kv WHERE k='ha_outdoor_aqi'").fetchone()[0]
-    _freeze_api_now(monkeypatch, updated_at + timedelta(seconds=api._AIRNOW_STALE_S + 1))
+    frozen = updated_at + timedelta(seconds=api._AIRNOW_STALE_S + 1)
+    _freeze_api_now(monkeypatch, frozen)
+    # Keep the thermostat reading fresh at the frozen instant, so the modeled
+    # wx_aqi fallback is still a present-tense value (a stale row withholds it).
+    db.insert_reading(conn, dict(
+        ts=frozen, device_id="dev1", indoor_temp_f=75, indoor_humidity=50,
+        heat_setpoint_f=68, cool_setpoint_f=72, equipment_status="idle", mode="cool",
+        daikin_outdoor_temp_f=65, daikin_outdoor_humidity=30, wx_outdoor_temp_f=65,
+        wx_humidity=30, wx_dewpoint_f=40, wx_solar_wm2=400, wx_uv=4, wx_fc_high_f=80,
+        wx_fc_low_f=55, wx_conditions="Clear", wx_aqi=20, wx_alert_count=0,
+        weather_ok=True))
 
     h = api.build_humidity(conn, "dev1", CFG)
     assert h["outdoor_aqi"] == 20
@@ -2166,6 +2187,14 @@ def test_resolve_refuses_a_future_stamped_monitor_row(monkeypatch):
     """A clock-skewed or future-stamped row makes `age <= limit` true forever,
     so a wrong value would be trusted as fresh indefinitely."""
     assert _resolved(monkeypatch, {"aqi": 85}, age_s=-3600) == (42, "weather")
+    assert _resolved(monkeypatch, {"aqi": 85}, age_s=-6) == (42, "weather")
+
+
+def test_resolve_accepts_a_row_a_few_milliseconds_in_the_future(monkeypatch):
+    """The DB stamps the row and the web app ages it; two clocks a few ms apart
+    must not turn a just-written monitor reading into the modeled estimate."""
+    assert _resolved(monkeypatch, {"aqi": 85}, age_s=-0.007) == (85, "airnow")
+    assert _resolved(monkeypatch, {"aqi": 85}, age_s=-5) == (85, "airnow")
 
 
 @pytest.mark.parametrize("kv", [None, {}, {"aqi": None}, 85, "85", ["85"]])

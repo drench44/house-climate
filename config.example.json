@@ -56,6 +56,8 @@
     "crawl_saturated_pct": 90,
     "crawl_mold_sustained_minutes": 180,
     "crawl_condensation_spread_f": 3.0,
-    "crawl_condensation_sustained_minutes": 180
+    "crawl_condensation_sustained_minutes": 180,
+    "crawl_offline_minutes": 45,
+    "push_suppress": []
   }
 }

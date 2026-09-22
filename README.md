@@ -122,9 +122,30 @@ firewall changes, works even if the thermostat sits on an isolated IoT VLAN.
   RH over `crawl_saturated_pct` (near-saturation escalation, 90% — suppresses
   the mold alert so it doesn't double-notify), and sustained air-to-dew-point
   spread under `crawl_condensation_spread_f` (3°F — liquid water on joists and
-  ducts, independent of the RH number). Set `channel` to `"ntfy"` with your
-  own topic on [ntfy.sh](https://ntfy.sh) (free push to your phone, no app
-  account), or leave `"noop"`.
+  ducts, independent of the RH number). Those crawl checks only run on recent
+  probe data: if the probe goes quiet for `crawl_offline_minutes` (default
+  45) you get a `crawl_sensor_offline` alert instead of alerts built on old
+  readings.
+- **Where alerts go** (`alerts.channel`):
+  - `"ntfy"` with your own `ntfy_topic` on [ntfy.sh](https://ntfy.sh) (free
+    push to your phone, no app account).
+  - `"webhook"` POSTs each alert as JSON,
+    `{"key": ..., "severity": ..., "title": ..., "message": ...}`, to the URL
+    in the `ALERT_WEBHOOK_URL` environment variable (put it in `.env`, never
+    in `config.json`: a webhook URL is a secret). Use it to hand alerts to,
+    for example, a Home Assistant webhook automation. A non-2xx reply counts
+    as not delivered and is retried next cycle. If the channel is `"webhook"`
+    and the variable is missing, the web service refuses to start and says
+    why. Note that Home Assistant answers a webhook call with success even
+    when no automation uses that webhook ID, so check once by hand that an
+    alert actually reaches you.
+  - `"noop"` just logs them.
+  - `alerts.push_suppress` is a list of alert keys (for example
+    `["air_quality"]`) that are still checked and still shown on the wall but
+    never pushed, for alerts another system already sends you. Unknown keys
+    are rejected at startup.
+  - A pushed alert is not re-sent within `cooldown_minutes`, and that holds
+    across restarts and deploys.
 
 ## Optional: per-room sensors (the hardware we run)
 
@@ -156,6 +177,14 @@ self-hosted almanac dashboard built on
 [**WeatherFlow_PiConsole**](https://github.com/peted-davis/WeatherFlow_PiConsole)
 with a small Open-Meteo adapter behind it. It's optional — everything else
 works without a weather source.
+
+Rainfall comes from the feed's `rainToday` (inches since local midnight). If
+the feed also sends `rainSource`, only `"gauge"` counts as a real gauge
+reading; `"partial"` or `"model"` (a forecast estimate) is kept only as a
+placeholder until Open-Meteo's total for that day replaces it. A feed with no
+`rainSource` is treated as a gauge. If the thermostat is unreachable, the
+poller still stores that tick's weather, with the thermostat fields left
+empty.
 
 ## Peak-cost guidance strip
 

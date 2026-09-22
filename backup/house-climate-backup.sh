@@ -346,6 +346,10 @@ if [ "${1:-}" = "--verify-dump" ]; then
   exit 0
 fi
 
+# Only the modes above take arguments. A typo'd or unknown flag must not fall
+# through to a full nightly run that exits 0 and looks like the mode worked.
+[ "$#" -eq 0 ] || fail "unknown argument '$1' (modes: --selftest, --restore-selftest, --verify-dump <file|latest>)"
+
 # RECOMMENDED: set HC_REQUIRE_MOUNTPOINT to a path that must be a mounted
 # filesystem (a NAS or encrypted vault) so a missing mount fails loud instead of
 # silently dumping onto the root disk — where a disk failure loses the DB volume

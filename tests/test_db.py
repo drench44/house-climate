@@ -366,3 +366,157 @@ def test_sensor_daily_stats_reports_hours_observed(conn):
                              temp_f=None, humidity=80.0, dewpoint_f=54.0)
     row = db.sensor_daily_stats(conn, "ecowitt_crawl", "UTC", since_ts=day)[0]
     assert row["ah_hours"] == 2                           # the noon reading lacks temperature
+
+# --- precip_daily precedence ladder. Only a complete day from the gauge is
+# final; everything else is a placeholder that a better value must be able to
+# replace, and a placeholder must never replace a better value.
+
+def _precip(conn, day):
+    rows = [p for p in db.precip_range(conn) if p["day"] == day]
+    return (rows[0]["inches"], rows[0]["source"]) if rows else None
+
+
+def test_upsert_precip_model_is_replaced_by_openmeteo_not_the_reverse(conn):
+    from datetime import date
+    d = date(2026, 8, 1)
+    db.upsert_precip(conn, d, 0.05, "model")
+    db.upsert_precip(conn, d, 0.40, "openmeteo")
+    assert _precip(conn, d) == (0.40, "openmeteo")
+    db.upsert_precip(conn, d, 0.05, "model")
+    assert _precip(conn, d) == (0.40, "openmeteo")
+
+
+def test_upsert_precip_partial_gauge_day_loses_to_openmeteo(conn):
+    from datetime import date
+    d = date(2026, 8, 2)
+    db.upsert_precip(conn, d, 0.10, "station_partial")
+    db.upsert_precip(conn, d, 0.50, "openmeteo")
+    assert _precip(conn, d) == (0.50, "openmeteo")
+    db.upsert_precip(conn, d, 0.10, "station_partial")
+    assert _precip(conn, d) == (0.50, "openmeteo")
+
+
+def test_upsert_precip_complete_gauge_day_beats_everything(conn):
+    from datetime import date
+    d = date(2026, 8, 3)
+    db.upsert_precip(conn, d, 0.30, "openmeteo")
+    db.upsert_precip(conn, d, 0.22, "station")
+    assert _precip(conn, d) == (0.22, "station")
+    for src in ("openmeteo", "model"):
+        db.upsert_precip(conn, d, 9.9, src)
+    assert _precip(conn, d) == (0.22, "station")
+
+
+def test_upsert_precip_gauge_rollup_can_demote_its_own_row(conn):
+    # The rollup recomputes gauge rows from raw readings. A day it stored as
+    # 'station' while the day was live, and that later turned out incomplete
+    # (the poller died partway through), must be demotable so the backfill
+    # can heal it. Before this, 'station' could never be replaced.
+    from datetime import date
+    d = date(2026, 8, 4)
+    db.upsert_precip(conn, d, 0.02, "station")
+    db.upsert_precip(conn, d, 0.02, "station_partial")
+    assert _precip(conn, d) == (0.02, "station_partial")
+
+
+def test_upsert_precip_rejects_unknown_source(conn):
+    from datetime import date
+    with pytest.raises(ValueError):
+        db.upsert_precip(conn, date(2026, 8, 5), 0.1, "guess")
+
+
+def _rain_row(ts, rain, source, **over):
+    r = _reading(ts=ts, wx_rain_today_in=rain, wx_rain_source=source)
+    r.update(over)
+    return r
+
+
+def test_outdoor_daily_separates_gauge_and_model_rain(conn):
+    day = datetime(2026, 8, 6, 0, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _rain_row(day + timedelta(hours=2), 0.10, "gauge"))
+    db.insert_reading(conn, _rain_row(day + timedelta(hours=8), 0.80, "model"))
+    got = db.outdoor_daily(conn, "dev1", "UTC", since_ts=day)[0]
+    assert got["rain_in"] == 0.10          # the model's 0.80 is not gauge rain
+    assert got["model_rain_in"] == 0.80
+
+
+def test_outdoor_daily_rain_last_hour_ignores_rows_without_gauge_rain(conn):
+    # The trust check must look at the last hour that carried a gauge value,
+    # not the last hour of any reading: rows after the gauge went quiet say
+    # nothing about the day's rain total.
+    day = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _rain_row(day + timedelta(hours=9), 0.30, "gauge"))
+    db.insert_reading(conn, _rain_row(day + timedelta(hours=22), None, None))
+    db.insert_reading(conn, _rain_row(day + timedelta(hours=23), 0.9, "model"))
+    got = db.outdoor_daily(conn, "dev1", "UTC", since_ts=day)[0]
+    assert got["rain_last_hour"] == 9
+
+
+def test_outdoor_daily_legacy_rows_without_a_source_count_as_gauge(conn):
+    # Rows stored before provenance was recorded have no source; they keep
+    # their old meaning so history does not change under the operator.
+    day = datetime(2026, 8, 8, 0, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _rain_row(day + timedelta(hours=22), 0.40, None))
+    got = db.outdoor_daily(conn, "dev1", "UTC", since_ts=day)[0]
+    assert got["rain_in"] == 0.40 and got["rain_last_hour"] == 22
+
+
+# --- weather-only rows: a tick where the thermostat call failed but the
+# weather feed answered. They keep the outdoor history but carry no
+# thermostat fields, and every thermostat consumer must not see them.
+
+def _weather_only(ts):
+    r = {c: None for c in db.READING_COLUMNS}
+    r.update(ts=ts, device_id="dev1", wx_outdoor_temp_f=55.0, wx_humidity=70.0,
+             wx_dewpoint_f=45.5, weather_ok=True)
+    return r
+
+
+def test_recent_readings_excludes_weather_only_rows(conn):
+    t = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _reading(ts=t))
+    db.insert_reading(conn, _weather_only(t + timedelta(minutes=3)))
+    rows = db.recent_readings(conn, "dev1", t - timedelta(hours=1))
+    assert [r["ts"] for r in rows] == [t]
+    # ...while the outdoor series keeps the weather it carried.
+    series = db.outdoor_series(conn, "dev1", t - timedelta(hours=1), 60)
+    assert len(series) == 2
+
+
+def test_hourly_readings_skips_hours_with_only_weather_rows(conn):
+    # An hour with no thermostat data would otherwise read as an "idle" hour
+    # (zero cool/heat/fan ticks) on the 30-day chart.
+    h = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)
+    db.insert_reading(conn, _reading(ts=h + timedelta(minutes=1)))
+    db.insert_reading(conn, _weather_only(h + timedelta(hours=1, minutes=1)))
+    conn.execute("CALL refresh_continuous_aggregate('readings_hourly', NULL, NULL)")
+    rows = db.hourly_readings(conn, "dev1", h - timedelta(hours=1))
+    assert [r["bucket"] for r in rows] == [h]
+
+
+def test_upsert_precip_openmeteo_never_undercuts_a_partial_gauge_day(conn):
+    # A partial gauge day is a measured lower bound: the gauge had already
+    # seen 0.8" before the poller died. A gridded 0.1" must not replace it
+    # with a smaller number and mark the day final.
+    from datetime import date
+    d = date(2026, 8, 12)
+    db.upsert_precip(conn, d, 0.80, "station_partial")
+    db.upsert_precip(conn, d, 0.10, "openmeteo")
+    assert _precip(conn, d) == (0.80, "openmeteo")
+
+
+def test_upsert_precip_model_cannot_replace_a_partial_gauge_day(conn):
+    from datetime import date
+    d = date(2026, 8, 13)
+    db.upsert_precip(conn, d, 0.30, "station_partial")
+    db.upsert_precip(conn, d, 0.90, "model")
+    assert _precip(conn, d) == (0.30, "station_partial")
+
+
+def test_upsert_precip_model_updates_itself(conn):
+    # Today's model estimate is rewritten every rollup and must not freeze.
+    from datetime import date
+    d = date(2026, 8, 14)
+    db.upsert_precip(conn, d, 0.10, "model")
+    db.upsert_precip(conn, d, 0.25, "model")
+    assert _precip(conn, d) == (0.25, "model")
