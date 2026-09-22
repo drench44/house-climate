@@ -659,8 +659,10 @@ def test_alert_loop_passes_the_provenance_to_evaluate():
     an infinite loop. Grep is the honest tool here, and it is the LAST link in
     the chain -- everything either side of it is behaviour-tested above."""
     import inspect
-    assert "aqi_source=aqi_source" in inspect.getsource(alerts.alert_loop), \
-        "the alert loop resolves the provenance but never passes it to evaluate()"
+    assert "aqi_source=aqi_source" in inspect.getsource(alerts.evaluate_current), \
+        "the shared evaluator resolves the provenance but never passes it to evaluate()"
+    # ...and the push loop goes through that shared evaluator, not its own copy
+    assert "evaluate_current(" in inspect.getsource(alerts.alert_loop)
 
 
 def test_a_provenance_flip_is_not_swallowed_by_the_cooldown():
@@ -817,3 +819,189 @@ def test_weather_feed_stale_quiet_when_feed_ok():
     rows = [_wx_row(m, True) for m in range(0, 45, 3)]
     out = alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"])
     assert not any(a.key == "weather_feed_stale" for a in out)
+
+
+# --- A stale THERMOSTAT must not silence the crawl (a separate sensor) -------
+
+def _stale_thermostat_now():
+    stale_after = CFG.poll_interval_s * CFG.alerts["offline_missed_polls"]
+    return _BASE + timedelta(seconds=stale_after + 3600)
+
+
+def test_stale_thermostat_still_evaluates_crawl_alerts():
+    """A Daikin cloud outage used to early-return out of evaluate(), taking the
+    Ecowitt crawl alerts down with it. The crawl probe is still reporting, so
+    its mold alert must still fire next to the offline alert."""
+    now = _stale_thermostat_now()
+    crawl = [{"ts": now - timedelta(minutes=m), "humidity": 80}
+             for m in range(0, 200, 5)][::-1]
+    out = alerts.evaluate([_row(0)], CFG, 0, now=now, crawl_rows=crawl,
+                          filter_due=True)
+    keys = {a.key for a in out}
+    assert "offline" in keys
+    assert "crawl_mold" in keys
+    assert "filter_due" in keys
+
+
+def test_stale_thermostat_skips_the_checks_built_on_its_rows():
+    """Everything read off the thermostat rows (including the weather fields
+    the poller writes into the same row) is old news once the row is stale:
+    no humidity/drift/freeze/NWS alert from a reading that is an hour old."""
+    rows = [_row(m, hum=70, indoor=80) for m in range(0, 90, 3)]
+    rows[-1] = {**rows[-1], "wx_outdoor_temp_f": 20, "wx_alert_count": 2,
+                "wx_aqi": 180}
+    fresh = {a.key for a in alerts.evaluate(rows, CFG, 0, now=rows[-1]["ts"])}
+    # non-vacuous: the same rows, evaluated fresh, DO fire all of these
+    assert {"humidity_high", "freeze", "weather_alert", "air_quality"} <= fresh
+    stale_after = CFG.poll_interval_s * CFG.alerts["offline_missed_polls"]
+    now = rows[-1]["ts"] + timedelta(seconds=stale_after + 60)
+    out = alerts.evaluate(rows, CFG, 0, now=now)
+    assert [a.key for a in out] == ["offline"]
+
+
+def test_stale_thermostat_still_reports_a_fresh_monitor_aqi():
+    """The monitor AQI comes from Home Assistant, not the thermostat row, so it
+    stays valid through a thermostat outage. A modeled value that came off the
+    stale row does not."""
+    now = _stale_thermostat_now()
+    out = alerts.evaluate([_row(0)], CFG, 0, now=now, outdoor_aqi=180,
+                          aqi_source="airnow")
+    assert "air_quality" in {a.key for a in out}
+    out = alerts.evaluate([_row(0)], CFG, 0, now=now, outdoor_aqi=180,
+                          aqi_source="weather")
+    assert "air_quality" not in {a.key for a in out}
+
+
+def test_no_thermostat_rows_at_all_still_evaluates_crawl():
+    now = _BASE + timedelta(hours=4)
+    crawl = [{"ts": now - timedelta(minutes=m), "humidity": 80}
+             for m in range(0, 200, 5)][::-1]
+    keys = {a.key for a in alerts.evaluate([], CFG, 0, now=now, crawl_rows=crawl)}
+    assert {"offline", "crawl_mold"} <= keys
+
+
+# --- Crawl-sensor freshness ---------------------------------------------------
+
+def _crawl_ending(end, hum=80, span_min=200):
+    return [{"ts": end - timedelta(minutes=m), "humidity": hum,
+             "temp_f": 60.0, "dewpoint_f": 58.5}
+            for m in range(0, span_min, 5)][::-1]
+
+
+def test_dead_crawl_probe_does_not_keep_the_mold_alert_alive():
+    """A probe that died at 80% RH used to keep the mold alert firing on its
+    last readings for hours. Old data is not a current condition."""
+    now = _BASE + timedelta(hours=6)
+    crawl = _crawl_ending(now - timedelta(hours=2))     # probe silent for 2h
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    keys = {a.key for a in out}
+    assert not keys & {"crawl_mold", "crawl_saturated", "crawl_condensation"}
+    assert "crawl_sensor_offline" in keys
+
+
+def test_crawl_sensor_offline_when_configured_but_no_rows_in_window():
+    now = _BASE
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=[])
+    assert "crawl_sensor_offline" in {a.key for a in out}
+
+
+def test_crawl_sensor_offline_quiet_when_not_configured():
+    now = _BASE
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=None)
+    assert "crawl_sensor_offline" not in {a.key for a in out}
+
+
+def test_crawl_sensor_offline_quiet_when_fresh():
+    now = _BASE + timedelta(hours=6)
+    crawl = _crawl_ending(now - timedelta(minutes=5), hum=50)
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert "crawl_sensor_offline" not in {a.key for a in out}
+
+
+def test_crawl_offline_threshold_default_is_45_minutes():
+    now = _BASE + timedelta(hours=6)
+    fresh = _crawl_ending(now - timedelta(minutes=44), hum=50)
+    old = _crawl_ending(now - timedelta(minutes=46), hum=50)
+    assert "crawl_sensor_offline" not in {
+        a.key for a in alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=fresh)}
+    assert "crawl_sensor_offline" in {
+        a.key for a in alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=old)}
+
+
+def test_crawl_offline_threshold_is_configurable():
+    cfg = types.SimpleNamespace(**{**CFG.__dict__,
+                                   "alerts": {**CFG.alerts, "crawl_offline_minutes": 120}})
+    now = _BASE + timedelta(hours=6)
+    crawl = _crawl_ending(now - timedelta(minutes=90), hum=50)
+    out = alerts.evaluate([_fresh_row(now)], cfg, 0, now=now, crawl_rows=crawl)
+    assert "crawl_sensor_offline" not in {a.key for a in out}
+
+
+def test_crawl_offline_message_says_how_long():
+    now = _BASE + timedelta(hours=6)
+    crawl = _crawl_ending(now - timedelta(hours=2), hum=50)
+    msg = next(a.message for a in alerts.evaluate([_fresh_row(now)], CFG, 0, now=now,
+                                                   crawl_rows=crawl)
+               if a.key == "crawl_sensor_offline")
+    assert "2h" in msg or "120" in msg
+
+
+# --- One context for the wall strip AND the push loop ------------------------
+
+def test_evaluate_current_passes_every_piece_of_context(monkeypatch):
+    """/api/anomalies used to call evaluate() with no crawl rows, no filter flag
+    and no resolved AQI, so the wall could never show those alerts. Both paths
+    now go through evaluate_current; this pins that it forwards everything."""
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(alerts.db, "recent_readings", lambda *a, **k: [_fresh_row(now)])
+    monkeypatch.setattr(alerts, "_poll_errors_recent", lambda conn: 0)
+    crawl = [{"ts": now - timedelta(minutes=m), "humidity": 95}
+             for m in range(0, 200, 5)][::-1]
+    monkeypatch.setattr(alerts, "_alert_context",
+                        lambda *a, **k: (crawl, True, 180, "airnow"))
+    keys = {a.key for a in alerts.evaluate_current(None, "dev", CFG)}
+    assert {"crawl_saturated", "filter_due", "air_quality"} <= keys
+
+
+
+def test_crawl_fetch_failure_raises_an_alert_not_silence(monkeypatch):
+    """A crawl probe that IS configured but whose rows could not be fetched used
+    to look exactly like 'no crawl probe': every crawl alert vanished quietly."""
+    monkeypatch.setattr(alerts, "_filter_due_cache", False)
+    monkeypatch.setattr(alerts, "_filter_due_at", float("inf"))
+    monkeypatch.setattr(alerts.api, "_crawl_sensor_id", lambda cfg: ("ecowitt_ch1", "crawl"))
+    monkeypatch.setattr(alerts.api, "resolve_outdoor_aqi", lambda *a, **k: (None, None))
+
+    def boom(*a, **k):
+        raise RuntimeError("db hiccup")
+    monkeypatch.setattr(alerts.db, "sensor_readings_range", boom)
+    now = datetime.now(timezone.utc)
+    crawl, *_ = alerts._alert_context(None, "dev", CFG, now - timedelta(hours=3), rows=[])
+    assert crawl is alerts.CRAWL_FETCH_FAILED
+    out = alerts.evaluate([_fresh_row(now)], CFG, 0, now=now, crawl_rows=crawl)
+    assert "crawl_sensor_offline" in {a.key for a in out}
+
+
+def test_crawl_fetch_window_covers_a_long_offline_threshold(monkeypatch):
+    monkeypatch.setattr(alerts, "_filter_due_cache", False)
+    monkeypatch.setattr(alerts, "_filter_due_at", float("inf"))
+    monkeypatch.setattr(alerts.api, "_crawl_sensor_id", lambda cfg: ("ecowitt_ch1", "crawl"))
+    monkeypatch.setattr(alerts.api, "resolve_outdoor_aqi", lambda *a, **k: (None, None))
+    got = {}
+    monkeypatch.setattr(alerts.db, "sensor_readings_range",
+                        lambda c, sid, since: got.setdefault("since", since) and [])
+    cfg = types.SimpleNamespace(alerts={"crawl_offline_minutes": 900})
+    now = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
+    alerts._alert_context(None, "dev", cfg, now, rows=[], now=now)
+    assert (now - got["since"]) >= timedelta(minutes=900)
+
+
+def test_evaluate_current_survives_a_failed_poll_error_count(monkeypatch):
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(alerts.db, "recent_readings", lambda *a, **k: [_fresh_row(now)])
+    monkeypatch.setattr(alerts, "_alert_context", lambda *a, **k: (None, True, None, None))
+
+    class BadConn:
+        def execute(self, *a, **k):
+            raise RuntimeError("poll_errors unreadable")
+    assert "filter_due" in {a.key for a in alerts.evaluate_current(BadConn(), "dev", CFG)}

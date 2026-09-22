@@ -74,8 +74,9 @@ function sqRoomRow(rm, heat, cool, air) {
     return `<div class="sq-room"><span class="sq-rname">${name}</span>` +
       `<span class="sq-rval dim">&mdash;</span><span class="sq-rval dim">&mdash;</span>${pm}</div>`;
   }
-  const tCls = isCrawl ? crawlTempClass(rm.temp_f) : tempClass(rm.temp_f, heat, cool);
-  const hCls = isCrawl ? crawlRhClass(rm.humidity) : rhClass(rm.humidity);
+  // Stale rooms get no range color (same rule as the dashboard): a green
+  // "fine" on an hours-old reading is a claim nobody measured.
+  const { t: tCls, h: hCls } = roomValueClasses(rm, heat, cool);
   return `<div class="sq-room${isCrawl ? ' sq-crawl' : ''}${rm.stale ? ' is-stale' : ''}">` +
     `<span class="sq-rname">${name}</span>` +
     `<span class="sq-rval num ${tCls}">${fmtTemp(rm.temp_f)}&deg;</span>` +
@@ -96,23 +97,34 @@ function renderRooms(n, rooms, air) {
 function renderStats(cost, forecast) {
   const el = document.getElementById('sq-stats');
   const parts = [];
-  if (cost && cost.today && cost.today.dollars != null) {
+  if (costRailState(cost) === 'ok') {
     parts.push(`<span>AC today so far $${cost.today.dollars.toFixed(2)} · ${Math.round(cost.today.kwh)} kWh</span>`);
   }
   if (forecast && forecast.available && forecast.fc_high_f != null) {
-    const pk = (forecast.predicted_peak_dollars || 0).toFixed(2);
-    const band = forecast.peak_band === 'peak' ? 'in peak' : 'wknd';
-    parts.push(`<span>tomorrow ${Math.round(forecast.fc_high_f)}° · ~$${pk} ${band}</span>`);
+    // has_peak comes from the TOU config for tomorrow's date, not a band name.
+    const pk = forecast.has_peak && forecast.predicted_peak_dollars != null
+      ? ` · ~$${forecast.predicted_peak_dollars.toFixed(2)}` : '';
+    parts.push(`<span>tomorrow ${Math.round(forecast.fc_high_f)}°${pk} ${forecastPeakWord(forecast)}</span>`);
   }
   el.innerHTML = parts.join('');
 }
 
+/* The last cost payload that produced a band label. A failed fetch keeps it
+   only until the band it names ends (kioskBand, common.js): the old code kept
+   the label forever, so "on-peak until 9pm" could outlast 9pm. */
+let lastBandCost = null;
+
 function renderBand(cost) {
-  const b = bandTierLabel(cost);
-  if (!b) return;   // no cost/tier yet: keep the last label, don't blank or lie
+  const r = kioskBand(cost, lastBandCost, Date.now());
+  lastBandCost = r.last;
   const el = document.getElementById('sq-band');
-  el.className = `sq-band num ${b.cls}`;
-  el.textContent = `${b.name}${b.until}`;
+  if (!r.label) {
+    el.className = 'sq-band num dim';
+    el.textContent = 'rate unknown';
+    return;
+  }
+  el.className = `sq-band num ${r.label.cls}`;
+  el.textContent = `${r.label.name}${r.label.until}`;
 }
 
 function tickSqClock() {

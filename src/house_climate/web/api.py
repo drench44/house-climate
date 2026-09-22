@@ -1,8 +1,12 @@
 import calendar
 import logging
 import re
+import time
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+
+import requests
+
 from .. import db
 from ..analytics import (runtime, cost, correlation, humidity, moisture, thermal,
                         precool, coupling)
@@ -83,6 +87,82 @@ def _peak_mid_weekday_rates(cfg):
     if len(rates) < 2:
         return None, None
     return rates[-1], rates[-2]
+
+
+# --- live weather feed (read-side) -------------------------------------------
+# The poller stores a snapshot of a few feed fields per reading. Two questions
+# that snapshot cannot answer are read straight off the live feed instead:
+# tomorrow's forecast high (the stored fcHigh is TODAY's) and how old the
+# station observation behind the stored outdoor reading is. Cached briefly so
+# a dashboard refresh never costs more than one small LAN fetch a minute.
+_FEED_TTL_S = 60
+_FEED_TIMEOUT_S = 3
+_feed_cache = {"at": None, "body": None}
+
+
+def _live_feed(cfg):
+    """The weather feed's current JSON body (primary URL, then the fallback),
+    or None when neither answers with a JSON object. Callers must treat None
+    as 'unknown', never substitute a stored value that means something else."""
+    now_mono = time.monotonic()
+    if _feed_cache["at"] is not None and now_mono - _feed_cache["at"] < _FEED_TTL_S:
+        return _feed_cache["body"]
+    body = None
+    for url in (cfg.weather_url, cfg.weather_url_fallback):
+        if not url:
+            continue
+        try:
+            r = requests.get(url, timeout=_FEED_TIMEOUT_S)
+            if not r.ok:
+                continue
+            d = r.json()
+        except (requests.RequestException, ValueError):
+            continue
+        if isinstance(d, dict):
+            body = d
+            break
+    if body is None:
+        log.warning("weather feed unreachable for a read-side lookup "
+                    "(forecast high / observation age); reporting unknown")
+    _feed_cache["at"], _feed_cache["body"] = now_mono, body
+    return body
+
+
+def _feed_num(v):
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _forecast_high_for(feed, day):
+    """The feed's forecast high for local calendar `day`, or None.
+
+    Prefers a daily row that carries an explicit ISO `date` (fcDaily, or a
+    dailyForecast row that has one); falls back to dailyForecast's short
+    weekday label ('Wed') only when exactly one row carries it. Refuses a
+    forecast the feed itself marks stale. Never falls back to fcHigh, which is
+    TODAY's forecast high."""
+    if not isinstance(feed, dict) or feed.get("fcStale") is True:
+        return None
+    iso = day.isoformat()
+    for key in ("fcDaily", "dailyForecast"):
+        rows = feed.get(key)
+        if not isinstance(rows, list):
+            continue
+        for r in rows:
+            if isinstance(r, dict) and r.get("date") == iso:
+                return _feed_num(r.get("hi"))
+    rows = feed.get("dailyForecast")
+    if isinstance(rows, list):
+        label = day.strftime("%a").lower()
+        hits = [r for r in rows if isinstance(r, dict) and "date" not in r
+                and str(r.get("day", "")).strip().lower()[:3] == label]
+        if len(hits) == 1:
+            return _feed_num(hits[0].get("hi"))
+    return None
 
 
 _BACKUP_STALE_S = 108000   # 30h: past the nightly run + its randomized delay,
@@ -185,6 +265,19 @@ def build_cost_summary(conn, device_id, cfg, now=None) -> dict:
         # /api/cost/summary, which shares one fetch batch with the rest of the
         # dashboard (same reasoning build_precool_advice documents).
         return {"available": False, "reason": "tou_gap", "detail": str(e)}
+
+
+def _season_bands(cfg, now_local, tier):
+    """One {name, tier, rate} per band name in now_local's season, highest
+    rate first. A name repeated across day-types (weekday/weekend) at the same
+    rate is listed once, at its highest rate."""
+    season = cfg.tou.season(now_local.month)
+    best = {}
+    for b in cfg.tou.bands:
+        if b.season == season and (b.name not in best or b.rate > best[b.name]):
+            best[b.name] = b.rate
+    return [{"name": n, "tier": tier(r), "rate": r}
+            for n, r in sorted(best.items(), key=lambda kv: -kv[1])]
 
 
 def _cost_summary_impl(conn, device_id, cfg, now=None) -> dict:
@@ -315,6 +408,10 @@ def _cost_summary_impl(conn, device_id, cfg, now=None) -> dict:
         "live_rate_per_hr": live_rate_per_hr,
         "rate_now": rate_now,
         "tier_now": _tier(rate_now),
+        # Today's season's bands as {name, tier, rate}, highest rate first:
+        # the rail's cost split is built from these, so it follows whatever the
+        # TOU config calls its bands instead of assuming peak/midpeak/offpeak.
+        "bands": _season_bands(cfg, now_local, _tier),
         "next_band": next_band,
         "next_rate": next_rate,
         "next_tier": _tier(next_rate) if next_rate is not None else None,
@@ -340,6 +437,10 @@ def _cost_summary_impl(conn, device_id, cfg, now=None) -> dict:
 
 
 _AIRNOW_STALE_S = 1800   # AirNow is hourly + HA heartbeats every 5 min; 30 min silent = feed dead
+# The row is stamped by the DB's clock and aged by the web app's. They can
+# differ by milliseconds (a DB in another container or on another host), so a
+# row a hair "in the future" is just-written, not suspect. Beyond this, it is.
+_CLOCK_SKEW_S = 5
 
 
 def resolve_outdoor_aqi(conn, wx_aqi, now=None):
@@ -372,7 +473,7 @@ def resolve_outdoor_aqi(conn, wx_aqi, now=None):
             if aqi_val is None:
                 log.warning("ha_outdoor_aqi carries no 'aqi' key -- falling back "
                             "to the modeled weather feed")
-            elif age < 0:
+            elif age < -_CLOCK_SKEW_S:
                 log.warning("ha_outdoor_aqi is stamped %.0fs in the FUTURE "
                             "(clock skew?) -- refusing to treat it as fresh", -age)
             elif age > _AIRNOW_STALE_S:
@@ -384,6 +485,12 @@ def resolve_outdoor_aqi(conn, wx_aqi, now=None):
     return outdoor_aqi, aqi_source
 
 
+# The humidity panel's "now" numbers come from the newest thermostat row of a
+# 7-day window. Past this age (build_now's 600s rule) they are history, not
+# current conditions.
+_HUMIDITY_STALE_S = 600
+
+
 def build_humidity(conn, device_id, cfg) -> dict:
     now = datetime.now(timezone.utc)
     rows = db.recent_readings(conn, device_id, now - timedelta(days=7))
@@ -391,22 +498,36 @@ def build_humidity(conn, device_id, cfg) -> dict:
         return {"available": False}
 
     latest = rows[-1]
-    indoor_rh = latest.get("indoor_humidity")
-    indoor_dp = humidity.dew_point_f(latest.get("indoor_temp_f"), indoor_rh)
-    outdoor_dp = latest.get("wx_dewpoint_f")
-    outdoor_rh = latest.get("wx_humidity")
-    outdoor_temp = latest.get("wx_outdoor_temp_f")
+    age_s = (now - latest["ts"]).total_seconds()
+    stale = age_s > _HUMIDITY_STALE_S
+    if stale:
+        # A dead poller used to leave the last indoor humidity and the "open
+        # the windows" advice on screen as current, for up to a week. Withhold
+        # every present-tense value (and the advice built on them); the trend
+        # below is honest history and stays.
+        indoor_rh = indoor_dp = outdoor_dp = outdoor_rh = outdoor_temp = None
+    else:
+        indoor_rh = latest.get("indoor_humidity")
+        indoor_dp = humidity.dew_point_f(latest.get("indoor_temp_f"), indoor_rh)
+        outdoor_dp = latest.get("wx_dewpoint_f")
+        outdoor_rh = latest.get("wx_humidity")
+        outdoor_temp = latest.get("wx_outdoor_temp_f")
 
     dew_point_delta = None
     if indoor_dp is not None and outdoor_dp is not None:
         dew_point_delta = round(indoor_dp - outdoor_dp, 1)
 
-    outdoor_aqi, aqi_source = resolve_outdoor_aqi(conn, latest.get("wx_aqi"))
+    # A fresh monitor AQI (pushed by Home Assistant) is independent of the
+    # thermostat row and survives its staleness; the row's modeled wx_aqi
+    # does not.
+    outdoor_aqi, aqi_source = resolve_outdoor_aqi(
+        conn, None if stale else latest.get("wx_aqi"))
     # Pass the provenance, not just the number: this verdict prints the AQI in
     # a full sentence and issues an instruction, so it is the LAST place that
     # should be allowed to state a modeled value as a measured one.
-    window = humidity.window_advice(indoor_dp, outdoor_dp, outdoor_temp,
-                                    outdoor_aqi=outdoor_aqi, aqi_source=aqi_source)
+    window = None if stale else humidity.window_advice(
+        indoor_dp, outdoor_dp, outdoor_temp,
+        outdoor_aqi=outdoor_aqi, aqi_source=aqi_source)
 
     ac_stats = humidity.avg_rh_by_state(rows)
     ac_effect = None
@@ -435,6 +556,8 @@ def build_humidity(conn, device_id, cfg) -> dict:
 
     return {
         "available": True,
+        "age_s": int(age_s),
+        "stale": stale,
         "indoor_rh": indoor_rh,
         "indoor_dp": round(indoor_dp, 1) if indoor_dp is not None else None,
         "outdoor_dp": outdoor_dp,
@@ -605,6 +728,12 @@ _CRAWL_TREND_WINDOW_H = 3   # "rising/falling" compares the last 3h vs the 3h be
 # serving nulls under a reassuring stale:false.
 _OUTDOOR_STALE_S = 600
 
+# How old the STATION OBSERVATION behind the outdoor reading may be. Our poll
+# can be seconds old while the reading it copied is an hour old: an hourly
+# airport station is normally 0-60 min behind, so 90 min (the feed's own
+# station-silence cutoff) means a report was missed.
+_OUTDOOR_OBS_STALE_S = 5400
+
 # Display bucket per range, mirroring _CRAWL_BUCKETS_S: keep the /api/outdoor
 # chart ~100-250 points at any range instead of 720 raw hourly points at 30d.
 # Coverage still counts fixed hourly buckets (outdoor_hourly), independent of
@@ -612,7 +741,7 @@ _OUTDOOR_STALE_S = 600
 _OUTDOOR_BUCKETS_S = {"24h": 900, "7d": 3600, "30d": 3 * 3600}
 
 
-def build_outdoor(conn, device_id, range_key, now=None) -> dict:
+def build_outdoor(conn, device_id, range_key, now=None, cfg=None) -> dict:
     """Outdoor conditions over the trailing window — the counterpart to
     build_crawl for the air the crawl trades moisture with. Current reading,
     exact temp/RH/dew-point extremes, a range-bucketed series, and a per-field
@@ -642,7 +771,16 @@ def build_outdoor(conn, device_id, range_key, now=None) -> dict:
     # so a weather-feed outage (poller alive, wx_* null) reads as stale rather
     # than serving nulls behind a reassuring stale:false.
     latest = wx_rows[-1]
-    age_s = (now - latest["ts"]).total_seconds()
+    poll_age_s = (now - latest["ts"]).total_seconds()
+    obs_age_s, obs_source, feed_stale = _outdoor_observation_age(
+        _live_feed(cfg) if cfg is not None else None, now)
+    # The headline age is the older of the two: a reading can be no fresher
+    # than the station report it was copied from. The live feed's observation
+    # can only be as new as, or newer than, the one we stored, so this errs
+    # young by at most one poll interval, never old.
+    age_s = max(poll_age_s, obs_age_s) if obs_age_s is not None else poll_age_s
+    stale = (poll_age_s > _OUTDOOR_STALE_S or feed_stale
+             or (obs_age_s is not None and obs_age_s > _OUTDOOR_OBS_STALE_S))
     aqi, aqi_source = resolve_outdoor_aqi(conn, latest.get("wx_aqi"), now)
     window_h = _RANGES[range_key].total_seconds() / 3600
 
@@ -665,7 +803,13 @@ def build_outdoor(conn, device_id, range_key, now=None) -> dict:
             "aqi": aqi,
             "aqi_source": aqi_source,
             "age_s": int(age_s),
-            "stale": age_s > _OUTDOOR_STALE_S,
+            "poll_age_s": int(poll_age_s),
+            "obs_age_s": int(obs_age_s) if obs_age_s is not None else None,
+            "obs_source": obs_source,
+            # False when the live feed could not say how old the observation
+            # is: age_s is then only our poll age, a lower bound.
+            "obs_age_known": obs_age_s is not None,
+            "stale": stale,
             "weather_ok": latest.get("weather_ok"),
         },
         "temp": _extremes(wx_rows, "wx_outdoor_temp_f"),
@@ -677,6 +821,36 @@ def build_outdoor(conn, device_id, range_key, now=None) -> dict:
         "data_start": (db.first_weather_ts(conn, device_id) or wx_rows[0]["ts"]).isoformat(),
         "series": series,
     }
+
+
+def _outdoor_observation_age(feed, now):
+    """(obs_age_s, obs_source, feed_stale) from the live feed, or
+    (None, None, False) when the feed is unavailable.
+
+    When the feed reports station fields (obsFields), the age is that station
+    report's, from its own epoch (obsTs). When it reports none, the readings
+    are model fills and the age is the feed's own weather age, labelled
+    "model". feed_stale is the feed's own weatherStale verdict."""
+    if not isinstance(feed, dict):
+        return None, None, False
+    feed_stale = feed.get("weatherStale") is True
+    now_epoch = now.timestamp()
+    fields = feed.get("obsFields")
+    obs_ts = _feed_num(feed.get("obsTs"))
+    feed_ts = _feed_num(feed.get("ts"))
+    if isinstance(fields, list) and fields:
+        src = feed.get("obsSource")
+        src = src if isinstance(src, str) else "station"
+        if obs_ts is not None:
+            return max(0.0, now_epoch - obs_ts), src, feed_stale
+        obs_age = _feed_num(feed.get("obsAgeSec"))
+        if obs_age is not None and feed_ts is not None:
+            return max(0.0, obs_age + (now_epoch - feed_ts)), src, feed_stale
+        return None, src, feed_stale        # a station reading of unknown age
+    wx_age = _feed_num(feed.get("weatherAgeSec"))
+    if wx_age is not None and feed_ts is not None:
+        return max(0.0, wx_age + (now_epoch - feed_ts)), "model", feed_stale
+    return None, None, feed_stale
 
 
 def _crawl_sensor_id(cfg):
@@ -836,9 +1010,10 @@ def _ah_gap_summary(conn, device_id, cfg, now):
         cw = (fits.get("per_floor", {}).get(sid, {}).get("coupling")
               or {"ready": False, "reason": "not_computed"})
         ready = bool(cw.get("ready"))
+        gap_now, _gap_at = _fresh_gap_now(gap_hourly, now)
         out.append({
             "name": name,
-            "gap_now": round(gap_hourly[-1]["gap"], 2) if gap_hourly else None,
+            "gap_now": gap_now,
             "trend_7d": _gap_trend(gap_daily, now.date()),
             "coupling_ready": ready,
             # `significant` travels with beta. Without it the strip would state
@@ -849,6 +1024,24 @@ def _ah_gap_summary(conn, device_id, cfg, now):
             "reason": None if ready else cw.get("reason"),
         })
     return {"available": True, "floors": out}
+
+
+# "Now" for an hourly gap bucket: the newest shared hour must have started
+# within this window, i.e. both sensors reported in the last hour or so. The
+# series behind it spans 6h (dashboard) or 7 days (moisture page), so without
+# the gate a dead probe's last gap read as current for days.
+_GAP_NOW_MAX_AGE_S = 2 * 3600
+
+
+def _fresh_gap_now(gap_hourly, now):
+    """(gap rounded to 2dp, bucket start) for the newest hourly gap if it is
+    recent, else (None, None)."""
+    if not gap_hourly:
+        return None, None
+    last = gap_hourly[-1]
+    if (now - last["bucket"]).total_seconds() > _GAP_NOW_MAX_AGE_S:
+        return None, None
+    return round(last["gap"], 2), last["bucket"]
 
 
 def _indoor_sensors(cfg):
@@ -1063,9 +1256,11 @@ def _build_ah_section(conn, device_id, cfg, now, allow_fit=True):
         # the process started" matters to the reader, and only one of them is
         # a statement about the house.
         cw = fit.get("coupling") or {"ready": False, "reason": "not_computed"}
+        gap_now, gap_now_at = _fresh_gap_now(gap_hourly, now)
         out_floors.append({
             "sensor": sid, "name": name,
-            "gap_now": round(gap_hourly[-1]["gap"], 2) if gap_hourly else None,
+            "gap_now": gap_now,
+            "gap_now_at": gap_now_at.isoformat() if gap_now_at else None,
             "gap_series": [{"ts": g["bucket"].isoformat(),
                             "crawl": round(g["crawl"], 2),
                             "floor": round(g["floor"], 2),
@@ -1139,6 +1334,13 @@ def _predictions(cw, crawl_excess, floor_excess, interventions):
     return out
 
 
+# Age limits for the moisture page's "now" row: the Ecowitt probes report every
+# few minutes (build_crawl calls a reading stale past 900s); the thermostat row
+# follows build_now's 600s rule.
+_SENSOR_NOW_MAX_AGE_S = 900
+_THERMOSTAT_NOW_MAX_AGE_S = 600
+
+
 def build_moisture(conn, device_id, cfg, now=None) -> dict:
     """The whole moisture case in one payload: dew points everywhere, the
     crawl-to-indoor delta, source attribution, condensation risk, rainfall
@@ -1159,23 +1361,37 @@ def build_moisture(conn, device_id, cfg, now=None) -> dict:
     ref_id, ref_name = _reference_sensor_id(cfg)
 
     # --- current dew points, one per sensor (plus outdoor + thermostat) ---
+    # Each carries an age gate: a dead probe's last value is history, not
+    # "now", and the crawl-vs-indoor delta below must not be built from it.
     def latest_dp(sid):
+        """(dew point or None when stale/missing, age in seconds or None)."""
         r = db.latest_sensor_reading(conn, sid)
         if r is None:
-            return None
+            return None, None
+        age = (now - r["ts"]).total_seconds()
+        if age > _SENSOR_NOW_MAX_AGE_S:
+            return None, int(age)
         dp = humidity.dew_point_f(r.get("temp_f"), r.get("humidity"))
-        return round(dp, 1) if dp is not None else None
+        return (round(dp, 1) if dp is not None else None), int(age)
 
     dev_rows = db.recent_readings(conn, device_id, now - timedelta(hours=1))
     latest_dev = dev_rows[-1] if dev_rows else {}
+    dev_age = (now - latest_dev["ts"]).total_seconds() if latest_dev else None
+    if dev_age is None or dev_age > _THERMOSTAT_NOW_MAX_AGE_S:
+        latest_dev = {}
+    crawl_dp, crawl_age = latest_dp(sensor_id)
+    ref_dp, ref_age = latest_dp(ref_id) if ref_id else (None, None)
     dp_now = {
-        "crawl": latest_dp(sensor_id),
-        "reference": latest_dp(ref_id) if ref_id else None,
+        "crawl": crawl_dp,
+        "crawl_age_s": crawl_age,
+        "reference": ref_dp,
+        "reference_age_s": ref_age,
         "reference_name": ref_name,
         "outdoor": latest_dev.get("wx_dewpoint_f"),
         "thermostat": (lambda v: round(v, 1) if v is not None else None)(
             humidity.dew_point_f(latest_dev.get("indoor_temp_f"),
                                  latest_dev.get("indoor_humidity"))),
+        "thermostat_age_s": int(dev_age) if dev_age is not None else None,
     }
 
     # --- crawl-to-indoor dew point delta, 7d hourly series ---
@@ -1304,21 +1520,40 @@ def build_forecast(conn, device_id, cfg, days=14) -> dict:
         peak_rows = [x for x in drows if cfg.tou.is_peak(x["ts"].astimezone(zone))]
         peak_min = (runtime.compute(peak_rows, short_cycle_min=cfg.short_cycle_minutes)
                     .minutes["cool"] if peak_rows else 0.0)
+        # has_peak: whether this day HAD a peak window at all. A weekend under
+        # a weekday-only peak records 0 peak minutes for want of a window, and
+        # must stay out of the peak-minutes fit (see predict_peak_cost).
         history.append({"day_high": max(highs), "cool_minutes": cool_min,
-                        "peak_cool_minutes": peak_min})
-    fc_high = rows[-1].get("wx_fc_high_f")
-    if fc_high is None or not history:
+                        "peak_cool_minutes": peak_min,
+                        "has_peak": cfg.tou.day_has_peak(d, zone)})
+    if not history:
         return {"available": False}
     tomorrow = (datetime.now(zone) + timedelta(days=1)).date()
+    # TOMORROW's forecast high, from the live feed's daily forecast. The stored
+    # wx_fc_high_f is the feed's fcHigh, which is TODAY's high; labelling it
+    # tomorrow's (as this used to) priced tomorrow off the wrong day. No
+    # tomorrow row -> unavailable, never today's number.
+    feed = _live_feed(cfg)
+    if feed is None:
+        return {"available": False, "reason": "feed_unreachable"}
+    fc_high = _forecast_high_for(feed, tomorrow)
+    if fc_high is None:
+        return {"available": False, "reason": "no_tomorrow_forecast"}
     pred = correlation.predict_peak_cost(fc_high, history, cfg.tou, cfg.system_kw, cfg.timezone, target_date=tomorrow)
     cdd = correlation.cooling_degree_days(rows, tz=cfg.timezone)
+    peak_min = pred["predicted_peak_cool_minutes"]
+    peak_usd = pred["predicted_peak_dollars"]
     return {"available": True, "fc_high_f": fc_high, "target_date": tomorrow.isoformat(),
             "predicted_cool_minutes": round(pred["predicted_cool_minutes"]),
-            "predicted_peak_cool_minutes": round(pred["predicted_peak_cool_minutes"]),
-            "predicted_peak_dollars": round(pred["predicted_peak_dollars"], 2),
+            "predicted_peak_cool_minutes": round(peak_min) if peak_min is not None else None,
+            "predicted_peak_dollars": round(peak_usd, 2) if peak_usd is not None else None,
             "peak_band": pred["peak_band"],
+            # Whether tomorrow has an on-peak window at all, and when, from the
+            # TOU table, so the UI never hardcodes hours or band names.
+            "has_peak": pred["has_peak"], "peak_windows": pred["peak_windows"],
             "basis": pred["basis"], "cooling_degree_days_recent": round(cdd, 1),
-            "days_of_history": len(history)}
+            "days_of_history": len(history),
+            "peak_days_of_history": pred["peak_days_of_history"]}
 
 
 def build_precool_advice(conn, device_id, cfg, now=None) -> dict:
