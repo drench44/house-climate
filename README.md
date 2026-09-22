@@ -135,6 +135,14 @@ self-hosted almanac dashboard built on
 with a small Open-Meteo adapter behind it. It's optional — everything else
 works without a weather source.
 
+Rainfall comes from the feed's `rainToday` (inches since local midnight). If
+the feed also sends `rainSource`, only `"gauge"` counts as a real gauge
+reading; `"partial"` or `"model"` (a forecast estimate) is kept only as a
+placeholder until Open-Meteo's total for that day replaces it. A feed with no
+`rainSource` is treated as a gauge. If the thermostat is unreachable, the
+poller still stores that tick's weather, with the thermostat fields left
+empty.
+
 ## Peak-cost guidance strip
 
 The main dashboard (not the compact `square.html` kiosk view) shows a live

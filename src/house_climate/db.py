@@ -10,6 +10,7 @@ READING_COLUMNS = [
     "daikin_outdoor_humidity", "wx_outdoor_temp_f", "wx_humidity", "wx_dewpoint_f",
     "wx_solar_wm2", "wx_uv", "wx_fc_high_f", "wx_fc_low_f", "wx_conditions",
     "wx_aqi", "wx_alert_count", "weather_ok", "wx_rain_today_in",
+    "wx_rain_source",
 ]
 
 # Magnus formula (Alduchov & Eskridge 1996), same constants as
@@ -68,6 +69,11 @@ def ensure_app_schema(conn) -> None:
     # Station rain gauge snapshot (wx.json rainToday, inches, resets midnight).
     conn.execute(
         "ALTER TABLE readings ADD COLUMN IF NOT EXISTS wx_rain_today_in double precision")
+    # Provenance of wx_rain_today_in: 'gauge' or 'model' (weather.parse).
+    # NULL on rows stored before it was recorded; those count as gauge rain,
+    # their original meaning (see outdoor_daily).
+    conn.execute(
+        "ALTER TABLE readings ADD COLUMN IF NOT EXISTS wx_rain_source text")
     # Dew point as first-class stored data for every auxiliary sensor. The
     # poller computes it on insert; this backfills every pre-existing row once
     # (idempotent: only touches rows where it is still NULL).
@@ -76,9 +82,10 @@ def ensure_app_schema(conn) -> None:
     conn.execute(
         f"UPDATE sensor_readings SET dewpoint_f = {_MAGNUS_SQL}"
         " WHERE dewpoint_f IS NULL AND humidity > 0 AND temp_f IS NOT NULL")
-    # One row per local calendar day of rainfall. source: 'station' (the
-    # house's own gauge via wx.json — authoritative) or 'openmeteo' (gridded
-    # backfill for days before station capture began).
+    # One row per local calendar day of rainfall. source: 'station' (a
+    # complete day from the gauge via wx.json, authoritative), 'openmeteo'
+    # (gridded backfill), or the placeholders 'station_partial' and 'model'.
+    # See upsert_precip for the precedence.
     conn.execute(
         """CREATE TABLE IF NOT EXISTS precip_daily (
                day        date PRIMARY KEY,
@@ -206,9 +213,21 @@ def upsert_device(conn, device_id, name, model) -> None:
         (device_id, name, model))
 
 
+# A readings row with no equipment_status is a WEATHER-ONLY row: the poll tick
+# where the thermostat call failed but the weather feed answered (see
+# poller.poll_once). A real thermostat read always has a status, since
+# daikin._map_enum turns even a missing value into 'unknown'. Thermostat
+# consumers must skip weather-only rows: runtime would count them as idle
+# time, and "latest reading" checks would think the thermostat was fresh.
+THERMOSTAT_ROW_SQL = "equipment_status IS NOT NULL"
+
+
 def recent_readings(conn, device_id, since_ts) -> list[dict]:
+    """Thermostat readings since a timestamp, oldest first. Weather-only rows
+    are excluded (THERMOSTAT_ROW_SQL); the outdoor queries below read those."""
     cur = conn.execute(
-        "SELECT * FROM readings WHERE device_id=%s AND ts >= %s ORDER BY ts",
+        "SELECT * FROM readings WHERE device_id=%s AND ts >= %s"
+        f" AND {THERMOSTAT_ROW_SQL} ORDER BY ts",
         (device_id, since_ts))
     cols = [d.name for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
@@ -405,15 +424,25 @@ def sensor_daily_stats(conn, sensor_id, tz, since_ts=None) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+_GAUGE_RAIN_SQL = "wx_rain_source IS DISTINCT FROM 'model'"
+
+
 def outdoor_daily(conn, device_id, tz, since_ts=None) -> list[dict]:
     """Per-local-day outdoor conditions from the weather feed: mean temp and
-    dew point, station rain-gauge total (max of the cumulative midnight-reset
-    counter), and gap-capped cooling hours (for the duct-sweat proxy)."""
+    dew point, rain, and gap-capped cooling hours (for the duct-sweat proxy).
+
+    Rain is split by provenance. rain_in is the gauge total (max of the
+    cumulative midnight-reset counter) over rows whose wx_rain_source is not
+    'model'; legacy rows with no source count as gauge. rain_last_hour is the
+    last local hour that carried a gauge value, which is what says whether
+    the gauge total covers the whole day (a later row with no rain value says
+    nothing about rain). model_rain_in is the feed's model estimate, used
+    only when the day has no gauge value at all."""
     since_clause = "AND ts >= %(since)s" if since_ts is not None else ""
     cur = conn.execute(
         f"""WITH t AS (
               SELECT ts, wx_outdoor_temp_f, wx_dewpoint_f, wx_rain_today_in,
-                     equipment_status,
+                     wx_rain_source, equipment_status,
                      least(coalesce(extract(epoch FROM
                        lead(ts) OVER (ORDER BY ts) - ts),
                        extract(epoch FROM (now() - ts))), 600) AS dt,
@@ -425,8 +454,11 @@ def outdoor_daily(conn, device_id, tz, since_ts=None) -> list[dict]:
               avg(wx_dewpoint_f) AS dp_mean,
               avg({_AH_WX_SQL}) AS ah_mean,
               count(wx_dewpoint_f) AS ah_n,
-              max(wx_rain_today_in) AS rain_in,
-              max(extract(hour FROM (ts AT TIME ZONE %(tz)s)))::int AS last_hour,
+              max(wx_rain_today_in) FILTER (WHERE {_GAUGE_RAIN_SQL}) AS rain_in,
+              max(extract(hour FROM (ts AT TIME ZONE %(tz)s)))
+                FILTER (WHERE wx_rain_today_in IS NOT NULL
+                        AND {_GAUGE_RAIN_SQL})::int AS rain_last_hour,
+              max(wx_rain_today_in) FILTER (WHERE wx_rain_source = 'model') AS model_rain_in,
               (coalesce(sum(dt) FILTER (WHERE equipment_status IN
                 ('cooling', 'overcool')), 0)/3600.0)::float AS cooling_h
             FROM t GROUP BY day ORDER BY day""",
@@ -435,15 +467,55 @@ def outdoor_daily(conn, device_id, tz, since_ts=None) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+# precip_daily sources, best first:
+#   station          a complete day from the gauge. Final.
+#   openmeteo        gridded Open-Meteo total, backfilled after the day ends.
+#   station_partial  a gauge day the poller did not see through (it died, or
+#                    the gauge went quiet before the evening). A lower bound.
+#   model            the weather feed's forecast-model estimate; the feed had
+#                    no gauge reading that day.
+# The two placeholders rank below openmeteo so the next daily backfill always
+# replaces them; neither can ever lock out a better value.
+PRECIP_RANK = {"station": 3, "openmeteo": 2, "station_partial": 1, "model": 0}
+# Days whose row the backfill leaves alone.
+PRECIP_FINAL_SOURCES = frozenset(s for s, r in PRECIP_RANK.items()
+                                 if r >= PRECIP_RANK["openmeteo"])
+_GAUGE_SOURCES = ("station", "station_partial")
+
+
+def _precip_rank_sql(col: str) -> str:
+    whens = " ".join(f"WHEN '{s}' THEN {r}" for s, r in PRECIP_RANK.items())
+    return f"(CASE {col} {whens} ELSE -1 END)"
+
+
 def upsert_precip(conn, day, inches, source) -> None:
-    """Insert or update one day's rainfall. The station gauge always wins over
-    a gridded backfill: an 'openmeteo' row never overwrites a 'station' row."""
+    """Insert or update one day's rainfall under the PRECIP_RANK precedence:
+    a write replaces the stored row when it ranks at least as high. One
+    exception: the gauge rollup may always replace its own rows ('station'
+    and 'station_partial' in either direction), because it recomputes them
+    from the raw readings. That is how a day stored as 'station' while it
+    was live gets demoted once it turns out the poller died partway through,
+    so the backfill can heal it.
+
+    When Open-Meteo replaces a 'station_partial' row it keeps the larger of
+    the two: the partial gauge total is a measured lower bound for the day,
+    so a smaller gridded number must not undercut it."""
+    if source not in PRECIP_RANK:
+        raise ValueError(f"unknown precip source {source!r}")
+    gauge = ", ".join(f"'{s}'" for s in _GAUGE_SOURCES)
     conn.execute(
-        """INSERT INTO precip_daily (day, inches, source, updated_at)
+        f"""INSERT INTO precip_daily (day, inches, source, updated_at)
            VALUES (%s, %s, %s, now())
            ON CONFLICT (day) DO UPDATE
-             SET inches=EXCLUDED.inches, source=EXCLUDED.source, updated_at=now()
-             WHERE precip_daily.source != 'station' OR EXCLUDED.source = 'station'""",
+             SET inches=CASE WHEN EXCLUDED.source = 'openmeteo'
+                                  AND precip_daily.source = 'station_partial'
+                             THEN GREATEST(EXCLUDED.inches, precip_daily.inches)
+                             ELSE EXCLUDED.inches END,
+                 source=EXCLUDED.source, updated_at=now()
+             WHERE {_precip_rank_sql('EXCLUDED.source')}
+                     >= {_precip_rank_sql('precip_daily.source')}
+                OR (EXCLUDED.source IN ({gauge})
+                    AND precip_daily.source IN ({gauge}))""",
         (day, inches, source))
 
 
@@ -510,10 +582,20 @@ def delete_intervention(conn, intervention_id) -> bool:
 
 
 def hourly_readings(conn, device_id, since_ts) -> list[dict]:
+    """Hourly thermostat buckets from the continuous aggregate. An hour that
+    holds only weather-only rows (thermostat unreachable) has no indoor
+    temperature and zero ticks, which would read as an idle hour; it is
+    skipped, the same gap the hour showed before weather-only rows existed.
+    The aggregate has no per-row status count to test directly (changing its
+    definition needs a drop and rebuild), and a real thermostat read always
+    carries an indoor temperature, so that is the test used."""
     cur = conn.execute(
         "SELECT bucket, avg_indoor_temp_f, avg_indoor_humidity, avg_outdoor_temp_f,"
         " cool_ticks, heat_ticks, fan_ticks FROM readings_hourly"
-        " WHERE device_id=%s AND bucket >= %s ORDER BY bucket",
+        " WHERE device_id=%s AND bucket >= %s"
+        "   AND (avg_indoor_temp_f IS NOT NULL"
+        "        OR cool_ticks + heat_ticks + fan_ticks > 0)"
+        " ORDER BY bucket",
         (device_id, since_ts))
     cols = [d.name for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
