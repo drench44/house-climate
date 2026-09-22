@@ -10,9 +10,22 @@ dependency of deploying, not an afterthought.
 `pg_dump -Fc` that is fail-loud (a partial/empty/undersized dump never
 masquerades as good), atomic (temp file, size-checked, then moved), and
 rotated. It is env-driven — `HC_BACKUP_DIR`, `HC_REQUIRE_MOUNTPOINT`, `HC_KEEP`,
-`HC_MIN_BYTES`, `HC_STAMP`. Point `HC_BACKUP_DIR` somewhere that survives the
+`HC_KEEP_MONTHLY`, `HC_MIN_BYTES`, `HC_STAMP`. Point `HC_BACKUP_DIR` somewhere that survives the
 box and set `HC_REQUIRE_MOUNTPOINT` so a missing mount fails loud instead of
 silently dumping onto the root disk.
+
+### What lands in the backup directory
+
+- `climate-YYYY-MM-DD.dump`: the nightly dump. The newest `HC_KEEP` (14) are
+  kept.
+- `climate-YYYY-MM-DD.dump.counts`: the row count of every table, taken just
+  before that dump. `--verify-dump` checks a restore against it.
+- `monthly/climate-YYYY-MM.dump` (+ `.counts`): the first good dump of each
+  month, kept for `HC_KEEP_MONTHLY` months (24; `0` keeps them all). Fourteen
+  dailies only cover damage you notice within two weeks. Bad rows from a bug,
+  or a table quietly emptied, can sit unseen longer than that, and by then
+  every daily carries it. The monthlies are the way back past that, and at
+  about a megabyte a year they cost nothing.
 
 ## Verify the restore, don't assume it
 
@@ -36,6 +49,25 @@ probe history. Proving `readings` survived says nothing about either.
 
 Setting `HC_VERIFY_TABLES` **replaces** the list rather than extending it, so
 an overlay adding its own tables must re-list the defaults too.
+
+### Verify the files you actually have
+
+`--restore-selftest` proves a fresh dump restores. It says nothing about the
+files sitting in the backup directory, which are the ones you reach for in an
+outage. `house-climate-backup.sh --verify-dump latest` (or a path) restores one
+of those files into a throwaway container running the same image as the live
+DB, with no network, and removes it afterwards, so the live database is never
+touched. It passes only when:
+
+1. every table comes back with at least the rows in that dump's `.counts`
+   file, and
+2. the newest reading is within `HC_VERIFY_MAX_LAG_SECS` (6 hours) of the
+   moment the dump was written, so the file holds current history and not a
+   database that had stopped recording.
+
+On success it writes `HC_VERIFY_STAMP`, so a watchdog can alert when the
+weekly check stops passing. CI runs a nightly backup and then `--verify-dump`
+on the result, and also proves the check fails on a dump missing rows.
 
 The comparison logic is pure and is exercised by `--selftest`, which needs no
 database, so a regression in it fails CI in seconds rather than waiting on the
