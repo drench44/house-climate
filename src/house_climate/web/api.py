@@ -58,24 +58,37 @@ def _coverage(present_buckets, window_hours):
     return round(min(present_buckets / window_hours, 1.0), 3)
 
 
-# A day counts toward the complete-day cost average / forecast fit only if its
-# readings both span the day (first by ~2am, last by ~10pm) AND have no interior
-# gap longer than this. Endpoint-only spanning let a day with a long mid-day
-# poller outage pass as "complete"; cost.compute then gap-caps the missing
-# runtime to zero, dragging that day's total -- and the avg/projection built on
-# it -- silently low. 3h is comfortably above normal poll spacing yet flags a
-# real multi-hour outage.
-_COMPLETE_DAY_MAX_GAP_S = 3 * 3600
+# A day counts toward the complete-day cost average / forecast fit only if
+# almost all of it was actually observed. cost.compute credits each reading
+# with at most 10 minutes (cost.MAX_GAP_S); any longer gap is unobserved time
+# in which the equipment may have run uncounted. The old rule (spans ~2am to
+# ~10pm, no single gap over 3 hours) let a 2.5-hour outage across an
+# afternoon's peak cooling pass as "complete" at about 60% of its real cost,
+# dragging avg_per_day and projected_month down with it. Now the day's total
+# unobserved time, counted from local midnight to local midnight, may not
+# exceed this: a few missed polls are fine, an outage long enough to hide real
+# runtime is not.
+_COMPLETE_DAY_MAX_UNOBSERVED_S = 15 * 60
 
 
-def _day_is_complete(drows, zone) -> bool:
-    ts = sorted(r["ts"] for r in drows)
-    if not ts:
-        return False
-    if ts[0].astimezone(zone).hour > 2 or ts[-1].astimezone(zone).hour < 22:
-        return False
-    return all((b - a).total_seconds() <= _COMPLETE_DAY_MAX_GAP_S
-               for a, b in zip(ts, ts[1:]))
+def _local_day_bounds(day, zone):
+    """[start, end) of a local calendar day, returned in UTC. Converting is
+    what makes it DST-safe: subtracting two datetimes that share one tzinfo
+    is wall-clock arithmetic in Python, so a local midnight-to-midnight span
+    always measured 24 hours, when the clock-change days are 23 and 25."""
+    start = datetime(day.year, day.month, day.day, tzinfo=zone)
+    nxt = day + timedelta(days=1)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=zone)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def _day_is_complete(rows, day, zone) -> bool:
+    """True when `day` (a local date) was observed closely enough that its
+    cost and runtime are not undercounted. `rows` should reach past both
+    midnights, so the readings either side can vouch for the edges."""
+    start, end = _local_day_bounds(day, zone)
+    unobserved = (end - start).total_seconds() - cost.observed_seconds(rows, start, end)
+    return unobserved <= _COMPLETE_DAY_MAX_UNOBSERVED_S
 
 
 def _peak_mid_weekday_rates(cfg):
@@ -285,25 +298,27 @@ def _cost_summary_impl(conn, device_id, cfg, now=None) -> dict:
     zone = ZoneInfo(cfg.timezone)
     rows = db.recent_readings(conn, device_id, now - timedelta(days=40))
 
-    def costed(subset):
-        res = cost.compute(subset, cfg.tou, cfg.system_kw, cfg.timezone, heat_kw=cfg.heat_kw)
-        return res.total_dollars, res.total_kwh
-
     now_local = now.astimezone(zone)
     today_local_date = now_local.date()
+    today_start, _ = _local_day_bounds(today_local_date, zone)
     month_start_local = datetime(now_local.year, now_local.month, 1, tzinfo=zone)
 
-    today_rows = [r for r in rows if r["ts"].astimezone(zone).date() == today_local_date]
-    week_rows = [r for r in rows if r["ts"] >= now - timedelta(days=7)]
-    mtd_rows = [r for r in rows if r["ts"] >= month_start_local]
+    # Every slice is priced from the FULL row list with a window, so the
+    # interval that straddles midnight lands in the day holding its midpoint
+    # (the rule cost.compute prices bands by) instead of vanishing: slicing the
+    # rows by timestamp first gave the last reading of every slice zero
+    # minutes.
+    def window_cost(start, end):
+        return cost.compute(rows, cfg.tou, cfg.system_kw, cfg.timezone,
+                            heat_kw=cfg.heat_kw, start=start, end=end)
 
-    today_res = cost.compute(today_rows, cfg.tou, cfg.system_kw, cfg.timezone, heat_kw=cfg.heat_kw)
+    today_res = window_cost(today_start, now)
     today_dollars, today_kwh = today_res.total_dollars, today_res.total_kwh
 
-    week_res = cost.compute(week_rows, cfg.tou, cfg.system_kw, cfg.timezone, heat_kw=cfg.heat_kw)
+    week_res = window_cost(now - timedelta(days=7), now)
     week_dollars, week_kwh = week_res.total_dollars, week_res.total_kwh
 
-    mtd_res = cost.compute(mtd_rows, cfg.tou, cfg.system_kw, cfg.timezone, heat_kw=cfg.heat_kw)
+    mtd_res = window_cost(month_start_local, now)
     mtd_dollars, mtd_kwh = mtd_res.total_dollars, mtd_res.total_kwh
 
     if mtd_res.by_band:
@@ -311,25 +326,21 @@ def _cost_summary_impl(conn, device_id, cfg, now=None) -> dict:
     else:
         by_band, pct_runtime_peak = week_res.by_band, week_res.pct_runtime_peak
 
-    # complete-day average: group all loaded rows by local calendar date, then
-    # keep only PAST days whose readings span roughly the full day (first
-    # reading by 2am local, last reading at/after 10pm local). This excludes
-    # today's partial day and any partial first day at the start of history.
-    by_date: dict = {}
-    for r in rows:
-        by_date.setdefault(r["ts"].astimezone(zone).date(), []).append(r)
+    # complete-day average: every PAST local day that was observed nearly end
+    # to end (see _day_is_complete). This excludes today's partial day, any
+    # day with an outage long enough to hide runtime, and a partial first day.
+    days_seen = {r["ts"].astimezone(zone).date() for r in rows}
 
     # The first calendar day of the 40-day load window is clipped at the
-    # window edge — it can pass the completeness test while missing its
-    # earliest hours, so exclude it outright.
+    # window edge; the completeness check would refuse it anyway (its early
+    # hours are unobserved), but excluding it outright keeps that explicit.
     window_edge_day = (now - timedelta(days=40)).astimezone(zone).date()
     complete_day_dollars = []
-    for d, drows in by_date.items():
+    for d in sorted(days_seen):
         if d >= today_local_date or d <= window_edge_day:
             continue
-        if _day_is_complete(drows, zone):
-            dollars, _ = costed(drows)
-            complete_day_dollars.append(dollars)
+        if _day_is_complete(rows, d, zone):
+            complete_day_dollars.append(window_cost(*_local_day_bounds(d, zone)).total_dollars)
 
     complete_days = len(complete_day_dollars)
     avg_per_day_raw = (sum(complete_day_dollars) / complete_days) if complete_days else None
@@ -433,6 +444,13 @@ def _cost_summary_impl(conn, device_id, cfg, now=None) -> dict:
             for b in cfg.tou.bands
             if distinct_rates and b.rate == distinct_rates[-1] and b.days in ("weekday", "all")
         ],
+        # Local dates near today that the tariff prices as a weekend (tou
+        # holidays), so the ribbon does not shade a weekday-only peak window
+        # across Labor Day. Covers the chart's reach: a week back, a day ahead.
+        "tou_holidays": [
+            d.isoformat() for d in (today_local_date + timedelta(days=k) for k in range(-8, 2))
+            if cfg.tou.is_holiday(d)
+        ],
     }
 
 
@@ -529,14 +547,20 @@ def build_humidity(conn, device_id, cfg) -> dict:
         indoor_dp, outdoor_dp, outdoor_temp,
         outdoor_aqi=outdoor_aqi, aqi_source=aqi_source)
 
-    ac_stats = humidity.avg_rh_by_state(rows)
+    # Cooling vs idle RH, compared hour-of-day by hour-of-day: a plain 7-day
+    # average of each mostly contrasted hot afternoons with nights and
+    # credited the daily humidity cycle to the AC.
+    ac_stats = humidity.rh_by_state_same_hour(rows, cfg.timezone)
     ac_effect = None
     if (ac_stats["cooling_n"] >= humidity.AC_EFFECT_MIN_SAMPLES
-            and ac_stats["idle_n"] >= humidity.AC_EFFECT_MIN_SAMPLES):
+            and ac_stats["idle_n"] >= humidity.AC_EFFECT_MIN_SAMPLES
+            and ac_stats["hours_matched"] >= humidity.AC_EFFECT_MIN_HOURS):
         ac_effect = {
             "cooling": round(ac_stats["cooling"], 1),
             "idle": round(ac_stats["idle"], 1),
             "drop": round(ac_stats["idle"] - ac_stats["cooling"], 1),
+            "basis": "same_hour_of_day",
+            "hours_matched": ac_stats["hours_matched"],
         }
 
     trend_rows = [r for r in rows if r["ts"] >= now - timedelta(hours=24)]
@@ -590,9 +614,10 @@ def build_thermal(conn, device_id, cfg, now=None) -> dict:
     if win is not None:
         p_start, p_end, weekday_only = win
         pe = precool.effectiveness(rows, cfg.timezone, peak_start=p_start,
-                                   peak_end=p_end, peak_weekday_only=weekday_only)
+                                   peak_end=p_end, peak_weekday_only=weekday_only,
+                                   off_days=cfg.tou.is_holiday)
     else:
-        pe = precool.effectiveness(rows, cfg.timezone)
+        pe = precool.effectiveness(rows, cfg.timezone, off_days=cfg.tou.is_holiday)
     # Turn the minutes-of-peak-cooling saved into dollars, using the on-peak vs
     # mid-peak rate gap, so "what it saves" reads in money on the dashboard.
     if pe.get("ready") and pe.get("peak_min_saved_per_day"):
@@ -1014,7 +1039,7 @@ def _ah_gap_summary(conn, device_id, cfg, now):
         out.append({
             "name": name,
             "gap_now": gap_now,
-            "trend_7d": _gap_trend(gap_daily, now.date()),
+            "trend_7d": _gap_trend(gap_daily, _local_today(now, cfg)),
             "coupling_ready": ready,
             # `significant` travels with beta. Without it the strip would state
             # a gain of 0.08 with an interval four times its size as plain fact.
@@ -1104,15 +1129,23 @@ def _fits_cached(conn, device_id, cfg, now, crawl_id, floors, interventions,
     return {**built, "computed_at": now.isoformat()}
 
 
-def _coupling_days(now, data_start_day):
+def _local_today(now, cfg):
+    """Today's date in the configured timezone. Every daily series here is
+    keyed by LOCAL day, so comparing against now.date() (the UTC date) shifted
+    every "last 7 days" window a day forward each evening after 17:00 Pacific."""
+    return now.astimezone(ZoneInfo(cfg.timezone)).date()
+
+
+def _coupling_days(today, data_start_day):
     """Longest whole-day window the data can support, capped at 45 days.
+    `today` is the LOCAL date, the same calendar data_start_day is on.
 
     Longer is better here — hourly readings carry far less independent
     information than their count suggests — but a window reaching back past
     the first reading would be mostly absence."""
     if data_start_day is None:
         return coupling.MIN_WINDOW_DAYS
-    have = (now.date() - data_start_day).days
+    have = (today - data_start_day).days
     return max(coupling.MIN_WINDOW_DAYS, min(45, have))
 
 
@@ -1120,7 +1153,8 @@ def _build_fits(conn, device_id, cfg, now, crawl_id, floors):
     """The expensive half: does crawl air reach each floor, and does the link
     behave like air actually moving?"""
     crawl_daily = db.sensor_daily_stats(conn, crawl_id, cfg.timezone)
-    days = _coupling_days(now, crawl_daily[0]["day"] if crawl_daily else None)
+    days = _coupling_days(_local_today(now, cfg),
+                          crawl_daily[0]["day"] if crawl_daily else None)
     # The trailing-week baseline each reading is measured against needs half a
     # week of context either side of the window, so the fetch reaches back
     # further than the window itself.
@@ -1143,10 +1177,11 @@ def _build_fits(conn, device_id, cfg, now, crawl_id, floors):
         per_floor[sid] = {
             "coupling": coupling.coupling_window(
                 crawl_h, floor_h, outdoor_h, days=days, now=now,
-                crawl_rh=crawl_rh_h, interventions=interventions, blower=blower_h),
+                crawl_rh=crawl_rh_h, interventions=interventions, blower=blower_h,
+                tz=cfg.timezone),
             "stack": coupling.stack_signature(
                 crawl_h, floor_h, outdoor_h, temp_diff_h, days=days, now=now,
-                crawl_rh=crawl_rh_h, interventions=interventions),
+                crawl_rh=crawl_rh_h, interventions=interventions, tz=cfg.timezone),
         }
     # Only the channels that could be placed in the building take part — a
     # garage sensor is a useful gap to show but has no position in a stack.
@@ -1270,7 +1305,7 @@ def _build_ah_section(conn, device_id, cfg, now, allow_fit=True):
             "excess_daily": [{"day": r["day"].isoformat(),
                               "excess": round(r["excess"], 2)}
                              for r in floor_excess[-60:]],
-            "gap_trend_7d": _gap_trend(gap_daily, now.date()),
+            "gap_trend_7d": _gap_trend(gap_daily, _local_today(now, cfg)),
             "coupling": cw,
             "stack": fit.get("stack") or {"ready": False, "reason": "not_computed"},
             "interventions": moisture.gap_intervention_report(
@@ -1511,15 +1546,20 @@ def build_forecast(conn, device_id, cfg, days=14) -> dict:
         # axes. Same completeness rule the cost averages use.
         if d >= today_local:
             continue
-        if not _day_is_complete(drows, zone):
+        if not _day_is_complete(rows, d, zone):
             continue
         highs = [x["wx_outdoor_temp_f"] for x in drows if x.get("wx_outdoor_temp_f") is not None]
         if not highs:
             continue
-        cool_min = runtime.compute(drows, short_cycle_min=cfg.short_cycle_minutes).minutes["cool"]
-        peak_rows = [x for x in drows if cfg.tou.is_peak(x["ts"].astimezone(zone))]
-        peak_min = (runtime.compute(peak_rows, short_cycle_min=cfg.short_cycle_minutes)
-                    .minutes["cool"] if peak_rows else 0.0)
+        # Minutes by interval MIDPOINT over the whole row list, the rule the
+        # cost figures use: the interval across midnight is counted once, in
+        # the right day, and an interval straddling the peak edge is peak
+        # exactly when it would be billed as peak.
+        start, end = _local_day_bounds(d, zone)
+        cool_min = runtime.status_minutes(rows, runtime.COOL_STATUSES, start=start, end=end)
+        peak_min = runtime.status_minutes(
+            rows, runtime.COOL_STATUSES, start=start, end=end,
+            include=lambda m: cfg.tou.is_peak(m.astimezone(zone)))
         # has_peak: whether this day HAD a peak window at all. A weekend under
         # a weekday-only peak records 0 peak minutes for want of a window, and
         # must stay out of the peak-minutes fit (see predict_peak_cost).
@@ -1738,12 +1778,14 @@ def build_health(conn, device_id, cfg, now=None) -> dict:
     since_14d = now - timedelta(days=_HOLD_WINDOW_DAYS)
     rows_14d = [r for r in rows_all if r["ts"] >= since_14d]
 
-    # --- Hold tightness: deviation from the ACTIVE target by mode.
-    # cool -> cool setpoint; heat/emheat -> heat setpoint; auto -> the
-    # [heat, cool] BAND (inside the band is a perfect hold — comparing auto
-    # against the cool setpoint alone would report a winter house held
-    # exactly at its heat setpoint as an 8-degree failure). "off"/unknown
-    # modes have no target and are skipped.
+    # --- Hold tightness: how far the house MISSED its active target, by mode.
+    # A setpoint is a limit, not a target to hit from both sides: in cool mode
+    # only a house warmer than the cool setpoint is a miss (a 70F house under
+    # a 76F cool setpoint is the weather doing the AC's job, not a 6-degree
+    # failure), and in heat/emheat only a house colder than the heat
+    # setpoint is. auto -> the [heat, cool] BAND (inside the band is a
+    # perfect hold). "off"/unknown modes have no target and are skipped. The
+    # field names keep the historical "abs_dev" spelling for the UI.
     abs_devs = []
     for r in rows_14d:
         mode = r.get("mode")
@@ -1754,12 +1796,12 @@ def build_health(conn, device_id, cfg, now=None) -> dict:
             sp = r.get("cool_setpoint_f")
             if sp is None:
                 continue
-            abs_devs.append(abs(indoor - sp))
+            abs_devs.append(max(0.0, indoor - sp))
         elif mode in ("heat", "emheat"):
             sp = r.get("heat_setpoint_f")
             if sp is None:
                 continue
-            abs_devs.append(abs(indoor - sp))
+            abs_devs.append(max(0.0, sp - indoor))
         elif mode == "auto":
             hsp, csp = r.get("heat_setpoint_f"), r.get("cool_setpoint_f")
             if hsp is None or csp is None:

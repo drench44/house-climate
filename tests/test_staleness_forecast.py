@@ -261,8 +261,11 @@ def _seed_complete_days(conn, n_days, cool_hours=range(12, 22)):
     now_local = datetime.now(TZ)
     for off in range(1, n_days + 1):
         d = (now_local - timedelta(days=off)).date()
-        for h in range(24):
-            local = datetime(d.year, d.month, d.day, h, 30, tzinfo=TZ)
+        # Every 5 minutes: a day only counts as complete when almost none of
+        # it went unobserved (api._day_is_complete), as with real polling.
+        for m in range(0, 24 * 60, 5):
+            h = m // 60
+            local = datetime(d.year, d.month, d.day, h, m % 60, tzinfo=TZ)
             db.insert_reading(conn, _reading(
                 local.astimezone(timezone.utc),
                 equipment_status="cooling" if h in cool_hours else "idle",

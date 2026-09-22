@@ -331,6 +331,42 @@ def test_outdoor_daily_and_series_carry_absolute_humidity(conn):
     assert series[0]["ah"] == pytest.approx(expected, abs=0.01)
 
 
+def _wx_reading(conn, ts, temp, dp):
+    db.insert_reading(conn, dict(
+        ts=ts, device_id="dev1", indoor_temp_f=72.0, indoor_humidity=48,
+        heat_setpoint_f=68, cool_setpoint_f=74, equipment_status="idle",
+        mode="cool", daikin_outdoor_temp_f=None, daikin_outdoor_humidity=None,
+        wx_outdoor_temp_f=temp, wx_humidity=55, wx_dewpoint_f=dp,
+        wx_solar_wm2=400, wx_uv=5, wx_fc_high_f=90, wx_fc_low_f=60,
+        wx_conditions="Clear", wx_aqi=30, wx_alert_count=0, weather_ok=True,
+        wx_rain_today_in=0.0))
+
+
+def test_outdoor_daily_counts_only_readings_that_can_give_absolute_humidity(conn):
+    """Absolute humidity needs temperature AND dew point. The old count used
+    dew point alone, so readings with no temperature padded a thin day past
+    the coverage bar."""
+    day = datetime(2026, 8, 25, tzinfo=timezone.utc)
+    for i in range(30):                                   # dew point, no temperature
+        _wx_reading(conn, day + timedelta(minutes=3 * i), None, 60.0)
+    for h in range(3):                                    # both, in three clock hours
+        _wx_reading(conn, day + timedelta(hours=5 + h), 75.0, 60.0)
+        _wx_reading(conn, day + timedelta(hours=5 + h, minutes=30), 75.0, 60.0)
+    row = db.outdoor_daily(conn, "dev1", "UTC", since_ts=day)[0]
+    assert row["ah_hours"] == 3                           # not 4: 00:xx had no temperature
+
+
+def test_sensor_daily_stats_reports_hours_observed(conn):
+    """Forty readings in two hours is two hours of a day, not a day."""
+    day = datetime(2026, 8, 26, tzinfo=timezone.utc)
+    for i in range(40):
+        db.insert_sensor_reading(conn, "ecowitt_crawl", day + timedelta(minutes=3 * i),
+                                 temp_f=60.0, humidity=80.0, dewpoint_f=54.0)
+    db.insert_sensor_reading(conn, "ecowitt_crawl", day + timedelta(hours=12),
+                             temp_f=None, humidity=80.0, dewpoint_f=54.0)
+    row = db.sensor_daily_stats(conn, "ecowitt_crawl", "UTC", since_ts=day)[0]
+    assert row["ah_hours"] == 2                           # the noon reading lacks temperature
+
 # --- precip_daily precedence ladder. Only a complete day from the gauge is
 # final; everything else is a placeholder that a better value must be able to
 # replace, and a placeholder must never replace a better value.

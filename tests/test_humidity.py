@@ -28,39 +28,83 @@ def test_dew_point_monotonic_with_rh():
     assert hi > lo
 
 
-def _r(status, rh):
-    return {"equipment_status": status, "indoor_humidity": rh}
+TZ = "America/Los_Angeles"
 
 
-def test_avg_rh_by_state_groups_cooling_and_idle():
+def _r(status, rh, hour=12, minute=0, day=10):
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    local = datetime(2026, 8, day, hour, minute, tzinfo=ZoneInfo(TZ))
+    return {"ts": local.astimezone(timezone.utc), "equipment_status": status,
+            "indoor_humidity": rh}
+
+
+def test_same_hour_groups_cooling_and_idle():
     readings = [
         _r("cooling", 40), _r("cooling", 42), _r("overcool", 44),
-        _r("idle", 50), _r("idle", 52),
+        _r("idle", 50), _r("idle", 52), _r("idle", 54),
         _r("heating", 60),  # excluded from both groups
         _r("fan", 45),      # excluded from both groups
     ]
-    res = humidity.avg_rh_by_state(readings)
-    assert res["cooling_n"] == 3
-    assert res["idle_n"] == 2
+    res = humidity.rh_by_state_same_hour(readings, TZ)
+    assert res["cooling_n"] == 3 and res["idle_n"] == 3
+    assert res["hours_matched"] == 1
     assert abs(res["cooling"] - 42.0) < 1e-9
-    assert abs(res["idle"] - 51.0) < 1e-9
+    assert abs(res["idle"] - 52.0) < 1e-9
 
 
-def test_avg_rh_by_state_empty_groups_are_none():
-    res = humidity.avg_rh_by_state([_r("heating", 60), _r("fan", 45)])
-    assert res == {"cooling": None, "idle": None, "cooling_n": 0, "idle_n": 0}
+def test_same_hour_needs_a_real_baseline_on_both_sides():
+    """One idle reading is not a baseline for a busy cooling hour."""
+    readings = [_r("cooling", 40, 15, m) for m in range(0, 60, 5)] + [_r("idle", 70, 15, 59)]
+    res = humidity.rh_by_state_same_hour(readings, TZ)
+    assert res["hours_matched"] == 0 and res["cooling"] is None
 
 
-def test_avg_rh_by_state_empty_input():
-    res = humidity.avg_rh_by_state([])
-    assert res == {"cooling": None, "idle": None, "cooling_n": 0, "idle_n": 0}
+def test_same_hour_weights_hours_by_cooling_readings():
+    """Hours are weighted by how much cooling they hold: a mostly-cooling
+    afternoon counts for more than an hour with a few cooling readings."""
+    readings = ([_r("cooling", 40, 15, m) for m in range(0, 54, 6)]      # 9 cooling
+                + [_r("idle", 50, 15, m) for m in (55, 57, 59)]
+                + [_r("cooling", 60, 9, m) for m in (0, 5, 10)]           # 3 cooling
+                + [_r("idle", 62, 9, m) for m in (20, 30, 40)])
+    res = humidity.rh_by_state_same_hour(readings, TZ)
+    assert abs(res["cooling"] - (9 * 40 + 3 * 60) / 12) < 1e-9
+    assert abs(res["idle"] - (9 * 50 + 3 * 62) / 12) < 1e-9
 
 
-def test_avg_rh_by_state_skips_missing_rh():
-    readings = [_r("cooling", None), _r("cooling", 40)]
-    res = humidity.avg_rh_by_state(readings)
-    assert res["cooling_n"] == 1
+def test_same_hour_empty_and_unmatched_are_none():
+    for readings in ([], [_r("heating", 60), _r("fan", 45)],
+                     [_r("cooling", 40, hour=15), _r("idle", 60, hour=3)]):
+        res = humidity.rh_by_state_same_hour(readings, TZ)
+        assert res["cooling"] is None and res["idle"] is None
+        assert res["hours_matched"] == 0
+
+
+def test_same_hour_skips_missing_rh():
+    res = humidity.rh_by_state_same_hour(
+        [_r("cooling", None)] + [_r("cooling", 40, 12, m) for m in (1, 2, 3)]
+        + [_r("idle", 50, 12, m) for m in (4, 5, 6)], TZ)
+    assert res["cooling_n"] == 3
     assert res["cooling"] == 40
+
+
+def test_same_hour_does_not_credit_the_daily_cycle_to_the_ac():
+    """The AC runs on hot afternoons, when indoor RH is low anyway; nights are
+    idle and damp. A plain average of cooling vs idle readings called that a
+    12-point drop 'from cooling'. Within the same hours the real difference
+    here is 1 point, and that is what must be reported."""
+    readings = []
+    for day in range(10, 17):
+        for hour in range(14, 19):              # afternoons: mostly cooling
+            for m in (0, 15, 30):
+                readings.append(_r("cooling", 45, hour, m, day))
+            readings.append(_r("idle", 46, hour, 45, day))
+        for hour in (0, 1, 2, 3, 4, 5):         # nights: idle and damp
+            for m in (0, 20, 40):
+                readings.append(_r("idle", 60, hour, m, day))
+    res = humidity.rh_by_state_same_hour(readings, TZ)
+    assert res["hours_matched"] == 5
+    assert abs((res["idle"] - res["cooling"]) - 1.0) < 1e-9
 
 
 def test_window_advice_open_when_outside_much_drier_and_mild():

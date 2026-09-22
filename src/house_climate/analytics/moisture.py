@@ -49,6 +49,14 @@ DUCT_SURFACE_ASSUMED_F = 57.0
 BASELINE_MIN_DAYS = 10
 BASELINE_MAX_DAYS = 60      # baseline AND post windows are capped at this
 
+# Clock hours a day must be observed in before its daily mean is trusted.
+# SQL `avg` silently skips missing readings, and humidity has a strong daily
+# cycle, so a day seen only from 2am to 4am is not "a day" of anything: its
+# mean describes the small hours. The old bar of 24 READINGS was about 72
+# minutes at 3-minute polling. 18 of 24 hours is most of the day, with room
+# for a short outage.
+MIN_DAY_HOURS = 18
+
 # Winter projection: days of daily-mean history and the outdoor-temp span the
 # fit must have seen. Extrapolating a summer-only fit into winter is exactly
 # the weak-fit dishonesty the house style forbids.
@@ -320,15 +328,26 @@ def threshold_rollups(daily_stats):
 # Intervention baselines
 # ---------------------------------------------------------------------------
 
-# Two-sided 95% t critical values by dof (Welch), rounded down conservatively.
-_T_CRIT_95 = [(9, 2.26), (12, 2.18), (15, 2.13), (20, 2.09),
+# Two-sided 95% t critical values by dof (Welch). Every dof from 1 to 12 is
+# listed exactly, because low values are the common case, not an edge: the
+# autocorrelation discount routinely shrinks a side to two or three independent
+# days, and the critical value climbs steeply there (4.30 at dof 2, 12.71 at
+# dof 1). Using the dof-9 value for all of them made the interval far too
+# narrow and called about one in four no-change comparisons 'real'. Above 12,
+# dof rounds DOWN to the nearest anchor (a larger crit, a wider interval).
+_T_CRIT_95 = [(1, 12.71), (2, 4.30), (3, 3.18), (4, 2.78), (5, 2.57),
+              (6, 2.45), (7, 2.36), (8, 2.31), (9, 2.26), (10, 2.23),
+              (11, 2.20), (12, 2.18), (15, 2.13), (20, 2.09),
               (30, 2.04), (60, 2.00), (10 ** 9, 1.96)]
 
 
 def _t_crit_95(dof):
-    """Round dof DOWN to the nearest table anchor: a larger crit -> a wider CI
-    -> conservative. Rounding up to the next anchor narrowed the Welch CI and
-    flipped 'noise' to 'real' slightly too easily."""
+    """Critical value for a two-sided 95% interval at `dof` degrees of freedom.
+    Below 1 there is no finite answer, so this returns infinity and the
+    interval can never exclude zero. Between anchors, dof rounds DOWN: a
+    larger crit -> a wider CI -> conservative."""
+    if dof < 1:
+        return float("inf")
     tv = _T_CRIT_95[0][1]
     for max_dof, v in _T_CRIT_95:
         if max_dof <= dof:
@@ -344,11 +363,29 @@ def _effective_days(vals, days=None):
     `days` lets the neighbour test run on the CALENDAR: after a sensor outage,
     the previous row is not the previous day, and pairing across the gap makes
     the days look less alike than they are — which inflates this count and
-    narrows every interval built from it."""
+    narrows every interval built from it.
+
+    The lag-1 autocorrelation measured on a dozen or so days is biased low (a
+    short series cannot show how slowly it really wanders), which inflates the
+    count by the same mechanism. It is corrected by the standard first-order
+    small-sample bias, (1 + 4*rho) / n (Marriott and Pope, 1954), before the
+    discount is applied. Without it, two weeks of strongly correlated days with
+    no real change came out 'real' roughly twice as often as a 95% bar
+    promises; with it the rate sits at or just under 5%."""
     n = len(vals)
     if n < 3:
         return n
     rho = lag1_autocorr(vals, days, step=timedelta(days=1))
+    if days is not None:
+        # Too few calendar neighbours to measure anything (a run broken up by
+        # outages or by days dropped for thin coverage) makes lag1_autocorr
+        # answer 0.0, which would count every day as independent. Measure on
+        # list order instead: neighbours a few days apart still resemble each
+        # other more than not, so this errs wide rather than narrow.
+        have = set(days)
+        if sum(1 for d in days if d - timedelta(days=1) in have) < 3:
+            rho = lag1_autocorr(vals)
+    rho = min(0.99, rho + (1.0 + 4.0 * max(rho, 0.0)) / n)
     if rho <= 0:
         return n
     return max(2, min(n, int(round(n * (1.0 - rho) / (1.0 + rho)))))
@@ -432,11 +469,16 @@ def intervention_report(daily_stats, interventions, outdoor_days=None):
         d0 = iv["marked_on"]
         prev_mark = marks[idx - 1]["marked_on"] if idx > 0 else None
         next_mark = marks[idx + 1]["marked_on"] if idx + 1 < len(marks) else None
-        base_days = [d for d in daily_stats
+        # A day observed for fewer than MIN_DAY_HOURS is left out of both
+        # windows (and so out of the day counts and the seasonal check too):
+        # its RH mean describes only part of the daily cycle, and its
+        # hours-above counts are short by the hours nobody saw.
+        observed = [d for d in daily_stats if (d.get("obs_h") or 0) >= MIN_DAY_HOURS]
+        base_days = [d for d in observed
                      if d["day"] < d0
                      and (prev_mark is None or d["day"] >= prev_mark)
                      and d["day"] >= d0 - timedelta(days=BASELINE_MAX_DAYS)]
-        post_days = [d for d in daily_stats
+        post_days = [d for d in observed
                      if d["day"] >= d0
                      and (next_mark is None or d["day"] < next_mark)
                      and d["day"] < d0 + timedelta(days=BASELINE_MAX_DAYS)]
@@ -509,17 +551,10 @@ INSTALL_SETTLE_DAYS = 7
 GAP_MIN_DAYS = 14
 
 
-# Readings a day must carry before its absolute-humidity mean is trusted.
-# SQL `avg` silently skips nulls, so a day where the dew point was recorded
-# twice would otherwise sit in a Welch-t comparison weighing exactly as much
-# as a fully observed one.
-MIN_DAY_AH_READINGS = 24
-
-
 def _day_ah(day):
-    """A day's mean absolute humidity, or None if too little of it was
+    """A day's mean absolute humidity, or None if too little of the day was
     observed to stand as a day."""
-    if (day.get("ah_n") or 0) < MIN_DAY_AH_READINGS:
+    if (day.get("ah_hours") or 0) < MIN_DAY_HOURS:
         return None
     return day.get("ah_mean")
 

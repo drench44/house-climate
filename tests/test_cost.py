@@ -165,3 +165,19 @@ def test_pct_runtime_peak_partial_on_real_config():
             _cool_at_local(23, 0), _at_local(23, 3, "idle")]
     res = cost.compute(rows, CFG.tou, CFG.system_kw, TZ)
     assert res.pct_runtime_peak == pytest.approx(50.0, rel=1e-9)
+
+
+def test_holiday_runtime_is_billed_with_the_weekend_bands():
+    """Labor Day 2026 (Monday 7 September) 18:00 was billed at the weekday
+    peak rate. With the holiday configured it is priced like a weekend."""
+    import dataclasses
+    tz = ZoneInfo(TZ)
+    rows = [{"ts": datetime(2026, 9, 7, 18, m, tzinfo=tz).astimezone(timezone.utc),
+             "equipment_status": "cooling"} for m in (0, 10)]
+    plain = cost.compute(rows, CFG.tou, 3.0, TZ)
+    holiday_tou = dataclasses.replace(CFG.tou, holiday_rules=("labor_day",),
+                                      holiday_observed="none")
+    holiday = cost.compute(rows, holiday_tou, 3.0, TZ)
+    weekend_rate = CFG.tou.band_for(datetime(2026, 9, 5, 18, 0, tzinfo=tz))[1]
+    assert plain.by_band.keys() == {"peak"}
+    assert holiday.total_dollars == pytest.approx(10 / 60 * 3.0 * weekend_rate)

@@ -1,6 +1,7 @@
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 from typing import Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -51,17 +52,97 @@ class TouBand:
         return t >= self.start or t < self.end   # wraps midnight
 
 
+# ---- TOU holidays -----------------------------------------------------------
+# Many time-of-use tariffs price a short list of holidays like a weekend. The
+# list and the rule for a holiday that lands on a weekend differ by utility, so
+# both are configuration (tou.holidays), never hardcoded. Each named rule is
+# computed per year. Default: no holidays, which is how every config written
+# before this existed behaves.
+def _nth_weekday(year, month, weekday, n):
+    """The n-th `weekday` (Mon=0) of a month."""
+    first = date(year, month, 1)
+    return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (n - 1))
+
+
+def _last_weekday(year, month, weekday):
+    """The last `weekday` (Mon=0) of a month."""
+    nxt = date(year + (month == 12), month % 12 + 1, 1)
+    last = nxt - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+# name -> (fixed_date, fn(year) -> date). Only FIXED-date holidays can land on a
+# weekend, so only they are subject to the weekend-observance rule; the rest
+# are defined as a weekday.
+HOLIDAY_RULES = {
+    "new_years_day": (True, lambda y: date(y, 1, 1)),
+    "martin_luther_king_day": (False, lambda y: _nth_weekday(y, 1, 0, 3)),
+    "presidents_day": (False, lambda y: _nth_weekday(y, 2, 0, 3)),
+    "memorial_day": (False, lambda y: _last_weekday(y, 5, 0)),
+    "juneteenth": (True, lambda y: date(y, 6, 19)),
+    "independence_day": (True, lambda y: date(y, 7, 4)),
+    "labor_day": (False, lambda y: _nth_weekday(y, 9, 0, 1)),
+    "columbus_day": (False, lambda y: _nth_weekday(y, 10, 0, 2)),
+    "veterans_day": (True, lambda y: date(y, 11, 11)),
+    "thanksgiving_day": (False, lambda y: _nth_weekday(y, 11, 3, 4)),
+    "day_after_thanksgiving": (False, lambda y: _nth_weekday(y, 11, 3, 4) + timedelta(days=1)),
+    "christmas_day": (True, lambda y: date(y, 12, 25)),
+}
+
+# How a fixed-date holiday that falls on a weekend is observed:
+#   "none"                          - it is not moved (it is already a weekend)
+#   "sunday_to_monday"              - Sunday moves to the Monday after
+#   "saturday_to_friday_sunday_to_monday"
+#                                   - Saturday moves to the Friday before and
+#                                     Sunday to the Monday after (the US federal
+#                                     rule, and the one several utilities use)
+HOLIDAY_OBSERVANCE = ("none", "sunday_to_monday", "saturday_to_friday_sunday_to_monday")
+
+
+@lru_cache(maxsize=256)
+def _holidays_in_year(rules, observed, year):
+    """Every holiday date that falls in `year`, observance applied. A holiday
+    of the NEXT year can be observed in this one (New Year's Day on a Saturday
+    is observed on Friday 31 December), so both years' rules are evaluated."""
+    out = set()
+    for y in (year, year + 1):
+        for name in rules:
+            fixed, fn = HOLIDAY_RULES[name]
+            d = fn(y)
+            if fixed and d.weekday() == 5 and observed == "saturday_to_friday_sunday_to_monday":
+                d -= timedelta(days=1)
+            elif fixed and d.weekday() == 6 and observed != "none":
+                d += timedelta(days=1)
+            if d.year == year:
+                out.add(d)
+    return frozenset(out)
+
+
 @dataclass(frozen=True)
 class TouTable:
     summer_months: frozenset
     bands: tuple
+    # Named HOLIDAY_RULES, their weekend observance, and any extra explicit
+    # dates. A holiday is priced with the weekend bands.
+    holiday_rules: tuple = ()
+    holiday_observed: str = "none"
+    holiday_dates: frozenset = frozenset()
 
     def season(self, month: int) -> str:
         return "summer" if month in self.summer_months else "winter"
 
+    def is_holiday(self, d: date) -> bool:
+        """True when local date `d` is a configured TOU holiday (after any
+        weekend observance), and so priced like a weekend."""
+        if d in self.holiday_dates:
+            return True
+        if not self.holiday_rules:
+            return False
+        return d in _holidays_in_year(self.holiday_rules, self.holiday_observed, d.year)
+
     def band_for(self, dt_local: datetime) -> tuple[str, float]:
         season = self.season(dt_local.month)
-        weekend = dt_local.weekday() >= 5
+        weekend = dt_local.weekday() >= 5 or self.is_holiday(dt_local.date())
         t = dt_local.time()
         for b in self.bands:
             if b.season != season:
@@ -217,6 +298,15 @@ def _validate_config(d: dict, table: "TouTable") -> None:
     missing = [k for k in _REQUIRED_ALERT_KEYS if k not in alerts]
     if missing:
         raise ValueError(f"config 'alerts' is missing required keys: {', '.join(missing)}")
+    # Every runtime, cost and coverage figure credits a reading with at most
+    # 10 minutes (analytics.cost.MAX_GAP_S) and treats anything longer as
+    # unobserved. A slower poller would leave every day "incomplete" and the
+    # cost average, forecast and pre-cool analysis would wait forever.
+    poll = d.get("poll_interval_s")
+    if not isinstance(poll, (int, float)) or isinstance(poll, bool) or not 0 < poll <= 600:
+        raise ValueError(f"config 'poll_interval_s' is {poll!r}; it must be between 1 and "
+                         "600 seconds (readings further apart than 10 minutes are "
+                         "treated as unobserved time)")
     channel = alerts.get("channel", "noop")
     if channel not in ALERT_CHANNELS:
         raise ValueError(f"config 'alerts.channel' must be one of "
@@ -261,6 +351,56 @@ def _validate_config(d: dict, table: "TouTable") -> None:
                         f"in month {m}; every minute of every day must be covered")
 
 
+def _parse_holidays(h) -> tuple:
+    """tou.holidays -> (rules, observed, dates). Absent means no holidays.
+    Raises ValueError naming the bad entry, so a typo fails at boot instead of
+    silently billing a holiday at peak.
+
+        "holidays": {
+          "rules": ["new_years_day", "memorial_day", "independence_day",
+                    "labor_day", "thanksgiving_day", "christmas_day"],
+          "observed": "saturday_to_friday_sunday_to_monday",
+          "dates": ["2026-12-24"]
+        }
+    """
+    if h is None:
+        return (), "none", frozenset()
+    if not isinstance(h, dict):
+        raise ValueError("config 'tou.holidays' must be an object")
+    unknown_keys = set(h) - {"rules", "observed", "dates"}
+    if unknown_keys:
+        raise ValueError(f"config 'tou.holidays' has unknown keys: {', '.join(sorted(unknown_keys))}")
+    rules = h.get("rules", [])
+    if not isinstance(rules, list) or not all(isinstance(r, str) for r in rules):
+        raise ValueError("config 'tou.holidays.rules' must be a list of rule names")
+    bad = [r for r in rules if r not in HOLIDAY_RULES]
+    if bad:
+        raise ValueError(f"config 'tou.holidays.rules' has unknown rules: {', '.join(bad)} "
+                         f"(known: {', '.join(HOLIDAY_RULES)})")
+    # Required whenever rules are listed: whether a Saturday Independence Day
+    # moves to Friday is a property of the tariff, and guessing it either way
+    # misprices a whole weekday.
+    observed = h.get("observed")
+    if rules and observed is None:
+        raise ValueError("config 'tou.holidays.observed' is required when rules are listed "
+                         f"(one of: {', '.join(HOLIDAY_OBSERVANCE)})")
+    observed = observed or "none"
+    if observed not in HOLIDAY_OBSERVANCE:
+        raise ValueError(f"config 'tou.holidays.observed' is {observed!r}; "
+                         f"must be one of: {', '.join(HOLIDAY_OBSERVANCE)}")
+    raw_dates = h.get("dates", [])
+    if not isinstance(raw_dates, list):
+        raise ValueError("config 'tou.holidays.dates' must be a list of YYYY-MM-DD dates")
+    dates = set()
+    for s in raw_dates:
+        try:
+            dates.add(date.fromisoformat(s))
+        except (TypeError, ValueError):
+            raise ValueError(f"config 'tou.holidays.dates' has an invalid date: {s!r} "
+                             "(expected YYYY-MM-DD)")
+    return tuple(dict.fromkeys(rules)), observed, frozenset(dates)
+
+
 def load_config(path: str) -> Config:
     with open(path) as f:
         d = json.load(f)
@@ -269,7 +409,10 @@ def load_config(path: str) -> Config:
         TouBand(b["name"], b["season"], b.get("days", "all"),
                 _parse_hhmm(b["start"]), _parse_hhmm(b["end"]), float(b["rate"]))
         for b in tou["bands"])
-    table = TouTable(frozenset(tou["seasons"]["summer"]["months"]), bands)
+    rules, observed, dates = _parse_holidays(tou.get("holidays"))
+    table = TouTable(frozenset(tou["seasons"]["summer"]["months"]), bands,
+                     holiday_rules=rules, holiday_observed=observed,
+                     holiday_dates=dates)
     _validate_config(d, table)
     return Config(
         poll_interval_s=int(d["poll_interval_s"]),
