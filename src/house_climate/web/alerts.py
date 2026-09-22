@@ -112,6 +112,12 @@ class Alert:
     # reader holding the unhedged claim -- the exact failure the caveat exists
     # to prevent. `key` stays the stable identity everything else asserts on.
     variant: str = ""
+    # How bad, for alerts whose condition can WORSEN while it stands: the
+    # freeze band (1 frost, 2 freeze, 3 hard) and the count of active NWS
+    # alerts. A higher level than the one last pushed is a new event and
+    # pushes through the cooldown; the same or a lower level (warming up, an
+    # NWS alert expiring) is not. 0 for everything else.
+    level: int = 0
 
     @property
     def dedupe_key(self):
@@ -176,8 +182,14 @@ def _recovering(rows, minutes):
 
 def evaluate(rows, cfg, poll_errors_recent, now=None, *,
              crawl_rows=None, filter_due=None, outdoor_aqi=None,
-             aqi_source=None) -> list[Alert]:
+             aqi_source=None, checked=None) -> list[Alert]:
     """Evaluate all alert conditions against the recent thermostat readings.
+
+    checked -- optional set; filled with the keys whose check actually RAN on
+               current data. An alert that is absent because its data was
+               stale (thermostat outage, weather feed gap, crawl probe quiet)
+               did not clear, so the re-arm logic must not treat it as
+               cleared. See _checked_keys.
 
     Extra context (kept optional so the pure function stays easy to test, and
     absent context simply skips that alert rather than erroring):
@@ -274,7 +286,42 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
                           f"Outdoor air unhealthy (AQI {int(round(aqi))}{est}):"
                           " keep windows closed, run purifiers",
                           variant="airnow" if from_monitor else "estimate"))
+    if checked is not None:
+        checked |= _checked_keys(rows, thermo_fresh, crawl_rows, filter_due, aqi,
+                                 out, a, now)
     return out
+
+
+_THERMO_KEYS = frozenset({"humidity_high", "setpoint_drift", "short_cycling",
+                          "peak_surge", "equipment_unknown", "weather_feed_stale"})
+
+
+def _checked_keys(rows, thermo_fresh, crawl_rows, filter_due, aqi, fired, a, now):
+    """Which alert keys were really evaluated on current data this pass."""
+    keys = {"offline"}
+    if thermo_fresh:
+        keys |= _THERMO_KEYS
+        latest = rows[-1]
+        if latest.get("wx_outdoor_temp_f") is not None or latest.get("daikin_outdoor_temp_f") is not None:
+            keys.add("freeze")
+        if latest.get("wx_alert_count") is not None:
+            keys.add("weather_alert")
+    if crawl_rows is not None:
+        keys.add("crawl_sensor_offline")
+        fresh = (crawl_rows is not CRAWL_FETCH_FAILED and crawl_rows
+                 and (now - crawl_rows[-1]["ts"]).total_seconds()
+                 <= a.get("crawl_offline_minutes", _CRAWL_OFFLINE_MINUTES) * 60)
+        if fresh:
+            keys |= {"crawl_saturated", "crawl_condensation"}
+            # Saturation SUPPRESSES the mold alert rather than clearing it:
+            # the crawl is wetter, not drier, so mold must not re-arm.
+            if not any(al.key == "crawl_saturated" for al in fired):
+                keys.add("crawl_mold")
+    if filter_due is not None:
+        keys.add("filter_due")
+    if aqi is not None:
+        keys.add("air_quality")
+    return keys
 
 
 def _thermostat_alerts(rows, cfg, now):
@@ -311,12 +358,23 @@ def _thermostat_alerts(rows, cfg, now):
         outdoor_t = latest.get("daikin_outdoor_temp_f")
     freeze_at = a.get("freeze_temp_f", 34)
     if outdoor_t is not None and outdoor_t <= freeze_at:
-        out.append(Alert("freeze", "warning",
-                         f"Freeze risk: outdoor {int(round(outdoor_t))}°F (at or below {freeze_at}°F)."
-                         " Protect pipes and unheated zones."))
+        # The band is the level, so a COLDER band is a new event: a 34°F
+        # frost at dawn must not hold back the push for a 15°F hard freeze
+        # that evening under the same cooldown. Warming back up is not news.
+        level = 3 if outdoor_t <= 20 else 2 if outdoor_t <= 28 else 1
+        out.append(Alert("freeze", "critical" if level == 3 else "warning",
+                         f"{'Hard freeze' if level == 3 else 'Freeze risk'}: outdoor"
+                         f" {int(round(outdoor_t))}°F (at or below {freeze_at}°F)."
+                         " Protect pipes and unheated zones.", level=level))
 
-    if (latest.get("wx_alert_count") or 0) > 0:
-        out.append(Alert("weather_alert", "warning", "Active NWS weather alert for your area"))
+    n_wx = latest.get("wx_alert_count") or 0
+    if n_wx > 0:
+        # The count is the level: a new NWS alert issued while an earlier one
+        # is active (a morning Wind Advisory, an afternoon Flash Flood
+        # Warning) is a new event. One expiring is not.
+        out.append(Alert("weather_alert", "warning",
+                         f"{n_wx} active NWS weather alert{'s' if n_wx != 1 else ''} for your area",
+                         level=int(n_wx)))
 
     # Peak-hour surge (README's promised "peak-hour surge" alert; config key
     # peak_surge_ratio was previously read by nothing). Single-reading, like
@@ -513,6 +571,22 @@ class NoopSink:
     def send(self, alert): log.info("ALERT(noop) %s: %s", alert.key, alert.message)
 
 
+# Not an alert: the receiver must stamp it and stay silent.
+HEARTBEAT_KEY = "heartbeat"
+
+
+def _send_heartbeat(sink):
+    """Proof of life for the push path. A webhook receiver can answer 200
+    while doing nothing (Home Assistant does, for an unknown webhook id), so
+    the receiver stamps each heartbeat and alerts when they stop arriving.
+    Only a WebhookSink has a receiver that can do that; returns False for
+    the others."""
+    if not isinstance(sink, WebhookSink):
+        return False
+    sink.send(Alert(HEARTBEAT_KEY, "info", "house-climate alert relay heartbeat"))
+    return True
+
+
 def make_sink(cfg, env=None):
     """Build the configured push sink. Raises ValueError when the channel
     cannot actually deliver (webhook with no usable URL): the web app builds
@@ -545,7 +619,40 @@ def pushable(fired, cfg):
 _EPOCH_START = datetime.min.replace(tzinfo=timezone.utc)
 
 
-def _dispatch(sink, fired, last_sent, cooldown, now, on_sent=None):
+def _rearm_cleared(fired, last_sent, cleared_since, grace, now, on_rearm=None,
+                   last_level=None, checked=None):
+    """Forget the send record of any alert that has stopped firing for at
+    least `grace`, so its NEXT occurrence pushes at once. The cooldown exists
+    to stop a standing condition (a filter overdue for weeks) re-buzzing; it
+    must not swallow a new occurrence of something that had cleared. The
+    grace keeps a condition flickering at its threshold from buzzing on every
+    flicker. `fired` is every alert evaluated (pushed or suppressed).
+
+    Liveness is by KEY, not variant: the air-quality source flipping from the
+    monitor to the estimate and back is one standing condition. And only keys
+    in `checked` (evaluated on current data) can start clearing; None means
+    everything was checked."""
+    live = {al.key for al in fired}
+    for dk in list(last_sent):
+        if dk[0] in live or (checked is not None and dk[0] not in checked):
+            cleared_since.pop(dk, None)
+            continue
+        since = cleared_since.setdefault(dk, now)
+        if now - since >= grace:
+            del last_sent[dk]
+            cleared_since.pop(dk, None)
+            if last_level is not None:
+                last_level.pop(dk, None)
+            if on_rearm is not None:
+                try:
+                    on_rearm(dk)
+                except Exception:
+                    log.exception("alert %s/%s re-armed in this process, but its stored"
+                                  " send time could not be cleared, so a restart would"
+                                  " quiet it again until its cooldown runs out", *dk)
+
+
+def _dispatch(sink, fired, last_sent, cooldown, now, on_sent=None, last_level=None):
     """Send each due alert (not sent within `cooldown`), mutating last_sent.
     Per-alert guard: a failed send (ntfy/webhook 4xx/5xx raises) is logged and
     the alert left UNSENT (last_sent is not updated, so it retries next cycle
@@ -554,8 +661,10 @@ def _dispatch(sink, fired, last_sent, cooldown, now, on_sent=None):
     `on_sent(dedupe_key, ts)` persists a successful send (see record_sent). Its
     failure is logged and ignored: the in-memory cooldown still holds for this
     process, and the worst case is one repeat push after a restart."""
+    levels = last_level if last_level is not None else {}
     for al in fired:
-        if now - last_sent.get(al.dedupe_key, _EPOCH_START) < cooldown:
+        worse = al.level > levels.get(al.dedupe_key, 0)
+        if now - last_sent.get(al.dedupe_key, _EPOCH_START) < cooldown and not worse:
             continue
         try:
             sink.send(al)
@@ -563,6 +672,7 @@ def _dispatch(sink, fired, last_sent, cooldown, now, on_sent=None):
             log.exception("failed to send alert %s; will retry", al.key)
             continue
         last_sent[al.dedupe_key] = now
+        levels[al.dedupe_key] = al.level
         if on_sent is not None:
             try:
                 on_sent(al.dedupe_key, now)
@@ -582,8 +692,55 @@ def _sent_kv_key(dedupe_key):
     return f"{_SENT_PREFIX}{key}|{variant}"
 
 
-def record_sent(conn, dedupe_key, ts):
-    db.kv_set(conn, _sent_kv_key(dedupe_key), {"ts": ts.isoformat()})
+def record_sent(conn, dedupe_key, ts, level=0):
+    db.kv_set(conn, _sent_kv_key(dedupe_key), {"ts": ts.isoformat(), "level": level})
+
+
+def forget_sent(conn, dedupe_key):
+    db.kv_delete(conn, _sent_kv_key(dedupe_key))
+
+
+_HEARTBEAT_KV = "alert_relay_heartbeat"
+
+
+def _heartbeat_due(conn, every, now):
+    """True when no heartbeat has been sent within `every`. An unreadable kv
+    reads as due: a spare heartbeat costs nothing, a missing one alarms."""
+    try:
+        row = db.kv_get(conn, _HEARTBEAT_KV)
+        last = datetime.fromisoformat(row["value"]["ts"]) if row else None
+    except Exception:
+        log.exception("could not read the last relay heartbeat; sending one")
+        return True
+    return last is None or now - last >= every
+
+
+_LEVEL_UNKNOWN = 1_000_000
+
+
+def load_last_levels(conn):
+    """{(key, variant): level last pushed}, from the same kv rows as
+    load_last_sent. Missing or unreadable reads as 0 (the safe direction: at
+    worst one repeat push of a worsening condition)."""
+    try:
+        rows = db.kv_prefix(conn, _SENT_PREFIX)
+    except Exception:
+        log.exception("could not read alert levels from kv")
+        return {}
+    out = {}
+    for k, v in rows:
+        try:
+            key, variant = k[len(_SENT_PREFIX):].split("|", 1)
+            # A row written before levels existed has none. Reading it as 0
+            # would make every standing freeze/NWS alert look "worse" and
+            # re-push once on the upgrade; reading it as unbounded keeps it
+            # quiet until it clears or its cooldown runs out, as before.
+            lvl = v.get("level", _LEVEL_UNKNOWN)
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(lvl, int) and not isinstance(lvl, bool):
+            out[(key, variant)] = lvl
+    return out
 
 
 def load_last_sent(conn):
@@ -625,7 +782,7 @@ def _poll_errors_recent(conn):
         return 0
 
 
-def evaluate_current(conn, device_id, cfg, now=None):
+def evaluate_current(conn, device_id, cfg, now=None, checked=None):
     """Evaluate every alert against live data. The ONE entry point for both
     the push loop and the wall's alert strip (/api/anomalies), so the two can
     never disagree about what is wrong. The strip used to call evaluate() with
@@ -639,14 +796,20 @@ def evaluate_current(conn, device_id, cfg, now=None):
         conn, device_id, cfg, since, rows, now=now)
     return evaluate(rows, cfg, errs, now, crawl_rows=crawl_rows,
                     filter_due=filter_due, outdoor_aqi=outdoor_aqi,
-                    aqi_source=aqi_source)
+                    aqi_source=aqi_source, checked=checked)
 
 
 def alert_loop(cfg, secrets):
     conn = db.connect(secrets.db_dsn)
     sink = make_sink(cfg)
     cooldown = timedelta(minutes=cfg.alerts["cooldown_minutes"])
+    grace = timedelta(minutes=cfg.alerts.get("rearm_after_clear_minutes", 60))
+    hb_hours = cfg.alerts.get("relay_heartbeat_hours", 24)
+    heartbeat_every = timedelta(hours=hb_hours) if hb_hours else None
+    hb_sent_at = None      # in-memory fallback when the kv stamp cannot be read or written
     last_sent = load_last_sent(conn)
+    last_level = load_last_levels(conn)
+    cleared_since = {}
     while True:
         try:
             # Self-heal a dead connection (DB restart) — retrying the same
@@ -655,11 +818,33 @@ def alert_loop(cfg, secrets):
             if conn.closed:
                 conn = db.connect(secrets.db_dsn)
             device_id = os.environ.get("DEVICE_ID") or db.latest_device_id(conn) or "unknown"
-            fired = evaluate_current(conn, device_id, cfg)
+            checked = set()
+            fired = evaluate_current(conn, device_id, cfg, checked=checked)
             live = conn
-            _dispatch(sink, pushable(fired, cfg), last_sent, cooldown,
-                      datetime.now(timezone.utc),
-                      on_sent=lambda k, ts: record_sent(live, k, ts))
+            now = datetime.now(timezone.utc)
+            _rearm_cleared(fired, last_sent, cleared_since, grace, now,
+                           on_rearm=lambda k: forget_sent(live, k), last_level=last_level,
+                           checked=checked)
+            _dispatch(sink, pushable(fired, cfg), last_sent, cooldown, now,
+                      on_sent=lambda k, ts: record_sent(live, k, ts, last_level.get(k, 0)),
+                      last_level=last_level)
+            # After evaluation on purpose: a loop that cannot evaluate must go
+            # quiet, so the receiver's staleness alarm fires.
+            if (heartbeat_every is not None
+                    and (hb_sent_at is None or now - hb_sent_at >= heartbeat_every)
+                    and _heartbeat_due(conn, heartbeat_every, now)):
+                try:
+                    sent = _send_heartbeat(sink)
+                except Exception:
+                    log.exception("relay heartbeat POST failed; will retry next cycle")
+                    sent = False
+                if sent:
+                    hb_sent_at = now
+                    try:
+                        db.kv_set(conn, _HEARTBEAT_KV, {"ts": now.isoformat()})
+                    except Exception:
+                        log.exception("relay heartbeat sent, but its time could not be"
+                                      " saved; a restart may send one early")
         except Exception:
             log.exception("alert loop error")
             try:

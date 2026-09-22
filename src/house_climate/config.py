@@ -322,11 +322,17 @@ def _validate_config(d: dict, table: "TouTable") -> None:
     if unknown:
         raise ValueError(f"config 'alerts.push_suppress' has unknown alert keys: "
                          f"{', '.join(unknown)} (known: {', '.join(ALERT_KEYS)})")
-    if "crawl_offline_minutes" in alerts:
-        v = alerts["crawl_offline_minutes"]
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
-            raise ValueError("config 'alerts.crawl_offline_minutes' must be a "
-                             f"positive number of minutes; got {v!r}")
+    for opt, unit in (("crawl_offline_minutes", "minutes"),
+                      ("rearm_after_clear_minutes", "minutes"),
+                      ("relay_heartbeat_hours", "hours")):
+        if opt in alerts:
+            v = alerts[opt]
+            # relay_heartbeat_hours 0 turns the heartbeat off.
+            if opt == "relay_heartbeat_hours" and v == 0 and not isinstance(v, bool):
+                continue
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+                raise ValueError(f"config 'alerts.{opt}' must be a "
+                                 f"positive number of {unit}; got {v!r}")
     try:
         ZoneInfo(d["timezone"])
     except (ZoneInfoNotFoundError, ValueError, KeyError) as e:
