@@ -11,10 +11,11 @@ rolls that section to a dated version via `python scripts/release.py`.
 ## [Unreleased]
 
 ### Added
-- Webhook heartbeat: every `relay_heartbeat_hours` (default 24) the webhook
-  channel posts a `heartbeat` so the receiver can alarm when pushes stop
-  arriving. A receiver that answers 200 while doing nothing was otherwise
-  invisible.
+- Webhook heartbeat: every `relay_heartbeat_hours` (default 24, `0` = off)
+  the webhook channel posts a `heartbeat` so the receiver can alarm when
+  pushes stop arriving. A receiver that answers 200 while doing nothing was
+  otherwise invisible. **Upgrade note:** a receiver that forwards every POST
+  to a phone must skip `key == "heartbeat"` first.
 - New `"webhook"` alert channel: each alert is POSTed as JSON (key, severity,
   title, message) to the URL in the `ALERT_WEBHOOK_URL` environment variable,
   for example a Home Assistant webhook automation. A failed delivery is
@@ -121,9 +122,12 @@ rolls that section to a dated version via `python scripts/release.py`.
 ### Fixed
 - The alert cooldown swallowed new events. It only ever measured time since
   the last push, so with a long cooldown a morning alert silenced a fresh one
-  that afternoon. An alert that has been clear for `rearm_after_clear_minutes`
-  (default 60) now pushes at once when it returns, and a colder freeze band or
-  an additional NWS alert counts as a new event (a hard freeze is critical).
+  that afternoon. An alert that has been checked and found clear for
+  `rearm_after_clear_minutes` (default 60) now pushes at once when it returns;
+  one hidden by stale data has not cleared and stays quiet. A condition that
+  gets worse (a colder freeze band, more active NWS alerts) pushes through the
+  cooldown; getting better does not. A hard freeze (20°F and below) is
+  critical.
 - A monitor AQI reading stamped a few milliseconds "in the future" (the DB
   and web app clocks differ slightly) was thrown out as suspect and the
   modeled estimate shown instead. Up to 5 seconds of skew is now tolerated.
