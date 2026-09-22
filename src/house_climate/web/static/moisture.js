@@ -442,15 +442,19 @@ function renderNow(m) {
   const el = document.getElementById('mo-now');
   const dp = m.dp_now || {};
   const refName = dp.reference_name || 'Indoor';
-  const chip = (label, v, cls) =>
+  /* The server withholds a "now" value whose sensor has gone quiet (it sends
+     null plus the reading's age); say how old instead of a bare dash. */
+  const chip = (label, v, cls, ageS) =>
     `<div class="mo-dp"><span class="micro">${escapeHtml(label)}</span>` +
-    `<span class="v num ${cls || ''}">${fmtTemp(v, 1)}<span class="u">${DEG}</span></span></div>`;
+    `<span class="v num ${cls || ''}">${fmtTemp(v, 1)}<span class="u">${DEG}</span></span>` +
+    (v == null && ageS != null ? `<span class="mo-dp-sub">no reading for ${fmtAge(ageS)}</span>` : '') +
+    `</div>`;
   const d = m.delta ? m.delta.now : null;
   el.innerHTML = `<div class="mo-now-row num">
-    ${chip('Crawl space', dp.crawl, dpClass(dp.crawl))}
-    ${chip(refName, dp.reference)}
-    ${chip('Thermostat', dp.thermostat)}
-    ${chip('Outdoor', dp.outdoor)}
+    ${chip('Crawl space', dp.crawl, dpClass(dp.crawl), dp.crawl_age_s)}
+    ${chip(refName, dp.reference, '', dp.reference_age_s)}
+    ${chip('Thermostat', dp.thermostat, '', dp.thermostat_age_s)}
+    ${chip('Outdoor', dp.outdoor, '', dp.thermostat_age_s)}
     <div class="mo-dp mo-delta-big"><span class="micro">Crawl &minus; ${escapeHtml(refName.toLowerCase())}</span>
       <span class="v num ${deltaClass(d)}">${d != null && d > 0 ? '+' : ''}${fmtTemp(d, 1)}<span class="u">${DEG}</span></span>
       <span class="mo-dp-sub">${d == null ? '' : d > 0 ? 'crawl is wetter — moisture drives upward' : d < 0 ? 'house is wetter than the crawl' : 'even — no gradient either way'}</span>

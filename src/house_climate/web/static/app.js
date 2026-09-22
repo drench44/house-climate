@@ -199,8 +199,7 @@ function roomRow(rm, heat, cool, air) {
   }
 
   const stale = !!rm.stale;
-  const tCls = stale ? '' : (isCrawl ? crawlTempClass(rm.temp_f) : tempClass(rm.temp_f, heat, cool));
-  const hCls = stale ? '' : (isCrawl ? crawlRhClass(rm.humidity) : rhClass(rm.humidity));
+  const { t: tCls, h: hCls } = roomValueClasses(rm, heat, cool);
 
   const lvl = rm.signal == null ? null : clamp(Math.round(rm.signal), 0, 4);
   let sig = '';
@@ -341,11 +340,21 @@ function tickCost() {
 
 /* peakStripHtml() comes from common.js (shared with square.js) */
 
+function stopCostTicker() {
+  costTickerState = null;
+  if (costTickerHandle) { clearInterval(costTickerHandle); costTickerHandle = null; }
+}
+
 function renderRail(cost, forecast, precool) {
   const el = document.getElementById('rail');
-  if (!cost) {
-    el.innerHTML = `<p class="loading">Cost — waiting for data.</p>`;
-    costTickerState = null;
+  const state = costRailState(cost);
+  if (state !== 'ok') {
+    /* Replace the rail outright (and stop the ticker) so the previous
+       numbers can never linger on screen looking current. */
+    stopCostTicker();
+    el.innerHTML = state === 'waiting'
+      ? `<p class="loading">Cost: waiting for data.</p>`
+      : costUnavailableHtml(cost);
     return;
   }
 
@@ -384,16 +393,14 @@ function renderRail(cost, forecast, precool) {
     ? `<span class="accrual num" id="accrual">▲ accruing $${rate.toFixed(2)}/hr</span>`
     : `<span class="accrual num" id="accrual" hidden></span>`;
 
-  /* Band split for TODAY, so the breakdown sums to the headline above it. */
-  const by = (cost.today && cost.today.by_band) || {};
-  const bandDollars = (k) => (by[k] && by[k].dollars) || 0;
+  /* Band split for TODAY, so the breakdown sums to the headline above it.
+     One row per configured band (bandSplitRows, common.js), whatever the
+     TOU config names them. */
   const monthTotal = cost.month_to_date ? cost.month_to_date.dollars : 0;
-  const total3 = bandDollars('peak') + bandDollars('midpeak') + bandDollars('offpeak');
-  const width = (k) => (total3 > 0 ? (bandDollars(k) / total3) * 100 : 0);
-  const bandRow = (cls, name, k) =>
-    `<div class="bandrow ${cls}"><span class="dot"></span><span class="nm">${name}</span>` +
-    `<span class="bar"><i style="width:${width(k).toFixed(0)}%"></i></span>` +
-    `<span class="amt num">$${bandDollars(k).toFixed(2)}</span></div>`;
+  const bandRowsHtml = bandSplitRows(cost).map((r) =>
+    `<div class="bandrow ${r.cls}"><span class="dot"></span><span class="nm">${escapeHtml(r.label)}</span>` +
+    `<span class="bar"><i style="width:${r.pct.toFixed(0)}%"></i></span>` +
+    `<span class="amt num">$${r.dollars.toFixed(2)}</span></div>`).join('');
 
   let proj = `<div class="proj-row"><span>${escapeHtml(monthLabel)}</span><b class="num"${monthTip}>$${monthTotal.toFixed(2)}</b></div>`;
   if ((cost.complete_days || 0) > 0) {
@@ -402,7 +409,8 @@ function renderRail(cost, forecast, precool) {
     proj += `<div class="proj-row"><span>avg/day <b>${avg}</b></span><span>projected month <b>${pm}</b></span></div>`;
   }
 
-  let fc = '';
+  const fcNote = forecastUnavailableText(forecast);
+  let fc = fcNote ? `<hr><p class="fc-basis">${escapeHtml(fcNote)}</p>` : '';
   if (forecast && forecast.available) {
     const hrs = forecast.predicted_cool_minutes != null
       ? (Math.round((forecast.predicted_cool_minutes / 60) * 2) / 2)
@@ -410,11 +418,10 @@ function renderRail(cost, forecast, precool) {
     const basis = (forecast.days_of_history != null && forecast.days_of_history < 7)
       ? `<p class="fc-basis">based on ${forecast.days_of_history} day${forecast.days_of_history === 1 ? '' : 's'} of history</p>`
       : '';
-    /* predicted_peak_dollars covers ONLY the 5-9pm window's predicted
-       cooling at that window's real rate (off-peak on weekends). */
-    const peakTxt = forecast.peak_band === 'peak'
-      ? `<b>$${(forecast.predicted_peak_dollars || 0).toFixed(2)}</b> of it in the 5&ndash;9pm peak window if nothing shifts`
-      : `<b>$${(forecast.predicted_peak_dollars || 0).toFixed(2)}</b> during 5&ndash;9pm (weekend &mdash; off-peak rate)`;
+    /* predicted_peak_dollars covers ONLY tomorrow's on-peak window(s), as
+       the TOU config defines them for that date; a day with no peak window
+       says so instead of pricing one. */
+    const peakTxt = forecastPeakText(forecast);
     fc = `<hr><span class="micro">Tomorrow</span>
       <p class="fc-line num">High <b>${fmtTemp(forecast.fc_high_f, 0)}${DEG}</b> — expect about ` +
       `<b>${hrs != null ? hrs : '—'}h</b> of cooling, ${peakTxt}.</p>${basis}`;
@@ -432,11 +439,9 @@ function renderRail(cost, forecast, precool) {
     <div class="today-amt num" id="cost-today">$${cost.today.dollars.toFixed(2)}</div>
     ${accrual}
     <div class="bands">
-      ${bandRow('b-peak', 'on-peak', 'peak')}
-      ${bandRow('b-mid', 'mid-peak', 'midpeak')}
-      ${bandRow('b-off', 'off-peak', 'offpeak')}
+      ${bandRowsHtml}
     </div>
-    <p class="fc-basis" title="Runtime × ${cost.assumed_kw != null ? cost.assumed_kw : '?'} kW (configured system draw) × the example TOU schedule's rates. HVAC energy only — not your whole electric bill.">HVAC only · estimated at ${cost.assumed_kw != null ? cost.assumed_kw : '?'} kW while cooling</p>
+    <p class="fc-basis" title="Runtime × ${cost.assumed_kw != null ? cost.assumed_kw : '?'} kW (configured system draw) × your configured TOU rates. HVAC energy only, not your whole electric bill.">HVAC only · estimated at ${cost.assumed_kw != null ? cost.assumed_kw : '?'} kW while cooling</p>
     <hr>
     ${proj}
     ${fc}
@@ -474,7 +479,12 @@ function renderHumidity(h) {
     else compare = ' — house is damper than outside.';
   }
 
-  const w = h.window || { action: 'neutral', reason: 'Little to gain from opening windows right now.' };
+  /* A stale panel carries no window advice (the server withholds it): say
+     the data is old instead of falling back to a reassuring default. */
+  const staleNote = humidityStaleNote(h);
+  const w = staleNote
+    ? { action: 'stale', reason: '' }
+    : (h.window || { action: 'neutral', reason: 'Little to gain from opening windows right now.' });
   const winCls = w.action === 'open' ? 'open' : w.action === 'keep_closed' ? 'closed' : '';
   const ac = h.ac_effect
     ? `Cooling pulls RH from <b>${Math.round(h.ac_effect.idle)}%</b> to <b>${Math.round(h.ac_effect.cooling)}%</b> — a <b>${h.ac_effect.drop.toFixed(1)}</b>-pt drop.`
@@ -491,7 +501,7 @@ function renderHumidity(h) {
     </div>
     <svg class="hum-spark" id="hum-spark" viewBox="0 0 960 78" role="img" aria-label="Indoor and outdoor dew point over the last 24 hours"></svg>
     <div class="hum-foot">
-      <span class="hum-window ${winCls}">${escapeHtml(w.reason)}</span>
+      ${staleNote ? `<span class="hum-window v-out">${staleNote}</span>` : `<span class="hum-window ${winCls}">${escapeHtml(w.reason)}</span>`}
       ${ac ? `<span class="hum-ac num">${ac}</span>` : ''}
     </div>
   `;
@@ -1290,14 +1300,7 @@ function renderLearningCard(t) {
 /* ---------------------------------------------------------------------- */
 
 function renderAlerts(list) {
-  const el = document.getElementById('alerts');
-  if (!Array.isArray(list) || list.length === 0) { el.innerHTML = ''; return; }
-  el.innerHTML = list.map((a) => {
-    const sev = (a.severity || 'warning').toLowerCase();
-    const crit = sev === 'critical' || sev === 'crit';
-    return `<div class="alert${crit ? ' crit' : ''}"><span class="sev">${escapeHtml(crit ? 'critical' : 'warning')}</span>` +
-      `<span>${escapeHtml(a.message || a.key || 'Alert')}</span></div>`;
-  }).join('');
+  document.getElementById('alerts').innerHTML = alertsStripHtml(list);
 }
 
 /* ---------------------------------------------------------------------- */

@@ -13,6 +13,21 @@ _REQUIRED_ALERT_KEYS = (
     "short_cycles_threshold", "short_cycles_window_hours",
 )
 
+# Every alert key the engine can emit (web/alerts.py). alerts.push_suppress is
+# validated against this so a typo fails at boot instead of silently letting
+# the push through; tests/test_alert_delivery.py keeps it in sync with the
+# engine.
+ALERT_KEYS = (
+    "offline", "humidity_high", "setpoint_drift", "short_cycling", "freeze",
+    "crawl_saturated", "crawl_mold", "crawl_condensation", "crawl_sensor_offline",
+    "filter_due", "air_quality", "weather_alert", "peak_surge",
+    "equipment_unknown", "weather_feed_stale",
+)
+
+# Push channels make_sink understands. Anything else used to fall through to
+# the no-op sink, so a misspelled channel meant alerts silently went nowhere.
+ALERT_CHANNELS = ("noop", "ntfy", "webhook")
+
 
 def _parse_hhmm(s: str) -> time:
     h, m = s.split(":")
@@ -118,6 +133,14 @@ class TouTable:
             return False
         return rate >= top
 
+    def day_has_peak(self, day: date, tzinfo) -> bool:
+        """True iff any quarter-hour of local calendar `day` is on-peak. A
+        weekend under a weekday-only peak, or a flat season, has none -- and
+        must price and fit as having no peak exposure at all."""
+        return any(self.is_peak(datetime.combine(day, time(q // 4, (q % 4) * 15),
+                                                 tzinfo=tzinfo))
+                   for q in range(96))
+
     def peak_windows(self, dt_local: datetime):
         """On-peak windows for dt_local's season as a list of (start, end,
         weekday_only), one per contiguous run of top-rate bands, sorted by start.
@@ -194,6 +217,26 @@ def _validate_config(d: dict, table: "TouTable") -> None:
     missing = [k for k in _REQUIRED_ALERT_KEYS if k not in alerts]
     if missing:
         raise ValueError(f"config 'alerts' is missing required keys: {', '.join(missing)}")
+    channel = alerts.get("channel", "noop")
+    if channel not in ALERT_CHANNELS:
+        raise ValueError(f"config 'alerts.channel' must be one of "
+                         f"{', '.join(ALERT_CHANNELS)}; got {channel!r}")
+    if channel == "ntfy" and not (isinstance(alerts.get("ntfy_topic"), str)
+                                  and alerts["ntfy_topic"].strip()):
+        raise ValueError("config 'alerts.ntfy_topic' must be a non-empty string "
+                         "when alerts.channel is 'ntfy'")
+    suppress = alerts.get("push_suppress", [])
+    if not isinstance(suppress, list) or not all(isinstance(k, str) for k in suppress):
+        raise ValueError("config 'alerts.push_suppress' must be a list of alert keys")
+    unknown = [k for k in suppress if k not in ALERT_KEYS]
+    if unknown:
+        raise ValueError(f"config 'alerts.push_suppress' has unknown alert keys: "
+                         f"{', '.join(unknown)} (known: {', '.join(ALERT_KEYS)})")
+    if "crawl_offline_minutes" in alerts:
+        v = alerts["crawl_offline_minutes"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+            raise ValueError("config 'alerts.crawl_offline_minutes' must be a "
+                             f"positive number of minutes; got {v!r}")
     try:
         ZoneInfo(d["timezone"])
     except (ZoneInfoNotFoundError, ValueError, KeyError) as e:

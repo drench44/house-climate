@@ -173,3 +173,78 @@ def test_read_endpoints_smoke_on_empty_db(conn):
                  "/api/thermal", "/api/timeline", "/api/health", "/api/backup"]:
         r = client.get(path)
         assert r.status_code == 200, f"{path}: {r.status_code} {r.text}"
+
+
+# --- alert loop wiring --------------------------------------------------------
+
+def test_exactly_one_alert_loop_thread_is_running():
+    """app.py used to start the supervised loop AND a second bare alert_loop
+    thread. Two loops keep two separate cooldowns, so every alert was pushed
+    twice."""
+    import threading
+    from house_climate.web import app as appmod
+    loops = [t for t in threading.enumerate()
+             if getattr(t, "_target", None) in (appmod.alert_loop,
+                                                appmod._supervised_alert_loop)]
+    assert len(loops) == 1, [t.name for t in loops]
+    assert loops[0]._target is appmod._supervised_alert_loop
+
+
+def test_anomalies_uses_the_resolved_monitor_aqi(conn, monkeypatch):
+    """The wall strip used to evaluate with only the reading's modeled wx_aqi,
+    so a real monitor reading pushed by Home Assistant never showed there even
+    though the push loop alerted on it. Same context builder now."""
+    from datetime import datetime, timezone
+    from house_climate.web import app as appmod
+    monkeypatch.setattr(appmod, "_device", lambda c: "dev1")
+    now = datetime.now(timezone.utc)
+    db.insert_reading(conn, dict(
+        ts=now, device_id="dev1", indoor_temp_f=72, indoor_humidity=45,
+        heat_setpoint_f=68, cool_setpoint_f=74, equipment_status="idle", mode="cool",
+        daikin_outdoor_temp_f=70, daikin_outdoor_humidity=40, wx_outdoor_temp_f=70,
+        wx_humidity=40, wx_dewpoint_f=45, wx_solar_wm2=300, wx_uv=3, wx_fc_high_f=80,
+        wx_fc_low_f=55, wx_conditions="Smoke", wx_aqi=None, wx_alert_count=0,
+        weather_ok=True))
+    db.kv_set(conn, "ha_outdoor_aqi", {"aqi": 180})
+    r = client.get("/api/anomalies")
+    assert r.status_code == 200, r.text
+    assert "air_quality" in {a["key"] for a in r.json()}
+
+
+def test_anomalies_shows_context_only_alerts(conn, monkeypatch):
+    """Filter-due and crawl alerts come from _alert_context; the wall must see
+    them exactly as the push loop does."""
+    from house_climate.web import alerts as al
+    monkeypatch.setattr(al, "_alert_context", lambda *a, **k: (None, True, None, None))
+    r = client.get("/api/anomalies")
+    assert r.status_code == 200, r.text
+    assert "filter_due" in {a["key"] for a in r.json()}
+
+
+def test_anomalies_still_shows_push_suppressed_alerts(conn, monkeypatch):
+    """push_suppress stops the PUSH only; the wall strip must still show it."""
+    from house_climate.web import app as appmod
+    from house_climate.web import alerts as al
+    monkeypatch.setitem(appmod.cfg.alerts, "push_suppress", ["filter_due"])
+    monkeypatch.setattr(al, "_alert_context", lambda *a, **k: (None, True, None, None))
+    r = client.get("/api/anomalies")
+    assert "filter_due" in {a["key"] for a in r.json()}
+
+
+def test_outdoor_endpoint_passes_config_for_observation_age(conn, monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from house_climate.web import app as appmod
+    from house_climate.web import api as apimod
+    monkeypatch.setattr(appmod, "_device", lambda c: "dev1")
+    now = datetime.now(timezone.utc)
+    db.insert_reading(conn, dict(
+        ts=now - timedelta(seconds=30), device_id="dev1", indoor_temp_f=72,
+        indoor_humidity=45, heat_setpoint_f=68, cool_setpoint_f=74,
+        equipment_status="idle", mode="cool", daikin_outdoor_temp_f=70,
+        daikin_outdoor_humidity=40, wx_outdoor_temp_f=70, wx_humidity=40,
+        wx_dewpoint_f=45, wx_solar_wm2=300, wx_uv=3, wx_fc_high_f=80, wx_fc_low_f=55,
+        wx_conditions="Clear", wx_aqi=20, wx_alert_count=0, weather_ok=True))
+    monkeypatch.setattr(apimod, "_live_feed", lambda cfg: {
+        "obsFields": ["temp"], "obsTs": now.timestamp() - 1200, "weatherStale": False})
+    o = client.get("/api/outdoor").json()["now"]
+    assert o["obs_age_known"] is True and o["obs_age_s"] >= 1190
