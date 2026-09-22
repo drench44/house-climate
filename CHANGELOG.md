@@ -10,6 +10,60 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+### Added
+- New `"webhook"` alert channel: each alert is POSTed as JSON (key, severity,
+  title, message) to the URL in the `ALERT_WEBHOOK_URL` environment variable,
+  for example a Home Assistant webhook automation. A failed delivery is
+  retried, and a missing URL stops the web service at startup with a clear
+  message instead of alerts quietly going nowhere.
+- `alerts.push_suppress`: alert keys that are still checked and shown on the
+  wall but not pushed, for alerts another system already sends. Unknown keys
+  and unknown channels are rejected when the config loads.
+- A `crawl_sensor_offline` alert when the crawl probe stops reporting for
+  `alerts.crawl_offline_minutes` (default 45).
+- The humidity, outdoor and moisture payloads now say how old their "now"
+  values are (`age_s`, `obs_age_s`, `crawl_age_s` and friends).
+
+### Fixed
+- Every alert was pushed twice: the web app started two alert loops, each
+  with its own cooldown. Now there is exactly one.
+- A restart or deploy no longer re-sends every active alert. The last-sent
+  time is kept in the database; if it cannot be read, alerts still go out.
+- The wall's alert strip now uses the same data as the push alerts, so it can
+  show crawl, filter-due and monitor air-quality alerts, and the two can no
+  longer disagree.
+- A thermostat outage no longer silences the crawl-space alerts, which come
+  from a separate sensor. Only checks that read the thermostat's own data are
+  skipped while it is offline.
+- A dead crawl probe no longer keeps the mold alert firing on its last
+  readings; the crawl alerts need recent data. If the crawl readings cannot be
+  read at all, that raises an alert too instead of going quiet.
+- If the wall cannot fetch its alerts, the strip says so instead of going
+  blank (which looked like "nothing wrong").
+- The humidity panel no longer shows an old indoor reading and "open the
+  windows" advice as current when the poller has stopped; it says the data
+  is stale.
+- Outdoor freshness is measured from when the weather station took the
+  reading, not from when we fetched it, so an hour-old station report no
+  longer reads as seconds old.
+- The moisture page no longer shows a dead sensor's last dew point, or a
+  days-old crawl-to-floor gap, as "now". The dashboard's gap strip has the
+  same check.
+- When the cost summary is unavailable the cost rail says so, instead of
+  freezing the previous numbers on screen.
+- The kiosk no longer colors stale rooms, and if a price fetch fails it drops
+  the old band label once that band has ended, so "on-peak until 9pm" can't
+  outlast 9pm.
+- The cost split and tomorrow's forecast line follow the configured rate
+  bands and peak hours instead of assuming bands named peak/midpeak/offpeak
+  and a 5-9pm peak.
+- "Tomorrow" in the forecast now uses tomorrow's forecast high. It was using
+  today's. If the weather feed is down or has no forecast for tomorrow, the
+  rail says the forecast is unavailable and why.
+- Forecast peak cost no longer runs low on weekdays: days without a peak
+  window (weekends) are left out of the peak fit, and a day with no peak
+  window forecasts zero peak cost.
+
 ### Changed
 - The outdoor AQI now says on screen whether it is a real monitor reading or
   the weather feed's estimate. `resolve_outdoor_aqi` silently falls back to the

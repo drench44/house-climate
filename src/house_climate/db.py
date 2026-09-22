@@ -489,6 +489,15 @@ def kv_get(conn, key):
     return {"value": row[0], "updated_at": row[1]}
 
 
+def kv_prefix(conn, prefix) -> list[tuple]:
+    """Every (key, value) whose key starts with `prefix`. Used by the alert
+    cooldown, which keeps one row per alert so two writers can never clobber
+    each other's record."""
+    like = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    cur = conn.execute("SELECT k, v FROM kv WHERE k LIKE %s", (like,))
+    return [(r[0], r[1]) for r in cur.fetchall()]
+
+
 def add_intervention(conn, marked_on, label, note=None):
     cur = conn.execute(
         "INSERT INTO interventions (marked_on, label, note) VALUES (%s, %s, %s)"
