@@ -217,3 +217,129 @@ def test_next_transition_across_fall_back_dst(tmp_path):
     assert at2 == at
     assert at2 > post
     assert at2 >= at
+
+
+# ---- TOU holidays ------------------------------------------------------------
+# Generic rules only; any real utility's list belongs in a private overlay.
+
+LA = ZoneInfo("America/Los_Angeles")
+SIX_RULES = ["new_years_day", "memorial_day", "independence_day", "labor_day",
+             "thanksgiving_day", "christmas_day"]
+
+
+def _holiday_cfg(tmp_path, **holidays):
+    return _fixture_cfg(tmp_path, lambda d: d["tou"].update({"holidays": holidays}))
+
+
+def test_no_holidays_by_default_labor_day_evening_is_peak(tmp_path):
+    """Backward compatible: without tou.holidays nothing changes."""
+    c = _fixture_cfg(tmp_path)
+    assert c.tou.band_for(datetime(2026, 9, 7, 18, 0, tzinfo=LA))[0] == "peak"
+    assert c.tou.is_holiday(datetime(2026, 9, 7).date()) is False
+
+
+def test_holiday_is_priced_with_the_weekend_bands(tmp_path):
+    """Labor Day 2026 (Monday 7 September) at 18:00 was billed at peak."""
+    c = _holiday_cfg(tmp_path, rules=SIX_RULES,
+                     observed="saturday_to_friday_sunday_to_monday")
+    assert c.tou.band_for(datetime(2026, 9, 7, 18, 0, tzinfo=LA)) == ("offpeak", 0.09)
+    assert c.tou.is_peak(datetime(2026, 9, 7, 18, 0, tzinfo=LA)) is False
+    # The day after is an ordinary Tuesday again.
+    assert c.tou.band_for(datetime(2026, 9, 8, 18, 0, tzinfo=LA))[0] == "peak"
+
+
+@pytest.mark.parametrize("name,year,expected", [
+    ("new_years_day", 2026, "2026-01-01"),
+    ("martin_luther_king_day", 2026, "2026-01-19"),
+    ("presidents_day", 2026, "2026-02-16"),
+    ("memorial_day", 2026, "2026-05-25"),
+    ("memorial_day", 2027, "2027-05-31"),
+    ("juneteenth", 2026, "2026-06-19"),
+    ("labor_day", 2026, "2026-09-07"),
+    ("columbus_day", 2026, "2026-10-12"),
+    ("veterans_day", 2026, "2026-11-11"),
+    ("thanksgiving_day", 2026, "2026-11-26"),
+    ("day_after_thanksgiving", 2026, "2026-11-27"),
+    ("christmas_day", 2026, "2026-12-25"),
+])
+def test_each_named_rule_lands_on_its_date(tmp_path, name, year, expected):
+    from datetime import date
+    c = _holiday_cfg(tmp_path, rules=[name], observed="none")
+    got = date.fromisoformat(expected)
+    assert c.tou.is_holiday(got) is True
+    assert c.tou.is_holiday(got - timedelta(days=7)) is False
+
+
+def test_saturday_friday_sunday_monday_observance(tmp_path):
+    from datetime import date
+    c = _holiday_cfg(tmp_path, rules=SIX_RULES,
+                     observed="saturday_to_friday_sunday_to_monday")
+    # Independence Day 2026 is a Saturday -> observed Friday 3 July.
+    assert c.tou.is_holiday(date(2026, 7, 3)) is True
+    assert c.tou.band_for(datetime(2026, 7, 3, 18, 0, tzinfo=LA))[0] == "offpeak"
+    # Independence Day 2027 is a Sunday -> observed Monday 5 July.
+    assert c.tou.is_holiday(date(2027, 7, 5)) is True
+    # New Year's Day 2028 is a Saturday -> observed Friday 31 December 2027,
+    # a holiday that belongs to the PREVIOUS calendar year.
+    assert c.tou.is_holiday(date(2027, 12, 31)) is True
+    assert c.tou.band_for(datetime(2027, 12, 31, 18, 0, tzinfo=LA))[0] == "offpeak"
+    # Christmas 2027 is a Saturday -> Friday 24 December.
+    assert c.tou.is_holiday(date(2027, 12, 24)) is True
+
+
+def test_sunday_only_observance_leaves_saturday_alone(tmp_path):
+    from datetime import date
+    c = _holiday_cfg(tmp_path, rules=SIX_RULES, observed="sunday_to_monday")
+    assert c.tou.is_holiday(date(2026, 7, 3)) is False       # Saturday 4th not moved
+    assert c.tou.is_holiday(date(2027, 7, 5)) is True        # Sunday 4th -> Monday
+
+
+def test_no_observance_keeps_the_weekend_date_only(tmp_path):
+    from datetime import date
+    c = _holiday_cfg(tmp_path, rules=SIX_RULES, observed="none")
+    assert c.tou.is_holiday(date(2026, 7, 3)) is False
+    assert c.tou.is_holiday(date(2027, 7, 5)) is False
+    assert c.tou.band_for(datetime(2027, 7, 5, 18, 0, tzinfo=LA))[0] == "peak"
+
+
+def test_explicit_holiday_dates(tmp_path):
+    from datetime import date
+    c = _holiday_cfg(tmp_path, dates=["2026-12-24"])
+    assert c.tou.is_holiday(date(2026, 12, 24)) is True
+    assert c.tou.band_for(datetime(2026, 12, 24, 18, 0, tzinfo=LA))[0] == "offpeak"
+
+
+def test_next_transition_skips_a_holiday_peak(tmp_path):
+    """Friday 3 July 2026 (observed Independence Day) at 16:00: the next
+    change is not a 17:00 peak that day."""
+    c = _holiday_cfg(tmp_path, rules=["independence_day"],
+                     observed="saturday_to_friday_sunday_to_monday")
+    band, at = c.tou.next_transition(datetime(2026, 7, 3, 16, 0, tzinfo=LA))
+    assert (band, at) == ("midpeak", datetime(2026, 7, 6, 7, 0, tzinfo=LA))
+
+
+@pytest.mark.parametrize("holidays,msg", [
+    ("labor_day", "must be an object"),
+    ({"rules": ["labour_day"], "observed": "none"}, "unknown rules: labour_day"),
+    ({"rules": ["labor_day"]}, "observed' is required"),
+    ({"rules": ["labor_day"], "observed": "friday"}, "must be one of"),
+    ({"dates": ["2026-13-01"]}, "invalid date"),
+    ({"dates": "2026-12-24"}, "must be a list"),
+    ({"rule": ["labor_day"]}, "unknown keys: rule"),
+])
+def test_bad_holiday_config_fails_loud_at_load(tmp_path, holidays, msg):
+    with pytest.raises(ValueError, match=msg):
+        _fixture_cfg(tmp_path, lambda d: d["tou"].update({"holidays": holidays}))
+
+
+@pytest.mark.parametrize("poll", [0, 601, 900, "180", None])
+def test_poll_interval_beyond_the_gap_cap_fails_loud(tmp_path, poll):
+    """Readings more than 10 minutes apart are unobserved time everywhere in
+    the analytics, so a slower poller would leave every day incomplete and
+    the cost average waiting forever. Refuse it at load instead."""
+    with pytest.raises(ValueError, match="poll_interval_s"):
+        _fixture_cfg(tmp_path, lambda d: d.update({"poll_interval_s": poll}))
+
+
+def test_poll_interval_at_the_cap_loads(tmp_path):
+    assert _fixture_cfg(tmp_path, lambda d: d.update({"poll_interval_s": 600})).poll_interval_s == 600

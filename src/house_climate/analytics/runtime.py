@@ -1,7 +1,10 @@
 from dataclasses import dataclass, field
 from datetime import timedelta
 
+from .cost import MAX_GAP_S, credited_intervals
+
 _COOL = {"cooling", "overcool"}
+COOL_STATUSES = frozenset(_COOL)
 _HEAT = {"heating"}
 _FAN = {"fan"}
 
@@ -105,3 +108,21 @@ def compute(readings, *, max_gap_s=600, short_cycle_min=10, setpoint_grace_s=360
     res.short_cycles = sum(1 for c in short if not c.setpoint_induced)
     res.short_cycles_setpoint_induced = sum(1 for c in short if c.setpoint_induced)
     return res
+
+
+def status_minutes(readings, statuses, *, start=None, end=None, include=None,
+                   max_gap_s=MAX_GAP_S) -> float:
+    """Gap-capped minutes spent in any of `statuses`, attributed to the window
+    holding each interval's midpoint: the same unit and the same rule
+    cost.compute prices by, so a day's cooling minutes and a day's cooling
+    dollars always describe the same intervals. `include(midpoint_utc)` narrows
+    it further (for example to on-peak time only)."""
+    total = 0.0
+    for row, mins, mid in credited_intervals(readings, start=start, end=end,
+                                             max_gap_s=max_gap_s):
+        if row["equipment_status"] not in statuses:
+            continue
+        if include is not None and not include(mid):
+            continue
+        total += mins
+    return total
