@@ -25,6 +25,9 @@ rolls that section to a dated version via `python scripts/release.py`.
   values are (`age_s`, `obs_age_s`, `crawl_age_s` and friends).
 
 ### Fixed
+- A monitor AQI reading stamped a few milliseconds "in the future" (the DB
+  and web app clocks differ slightly) was thrown out as suspect and the
+  modeled estimate shown instead. Up to 5 seconds of skew is now tolerated.
 - Every alert was pushed twice: the web app started two alert loops, each
   with its own cooldown. Now there is exactly one.
 - A restart or deploy no longer re-sends every active alert. The last-sent

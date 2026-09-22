@@ -437,6 +437,10 @@ def _cost_summary_impl(conn, device_id, cfg, now=None) -> dict:
 
 
 _AIRNOW_STALE_S = 1800   # AirNow is hourly + HA heartbeats every 5 min; 30 min silent = feed dead
+# The row is stamped by the DB's clock and aged by the web app's. They can
+# differ by milliseconds (a DB in another container or on another host), so a
+# row a hair "in the future" is just-written, not suspect. Beyond this, it is.
+_CLOCK_SKEW_S = 5
 
 
 def resolve_outdoor_aqi(conn, wx_aqi, now=None):
@@ -469,7 +473,7 @@ def resolve_outdoor_aqi(conn, wx_aqi, now=None):
             if aqi_val is None:
                 log.warning("ha_outdoor_aqi carries no 'aqi' key -- falling back "
                             "to the modeled weather feed")
-            elif age < 0:
+            elif age < -_CLOCK_SKEW_S:
                 log.warning("ha_outdoor_aqi is stamped %.0fs in the FUTURE "
                             "(clock skew?) -- refusing to treat it as fresh", -age)
             elif age > _AIRNOW_STALE_S:

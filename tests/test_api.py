@@ -1933,6 +1933,14 @@ def test_resolve_refuses_a_future_stamped_monitor_row(monkeypatch):
     """A clock-skewed or future-stamped row makes `age <= limit` true forever,
     so a wrong value would be trusted as fresh indefinitely."""
     assert _resolved(monkeypatch, {"aqi": 85}, age_s=-3600) == (42, "weather")
+    assert _resolved(monkeypatch, {"aqi": 85}, age_s=-6) == (42, "weather")
+
+
+def test_resolve_accepts_a_row_a_few_milliseconds_in_the_future(monkeypatch):
+    """The DB stamps the row and the web app ages it; two clocks a few ms apart
+    must not turn a just-written monitor reading into the modeled estimate."""
+    assert _resolved(monkeypatch, {"aqi": 85}, age_s=-0.007) == (85, "airnow")
+    assert _resolved(monkeypatch, {"aqi": 85}, age_s=-5) == (85, "airnow")
 
 
 @pytest.mark.parametrize("kv", [None, {}, {"aqi": None}, 85, "85", ["85"]])
