@@ -6,7 +6,7 @@ import requests
 
 from . import db, weather, ecowitt
 from .analytics import humidity as humidity_an
-from .daikin import DaikinClient, DeviceState, RateLimited, DaikinError
+from .daikin import DaikinClient, DeviceState, RateLimited, DaikinError, DaikinUnreachable
 from .weather import WeatherSnapshot
 
 log = logging.getLogger("house_climate.poller")
@@ -28,7 +28,17 @@ def build_reading(device_id, st: DeviceState, wx: WeatherSnapshot, now) -> dict:
         wx_dewpoint_f=wx.dewpoint_f, wx_solar_wm2=wx.solar_wm2, wx_uv=wx.uv,
         wx_fc_high_f=wx.fc_high_f, wx_fc_low_f=wx.fc_low_f, wx_conditions=wx.conditions,
         wx_aqi=wx.aqi, wx_alert_count=wx.alert_count, weather_ok=wx.ok,
-        wx_rain_today_in=wx.rain_today_in)
+        wx_rain_today_in=wx.rain_today_in, wx_rain_source=wx.rain_source)
+
+
+def build_weather_only_reading(device_id, wx: WeatherSnapshot, now) -> dict:
+    """The tick's weather with every thermostat field left NULL, for a tick
+    where the thermostat call failed. Weather lives only in readings rows, so
+    without this a thermostat outage erased the outdoor history (and the rain
+    gauge counter) for its whole length. The NULL equipment_status marks it as
+    weather-only; thermostat consumers skip it (db.THERMOSTAT_ROW_SQL)."""
+    empty = DeviceState(None, None, None, None, None, None, None, None)
+    return build_reading(device_id, empty, wx, now)
 
 
 def poll_once(conn, client, device_id, cfg) -> str:
@@ -43,13 +53,22 @@ def poll_once(conn, client, device_id, cfg) -> str:
     try:
         st = client.read_device(device_id)
     except RateLimited:
-        db.record_error(conn, device_id, "daikin_429", "rate limited")
-        return "daikin_429"
+        kind, detail = "daikin_429", "rate limited"
+    except DaikinUnreachable as e:
+        # No network path to Daikin (internet down, DNS, timeout). Recorded
+        # as a 'daikin%' kind so the thermostat-offline alert counts it.
+        kind, detail = "daikin_network", str(e)
     except DaikinError as e:
-        db.record_error(conn, device_id, "daikin_error", str(e))
-        return "daikin_error"
-    db.insert_reading(conn, build_reading(device_id, st, wx, now))
-    return "ok"
+        kind, detail = "daikin_error", str(e)
+    else:
+        db.insert_reading(conn, build_reading(device_id, st, wx, now))
+        return "ok"
+    db.record_error(conn, device_id, kind, detail)
+    # Keep the weather this tick already fetched. Nothing is stored when the
+    # feed was down too: an all-NULL row would carry no information.
+    if wx.ok:
+        db.insert_reading(conn, build_weather_only_reading(device_id, wx, now))
+    return kind
 
 
 def _note_weather_health(conn, device_id, ok: bool) -> None:
@@ -108,17 +127,30 @@ def poll_ecowitt(conn, cfg) -> str:
 # ---------------------------------------------------------------------------
 # Daily rainfall maintenance for the moisture case.
 #
-# Primary source is the house's own rain gauge: every reading stores the
-# station's cumulative rain-today counter, and the daily total is the max of
-# that counter per local day. Open-Meteo fills only the days from just before
-# sensor history began until station capture started — those rows are labeled
-# 'openmeteo' and a station row always wins (db.upsert_precip).
+# Primary source is the rain gauge: every reading stores the feed's
+# cumulative rain-today counter and whether it came from the gauge or a
+# forecast model, and the daily total is the max of the gauge counter per
+# local day. Open-Meteo fills every day since just before sensor history began
+# that has no final value, labeled 'openmeteo'. The precedence between a
+# complete gauge day, Open-Meteo and the placeholders (partial gauge days,
+# model estimates) lives in db.upsert_precip.
 # ---------------------------------------------------------------------------
 
 _OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 _PRECIP_LOOKBACK_DAYS = 7   # backfill starts this far before the first sensor row
 _precip_last_rollup = None   # monotonic time of the last station rollup
 _precip_last_backfill_day = None  # local day the backfill last ran
+
+
+def _consecutive_runs(days):
+    """Split a sorted list of dates into runs of consecutive days."""
+    runs = []
+    for d in days:
+        if runs and d - runs[-1][-1] == timedelta(days=1):
+            runs[-1].append(d)
+        else:
+            runs.append([d])
+    return runs
 
 
 def update_precip(conn, device_id, cfg) -> str:
@@ -137,21 +169,25 @@ def update_precip(conn, device_id, cfg) -> str:
     today = datetime.now(ZoneInfo(cfg.timezone)).date()
 
     def rollup(days):
-        """Upsert station rows, but only trust a PAST day whose readings
-        actually extend into the late evening: the counter is cumulative, so
-        a suffix of the day carries the full total, but a prefix (poller died
-        at 00:05, rained all afternoon) would freeze a near-zero 'station'
-        row that then permanently blocks the Open-Meteo value. An untrusted
-        day is left absent so the backfill can fill it. Today always updates
-        (it is re-rolled all day and finalized tomorrow)."""
+        """Upsert each day's rain. A gauge value is 'station' only for today
+        (re-rolled all day, judged again tomorrow) or a PAST day whose gauge
+        values reach into the late evening: the counter is cumulative, so a
+        suffix of the day carries the full total, but a prefix (poller died
+        at 10:00, rained all afternoon) is only a lower bound. Such a day is
+        stored as 'station_partial', which also demotes the 'station' row the
+        live rollup wrote for it, and the backfill then replaces it. A day
+        with no gauge value at all stores the feed's model estimate as
+        'model'. Both placeholders rank below Open-Meteo (db.upsert_precip)."""
         n = 0
         for d in days:
-            if d.get("rain_in") is None:
-                continue
-            if d["day"] < today and (d.get("last_hour") or 0) < 21:
-                continue
-            db.upsert_precip(conn, d["day"], d["rain_in"], "station")
-            n += 1
+            gauge = d.get("rain_in")
+            if gauge is not None:
+                complete = d["day"] >= today or (d.get("rain_last_hour") or 0) >= 21
+                db.upsert_precip(conn, d["day"], gauge,
+                                 "station" if complete else "station_partial")
+                n += 1
+            elif d.get("model_rain_in") is not None:
+                db.upsert_precip(conn, d["day"], d["model_rain_in"], "model")
         return n
 
     # 1) Hourly: recent days (cheap).
@@ -159,9 +195,10 @@ def update_precip(conn, device_id, cfg) -> str:
                                        since_ts=datetime.now(timezone.utc) - timedelta(days=3)))
 
     # 2) Once per local day: FULL station rollup (heals any day a >3-day
-    #    outage pushed out of the hourly window) + gridded backfill for
-    #    pre-station days (lag windows need rainfall from BEFORE the first
-    #    crawl reading).
+    #    outage pushed out of the hourly window) + gridded backfill for every
+    #    past day without a final value: pre-station days (lag windows need
+    #    rainfall from BEFORE the first crawl reading), partial gauge days,
+    #    and model-only days.
     if _precip_last_backfill_day == today:
         return f"precip_ok(station={n_recent})"
     _precip_last_backfill_day = today
@@ -173,21 +210,29 @@ def update_precip(conn, device_id, cfg) -> str:
         if first is not None:
             start = (first - timedelta(days=_PRECIP_LOOKBACK_DAYS)).astimezone(
                 ZoneInfo(cfg.timezone)).date()
-            have = {p["day"] for p in db.precip_range(conn, since_day=start)}
+            have = {p["day"] for p in db.precip_range(conn, since_day=start)
+                    if p["source"] in db.PRECIP_FINAL_SOURCES}
             missing = []
             d = start
             while d < today:
                 if d not in have:
                     missing.append(d)
                 d += timedelta(days=1)
-            if missing:
+            # One request per run of consecutive missing days, newest first.
+            # A single start..end request spanned every gap in between, and
+            # once the rollup demotes an old partial day that range can reach
+            # past what the endpoint serves; one failing run must not block
+            # yesterday's heal. Each run is guarded and logged on its own and
+            # retried tomorrow.
+            failed = 0
+            for run in reversed(_consecutive_runs(missing)):
                 try:
                     r = requests.get(_OPEN_METEO_URL, params={
                         "latitude": cfg.latitude, "longitude": cfg.longitude,
                         "daily": "precipitation_sum", "precipitation_unit": "inch",
                         "timezone": cfg.timezone,
-                        "start_date": missing[0].isoformat(),
-                        "end_date": missing[-1].isoformat(),
+                        "start_date": run[0].isoformat(),
+                        "end_date": run[-1].isoformat(),
                     }, timeout=15)
                     r.raise_for_status()
                     daily = r.json().get("daily", {})
@@ -199,23 +244,72 @@ def update_precip(conn, device_id, cfg) -> str:
                         db.upsert_precip(conn, day, inches, "openmeteo")
                         filled += 1
                 except Exception as e:
-                    log.warning("open-meteo precip backfill failed (will retry tomorrow): %s", e)
-                    return f"precip_station_only({n_recent})"
+                    failed += 1
+                    log.warning("open-meteo precip backfill failed for %s..%s"
+                                " (will retry tomorrow): %s", run[0], run[-1], e)
+            if failed:
+                return (f"precip_station_only({n_recent}, backfilled={filled},"
+                        f" failed_ranges={failed})")
     return f"precip_ok(station={n_recent}, backfilled={filled})"
 
 
 def _discover_device_id(conn, client):
     """One boot-time device-discovery attempt. Returns the first device's id
     (upserting every returned device), or None if the account returned no
-    devices. Raises DaikinError on a transient API/network failure so run()
-    can distinguish "retry the call" from "no devices — check the account".
-    Replaces a blind devices[0] that raised IndexError on an empty list."""
+    devices. Raises DaikinError (DaikinUnreachable for a network failure) on
+    a transient API/network failure so run() can distinguish "retry the call"
+    from "no devices, check the account". Replaces a blind devices[0] that
+    raised IndexError on an empty list."""
     devices = client.list_devices()
     if not devices:
         return None
     for d in devices:
         db.upsert_device(conn, d["id"], d["name"], d["model"])
     return devices[0]["id"]
+
+
+# Boot-time discovery retry delay: doubles from MIN up to MAX, so an outage
+# at startup neither hammers Daikin nor waits long once it is back.
+_BOOT_RETRY_MIN_S = 10
+_BOOT_RETRY_MAX_S = 600
+
+
+def _boot_device_id(conn, client):
+    """Resolve the thermostat to poll, retrying until it is known. Never
+    raises for an API or network failure (that crash-looped the container).
+
+    A transient failure with a device already in the database (a restart
+    during an internet outage) returns that device at once, so the loop starts
+    and the LAN sensors, heartbeat and poll_errors keep going; poll_once
+    records the outage every tick. With no known device (first boot) there is
+    nothing to attach readings to, so it retries with backoff. An empty
+    device list, or any Daikin error that is not an outage, also retries:
+    that is an account problem, and the poller healthcheck flags the missing
+    heartbeat."""
+    delay = _BOOT_RETRY_MIN_S
+    while True:
+        try:
+            device_id = _discover_device_id(conn, client)
+            if device_id is not None:
+                return device_id
+            log.error("Daikin account returned no devices; check credentials/"
+                      "authorization. Retrying in %ss.", delay)
+        except DaikinError as e:
+            # Log the real cause. Distinct from the empty-list branch so we
+            # don't tell the operator to "check credentials" when the API
+            # just hiccuped. Only an outage (no network path, or rate
+            # limited) falls back to the known device: any other failure,
+            # such as a 401 from bad credentials, keeps retrying without a
+            # heartbeat so the healthcheck still flags it.
+            known = (db.latest_device_id(conn)
+                     if isinstance(e, (DaikinUnreachable, RateLimited)) else None)
+            if known is not None:
+                log.error("could not list Daikin devices (%s); polling last known"
+                          " device %s until Daikin answers", e, known)
+                return known
+            log.error("could not list Daikin devices (%s); retrying in %ss", e, delay)
+        time.sleep(delay)
+        delay = min(delay * 2, _BOOT_RETRY_MAX_S)
 
 
 def run(cfg, secrets):
@@ -231,22 +325,7 @@ def run(cfg, secrets):
     # transient API/network error must crash the process: indexing devices[0]
     # blindly raised an opaque IndexError with no poll_error, then Docker's
     # restart policy hot-looped it. Fail loud and retry instead.
-    device_id = None
-    while device_id is None:
-        try:
-            device_id = _discover_device_id(conn, client)
-        except DaikinError as e:
-            # Transient (429, HTTP 5xx, network): log the real cause and retry.
-            # Distinct from the empty-list branch below so we don't tell the
-            # operator to "check credentials" when the API just hiccuped.
-            log.error("could not list Daikin devices (%s); retrying in %ss",
-                      e, cfg.poll_interval_s)
-            time.sleep(max(5, cfg.poll_interval_s))
-            continue
-        if device_id is None:
-            log.error("Daikin account returned no devices; check credentials/"
-                      "authorization. Retrying in %ss.", cfg.poll_interval_s)
-            time.sleep(max(5, cfg.poll_interval_s))
+    device_id = _boot_device_id(conn, client)
     log.info("polling device %s every %ss", device_id, cfg.poll_interval_s)
     while True:
         started = time.monotonic()
