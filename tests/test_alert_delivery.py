@@ -194,8 +194,9 @@ def test_push_suppress_filters_only_the_push():
              alerts.Alert("crawl_mold", "warning", "damp")]
     cfg = _cfg_with(push_suppress=["air_quality"])
     assert [a.key for a in alerts.pushable(fired, cfg)] == ["crawl_mold"]
-    # ...and nothing is suppressed without the key
-    assert len(alerts.pushable(fired, _cfg_with())) == 2
+    # ...and nothing is suppressed without the key (explicitly empty: CFG may
+    # be an operator's config.json with a suppress list of its own)
+    assert len(alerts.pushable(fired, _cfg_with(push_suppress=[]))) == 2
 
 
 def test_alert_loop_does_not_push_a_suppressed_key(conn, monkeypatch):

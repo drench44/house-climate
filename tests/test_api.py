@@ -976,8 +976,10 @@ def test_cost_summary_on_a_tou_holiday(conn):
     assert s["rate_now"] == offpeak
     assert s["live_rate_per_hr"] == round(CFG.system_kw * offpeak, 4)
     assert s["tou_holidays"] == ["2026-09-07"]
-    # Without the holiday config the same instant is peak, as before.
-    s0 = api.build_cost_summary(conn, "dev1", CFG, now=now_local.astimezone(timezone.utc))
+    # Without the holiday config the same instant is peak, as before. Built
+    # explicitly: CFG may be an operator's config.json with holidays already.
+    plain = dataclasses.replace(CFG, tou=TouTable(CFG.tou.summer_months, CFG.tou.bands))
+    s0 = api.build_cost_summary(conn, "dev1", plain, now=now_local.astimezone(timezone.utc))
     assert s0["tier_now"] == "peak" and s0["tou_holidays"] == []
 
 
