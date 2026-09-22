@@ -345,6 +345,22 @@ def test_ribbon_peak_shading_is_config_driven():
         "renderRibbon must receive cost so it can read peak_windows"
 
 
+def test_ribbon_does_not_shade_peak_on_a_tou_holiday():
+    """A holiday is priced like a weekend, so the weekday-only peak window
+    must not be shaded on the dates the API lists in cost.tou_holidays."""
+    shading_block = APP_JS.split("// On-peak shading", 1)[1].split("// temperature gridlines", 1)[0]
+    assert "tou_holidays" in shading_block
+    assert "touHolidays.has(iso)" in shading_block
+    assert "w.weekday_only && offDay" in shading_block
+
+
+def test_humidity_panel_does_not_claim_the_ac_caused_the_rh_difference():
+    """The panel used to say 'Cooling pulls RH from X to Y'. The figure is a
+    same-hour-of-day comparison, an association, and the wording says so."""
+    assert "Cooling pulls RH" not in APP_JS
+    assert "At the same hours of day" in APP_JS
+
+
 def test_no_external_resources():
     """LAN wall display, no internet: every asset must be local."""
     for name, text in (("index.html", INDEX_HTML), ("moisture.html", MO_HTML),

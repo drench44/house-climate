@@ -1,4 +1,5 @@
 import datetime as dt
+import pytest
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from house_climate.analytics import precool
@@ -89,3 +90,62 @@ def test_avg_out_divides_by_observed_minutes_only():
     res = precool.effectiveness(rows + rows2, TZ, min_days_each=1)
     assert res["ready"] is True
     assert abs(res["normal"]["avg_peak_out_f"] - 85.0) < 0.5   # not ~42
+
+
+def _drop(rows, start_hm, end_hm):
+    """Remove local [start, end) (h, m) readings, simulating a poller gap."""
+    tz = ZoneInfo(TZ)
+
+    def hm(r):
+        t = r["ts"].astimezone(tz)
+        return (t.hour, t.minute)
+    return [r for r in rows if not (start_hm <= hm(r) < end_hm)]
+
+
+def test_a_barely_observed_day_is_not_averaged_with_full_days():
+    """A normal day observed for only the first hour of the four-hour peak
+    (17:00-18:00, then the poller died) used to clear the 60-minute floor and
+    enter the 'normal' average with a quarter of the cooling of a full day,
+    shrinking the savings figure. Most of the window must be observed."""
+    rows = []
+    rows += _day_rows(dt.date(2026, 8, 3), 70, 78, cool_in_peak=False)   # Mon, pre-cool
+    rows += _day_rows(dt.date(2026, 8, 4), 70, 78, cool_in_peak=False)   # Tue, pre-cool
+    rows += _day_rows(dt.date(2026, 8, 5), 74, 74, cool_in_peak=True)    # Wed, normal
+    rows += _day_rows(dt.date(2026, 8, 6), 74, 74, cool_in_peak=True)    # Thu, normal
+    fri = _drop(_day_rows(dt.date(2026, 8, 7), 74, 74, cool_in_peak=True), (18, 5), (21, 0))
+    rows += fri
+    res = precool.effectiveness(rows, TZ)
+    assert res["ready"] is True
+    assert res["normal"]["days"] == 2                  # Friday left out
+    assert res["normal"]["avg_peak_cool_min"] == pytest.approx(235.0)
+
+
+def test_a_gap_is_credited_at_most_ten_minutes():
+    """Across a 25-minute hole the code credited all 25 minutes of cooling
+    (anything up to 30); cost and runtime credit at most 10."""
+    rows = []
+    rows += _day_rows(dt.date(2026, 8, 3), 70, 78, cool_in_peak=False)
+    rows += _day_rows(dt.date(2026, 8, 4), 70, 78, cool_in_peak=False)
+    normal = []
+    for d in (dt.date(2026, 8, 5), dt.date(2026, 8, 6)):
+        # readings 18:05, 18:10, 18:15, 18:20 missing: 18:00 -> 18:25 is 25 min
+        normal += _drop(_day_rows(d, 74, 74, cool_in_peak=True), (18, 5), (18, 25))
+    res = precool.effectiveness(rows + normal, TZ)
+    assert res["ready"] is True
+    assert res["normal"]["avg_peak_cool_min"] == pytest.approx(235.0 - 15.0)
+
+
+def test_tou_holidays_are_skipped_like_weekends():
+    """A holiday has no weekday peak, so its evening says nothing about
+    pre-cooling. Monday 7 September 2026 (Labor Day) must not be counted."""
+    labor_day = dt.date(2026, 9, 7)
+    rows = []
+    rows += _day_rows(dt.date(2026, 9, 8), 70, 78, cool_in_peak=False)   # Tue, pre-cool
+    rows += _day_rows(dt.date(2026, 9, 9), 70, 78, cool_in_peak=False)   # Wed, pre-cool
+    rows += _day_rows(dt.date(2026, 9, 10), 74, 74, cool_in_peak=True)  # Thu, normal
+    rows += _day_rows(labor_day, 74, 74, cool_in_peak=True)             # holiday
+    res = precool.effectiveness(rows, TZ, min_days_each=1)
+    assert res["normal"]["days"] == 2                                   # without the holiday rule
+    res = precool.effectiveness(rows, TZ, min_days_each=1,
+                                off_days=lambda d: d == labor_day)
+    assert res["normal"]["days"] == 1

@@ -20,8 +20,19 @@ rolls that section to a dated version via `python scripts/release.py`.
   Before this, only a fresh test dump was ever restored, never the files you
   would actually use. CI runs it, including a check that it fails on a dump
   missing rows.
+- Optional TOU holidays (`tou.holidays`). A tariff that prices some holidays
+  like a weekend can now say so: named rules computed for every year (New
+  Year's Day, Memorial Day, Independence Day, Labor Day, Thanksgiving,
+  Christmas and a few more), the tariff's rule for a holiday that lands on a
+  weekend, and any extra one-off dates. Holidays use the weekend bands for
+  cost, the peak strip, alerts, the pre-cool analysis and the chart's peak
+  shading. Off by default, and a typo in the list fails loud at startup.
 
 ### Changed
+- `poll_interval_s` must now be between 1 and 600 seconds; the config
+  fails to load otherwise. Readings more than 10 minutes apart already count
+  as unobserved time everywhere, so a slower poller would leave every day
+  "incomplete" and the cost average and forecast would never appear.
 - The outdoor AQI now says on screen whether it is a real monitor reading or
   the weather feed's estimate. `resolve_outdoor_aqi` silently falls back to the
   feed's modeled `wx_aqi` after 30 quiet minutes, and the two disagree in the
@@ -49,6 +60,48 @@ rolls that section to a dated version via `python scripts/release.py`.
   left the reader guessing which sensor to go and look at.
 
 ### Fixed
+- Before/after moisture verdicts no longer call about one in four no-change
+  comparisons "real". Small samples got the wrong critical value (2.26 for
+  every sample size under 9, when 1 or 2 independent days need 12.71 or
+  4.30), and the day-to-day correlation measured on a dozen days was biased
+  low. Both are corrected; in a seeded simulation of strongly correlated days
+  with no real change the "real" rate fell from 24% to about 5%.
+- The crawl-to-floor transport gain's interval is no longer about 2.2 times
+  too wide. The autocorrelation was being corrected twice; in a seeded
+  simulation the reported uncertainty is now within about 15% of the real
+  spread (it was 2.2 times it) and the displayed interval still covers the
+  true value at least 95% of the time.
+- The daily cost average and monthly projection no longer run low after an
+  outage. A day now counts as complete only if nearly all of it (all but 15
+  minutes, midnight to midnight) was observed; a 2.5-hour outage across the
+  afternoon peak used to pass and price the day at about 60% of its real
+  cost. The forecast's history uses the same rule.
+- Day slices (today's cost, the complete-day average, the forecast history)
+  no longer drop the reading that crosses midnight, and the forecast's peak
+  minutes now count an interval as peak exactly when the bill does.
+- Hold tightness no longer counts a cool house under a cool setpoint (or a
+  warm house over a heat setpoint) as a miss. Only overshoot past the active
+  setpoint counts, as the auto-mode band already did.
+- Pre-cool effectiveness now needs most of the peak window observed on a day
+  before averaging it in (it took any day with an hour), and it credits at
+  most 10 minutes across a gap like the rest of the app (it took 30).
+- A day now needs readings in at least 18 of its clock hours before its
+  absolute-humidity mean enters the crawl-to-floor gap or the
+  excess-over-outdoor figures (the old bar was 24 readings, about 72
+  minutes), and those readings must carry temperature as well as dew point.
+  The crawl before/after comparison likewise leaves out days with under 18
+  observed hours, and its day counts and seasonal check now describe only the
+  days it actually used.
+- The before/after comparison no longer treats days as independent when so
+  many were left out that no two remaining days are neighbours; it measures
+  their similarity in order instead.
+- "Last 7 days" moisture trends, the transport-fit window length and the
+  intervention check now use the local date, not the UTC date, so they no
+  longer shift by a day every evening.
+- The humidity panel's cooling-vs-idle RH figure now compares readings from
+  the same hours of the day (each with at least three readings of each
+  kind), instead of hot afternoons against nights, and no longer says
+  cooling "pulls" RH down.
 - Four more display paths asserted something specific and false when they met a
   result they had no wording for, all found by reviewing the fix below:
   a metric downgraded as season-confounded printed "collecting (34+41 days,

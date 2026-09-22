@@ -375,7 +375,9 @@ def sensor_daily_stats(conn, sensor_id, tz, since_ts=None) -> list[dict]:
     gap-capped hours above the 60/70/80 %RH thresholds and hours of
     condensation risk (air-to-dew-point spread under 3°F). The 600s gap cap
     matches the rest of the stack: an outage becomes uncounted time, never
-    invented hours."""
+    invented hours. `ah_hours` counts the clock hours holding a reading with
+    BOTH temperature and dew point (absolute humidity needs both), so a day
+    seen for an hour or two can be told from a full one."""
     since_clause = "AND ts >= %(since)s" if since_ts is not None else ""
     cur = conn.execute(
         f"""WITH t AS (
@@ -391,7 +393,8 @@ def sensor_daily_stats(conn, sensor_id, tz, since_ts=None) -> list[dict]:
               min(dewpoint_f) AS dp_min, max(dewpoint_f) AS dp_max, avg(dewpoint_f) AS dp_mean,
               avg(temp_f) AS temp_mean,
               avg({_AH_SENSOR_SQL}) AS ah_mean,
-              count(dewpoint_f) AS ah_n,
+              count(DISTINCT date_trunc('hour', ts)) FILTER (WHERE temp_f IS NOT NULL
+                AND dewpoint_f IS NOT NULL) AS ah_hours,
               (coalesce(sum(dt) FILTER (WHERE humidity > 60), 0)/3600.0)::float AS h60,
               (coalesce(sum(dt) FILTER (WHERE humidity > 70), 0)/3600.0)::float AS h70,
               (coalesce(sum(dt) FILTER (WHERE humidity > 80), 0)/3600.0)::float AS h80,
@@ -408,7 +411,9 @@ def sensor_daily_stats(conn, sensor_id, tz, since_ts=None) -> list[dict]:
 def outdoor_daily(conn, device_id, tz, since_ts=None) -> list[dict]:
     """Per-local-day outdoor conditions from the weather feed: mean temp and
     dew point, station rain-gauge total (max of the cumulative midnight-reset
-    counter), and gap-capped cooling hours (for the duct-sweat proxy)."""
+    counter), and gap-capped cooling hours (for the duct-sweat proxy).
+    `ah_hours` counts the clock hours holding a reading with both
+    temperature and dew point, as sensor_daily_stats does."""
     since_clause = "AND ts >= %(since)s" if since_ts is not None else ""
     cur = conn.execute(
         f"""WITH t AS (
@@ -424,7 +429,8 @@ def outdoor_daily(conn, device_id, tz, since_ts=None) -> list[dict]:
               avg(wx_outdoor_temp_f) AS temp_mean,
               avg(wx_dewpoint_f) AS dp_mean,
               avg({_AH_WX_SQL}) AS ah_mean,
-              count(wx_dewpoint_f) AS ah_n,
+              count(DISTINCT date_trunc('hour', ts)) FILTER (WHERE wx_outdoor_temp_f IS NOT NULL
+                AND wx_dewpoint_f IS NOT NULL) AS ah_hours,
               max(wx_rain_today_in) AS rain_in,
               max(extract(hour FROM (ts AT TIME ZONE %(tz)s)))::int AS last_hour,
               (coalesce(sum(dt) FILTER (WHERE equipment_status IN

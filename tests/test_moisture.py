@@ -13,9 +13,71 @@ def test_t_crit_95_rounds_dof_down_conservatively():
     # value (2.18), NOT round up to df=15's 2.13.
     assert moisture._t_crit_95(13) == 2.18
     assert moisture._t_crit_95(9) == 2.26            # exact anchor
-    assert moisture._t_crit_95(8) == 2.26            # below first anchor -> most conservative
     assert moisture._t_crit_95(10 ** 10) == 1.96     # top anchor
     assert moisture._t_crit_95(13) > moisture._t_crit_95(15)  # down-rounding is conservative
+
+
+def test_t_crit_95_is_exact_at_small_dof():
+    """The autocorrelation discount routinely leaves two or three independent
+    days a side, so small dof is the common case. Each must get its own
+    critical value, not the dof-9 one."""
+    exact = {1: 12.71, 2: 4.30, 3: 3.18, 4: 2.78, 5: 2.57, 6: 2.45,
+             7: 2.36, 8: 2.31, 9: 2.26}
+    for dof, t in exact.items():
+        assert moisture._t_crit_95(dof) == t, dof
+    assert moisture._t_crit_95(0) == math.inf        # no finite interval exists
+
+
+def _ar1(rng, n, rho):
+    x = [rng.gauss(0, 1)]
+    for _ in range(n - 1):
+        x.append(rho * x[-1] + math.sqrt(1 - rho * rho) * rng.gauss(0, 1))
+    return x
+
+
+def _null_real_rate(rho, n, reps, seed):
+    """Share of NO-CHANGE comparisons (both sides drawn from the same AR(1)
+    process) that _metric_compare calls 'real'. A 95% bar should make this
+    about 5%."""
+    import random
+    rng = random.Random(seed)
+    base_days = [date(2026, 1, 1) + timedelta(days=i) for i in range(n)]
+    post_days = [date(2026, 3, 1) + timedelta(days=i) for i in range(n)]
+    real = 0
+    for _ in range(reps):
+        m = moisture._metric_compare(_ar1(rng, n, rho), _ar1(rng, n, rho),
+                                     min_days=n, base_days=base_days,
+                                     post_days=post_days)
+        real += m["verdict"] == "real"
+    return real / reps
+
+
+@pytest.mark.parametrize("rho,n", [(0.8, 12), (0.8, 20), (0.5, 12), (0.9, 30)])
+def test_metric_compare_false_positive_rate_is_near_five_percent(rho, n):
+    """Seeded simulation: two weeks of strongly correlated days with NO real
+    change used to come out 'real' 23% of the time (flat 2.26 critical value
+    for every small dof, plus an autocorrelation estimate biased low on a dozen
+    points). A 95% bar must hold that to about 5%."""
+    rate = _null_real_rate(rho, n, reps=2000, seed=11)
+    assert rate <= 0.07, rate
+
+
+def test_metric_compare_is_not_made_blind_by_the_correction():
+    """The fix must not buy honesty by refusing everything: independent days
+    still reject at roughly the nominal rate, and a genuine shift of three
+    standard deviations over two weeks is still found most of the time."""
+    import random
+    assert 0.015 <= _null_real_rate(0.0, 14, reps=2000, seed=5) <= 0.07
+    rng = random.Random(9)
+    days_b = [date(2026, 1, 1) + timedelta(days=i) for i in range(14)]
+    days_p = [date(2026, 3, 1) + timedelta(days=i) for i in range(14)]
+    hits = sum(
+        moisture._metric_compare(_ar1(rng, 14, 0.3),
+                                 [v + 3.0 for v in _ar1(rng, 14, 0.3)],
+                                 min_days=14, base_days=days_b,
+                                 post_days=days_p)["verdict"] == "real"
+        for _ in range(500))
+    assert hits / 500 >= 0.75
 
 
 def test_r_crit_bonf6_rounds_dof_down_conservatively():
@@ -142,9 +204,9 @@ def test_threshold_rollups_weekly_monthly():
 
 # ------------------------------------------------- intervention baselines
 
-def _stats_days(start, n, rh, dp, h60=0.0, h70=0.0):
+def _stats_days(start, n, rh, dp, h60=0.0, h70=0.0, obs_h=24.0):
     return [{"day": start + timedelta(days=i), "rh_mean": rh(i), "dp_mean": dp(i),
-             "h60": h60, "h70": h70} for i in range(n)]
+             "h60": h60, "h70": h70, "obs_h": obs_h} for i in range(n)]
 
 
 def test_intervention_real_improvement_detected():
@@ -374,8 +436,9 @@ def _ah_hourly(now, hours, fn):
             for i in range(hours)]
 
 
-def _ah_daily(start, n, fn, ah_n=48):
-    return [{"day": start + timedelta(days=i), "ah_mean": fn(i), "ah_n": ah_n}
+def _ah_daily(start, n, fn, ah_n=480, ah_hours=24):
+    return [{"day": start + timedelta(days=i), "ah_mean": fn(i), "ah_n": ah_n,
+             "ah_hours": ah_hours}
             for i in range(n)]
 
 
@@ -401,7 +464,8 @@ def test_ah_gap_hourly_drops_unpaired_and_null_hours():
 
 
 def _outdoor_ah(start, n, fn):
-    return [{"day": start + timedelta(days=i), "ah_mean": fn(i), "ah_n": 48}
+    return [{"day": start + timedelta(days=i), "ah_mean": fn(i), "ah_n": 480,
+             "ah_hours": 24}
             for i in range(n)]
 
 
@@ -498,9 +562,9 @@ def test_gap_intervention_seasonal_confound_downgrades():
     d0 = date(2026, 9, 1)
     gaps = (_gap_days(d0 - timedelta(days=20), 20, lambda i: 3.0 + (i % 2) * 0.05)
             + _gap_days(d0, 28, lambda i: 1.0 + (i % 2) * 0.05))
-    outdoor = ([{"day": d0 - timedelta(days=20 - i), "ah_mean": 14.0, "ah_n": 48}
+    outdoor = ([{"day": d0 - timedelta(days=20 - i), "ah_mean": 14.0, "ah_n": 480, "ah_hours": 24}
                 for i in range(20)]
-               + [{"day": d0 + timedelta(days=i), "ah_mean": 11.0, "ah_n": 48}
+               + [{"day": d0 + timedelta(days=i), "ah_mean": 11.0, "ah_n": 480, "ah_hours": 24}
                   for i in range(28)])
     out = moisture.gap_intervention_report(
         gaps, [{"id": 1, "marked_on": d0, "label": "Barrier"}], outdoor_daily=outdoor)
@@ -529,7 +593,7 @@ def test_barely_observed_days_are_dropped_not_weighted_as_full_days():
     observed one."""
     start = date(2026, 8, 1)
     crawl = _ah_daily(start, 3, lambda i: 13.0)
-    crawl[1]["ah_n"] = 2                      # an almost entirely missing day
+    crawl[1]["ah_n"], crawl[1]["ah_hours"] = 2, 1   # an almost entirely missing day
     floor = _ah_daily(start, 3, lambda i: 10.0)
     gaps = moisture.ah_gap_daily(crawl, floor)
     assert [g["day"] for g in gaps] == [start, start + timedelta(days=2)]
@@ -555,3 +619,45 @@ def test_metric_compare_refuses_a_stuck_sensor_instead_of_calling_it_real():
     m = moisture._metric_compare([3.0] * 20, [1.0] * 20, digits=2)
     assert m["verdict"] == "collecting"
     assert m["ci95"] is None
+
+
+def test_a_day_seen_for_two_hours_is_not_a_day():
+    """Forty readings packed into two hours cleared the old 24-READING bar
+    (about 72 minutes of 3-minute polling), so a day seen only in the small
+    hours was weighed as a full day despite the daily humidity cycle."""
+    start = date(2026, 8, 1)
+    crawl = _ah_daily(start, 3, lambda i: 13.0)
+    crawl[1]["ah_n"], crawl[1]["ah_hours"] = 40, 2
+    floor = _ah_daily(start, 3, lambda i: 10.0)
+    assert [g["day"] for g in moisture.ah_gap_daily(crawl, floor)] == \
+        [start, start + timedelta(days=2)]
+    outdoor = _outdoor_ah(start, 3, lambda i: 8.0)
+    outdoor[2]["ah_hours"] = 17                    # just short of most of the day
+    assert len(moisture.ah_excess_daily(crawl, outdoor)) == 1
+
+
+def test_intervention_report_skips_barely_observed_days():
+    """A day the crawl sensor saw for two hours reads as an hour or two above
+    60% RH at most. Averaged with full days it drags 'hours above 60 per day'
+    down and can manufacture an improvement."""
+    d0 = date(2026, 8, 1)
+    base = _stats_days(d0 - timedelta(days=20), 20, lambda i: 70 + (i % 3),
+                       lambda i: 60 + (i % 2), h60=20.0)
+    post_full = _stats_days(d0, 12, lambda i: 70 + (i % 3), lambda i: 60 + (i % 2), h60=20.0)
+    post_thin = _stats_days(d0 + timedelta(days=12), 8, lambda i: 70 + (i % 3),
+                            lambda i: 60 + (i % 2), h60=1.5, obs_h=2.0)
+    out = moisture.intervention_report(base + post_full + post_thin,
+                                       [{"id": 1, "marked_on": d0, "label": "X"}])
+    m = out[0]["metrics"]["h60_per_day"]
+    assert m["post_n"] == 12
+    assert m["post_mean"] == 20.0
+
+
+def test_effective_days_does_not_treat_broken_runs_as_independent():
+    """Days kept only every other day (the rest dropped for thin coverage)
+    have no calendar neighbours, so the clock-based autocorrelation cannot be
+    measured and came back as zero: every day counted as independent. A
+    smooth drift observed that way must still be discounted."""
+    vals = [0.2 * i for i in range(20)]
+    alternate = [date(2026, 7, 1) + timedelta(days=2 * i) for i in range(20)]
+    assert moisture._effective_days(vals, alternate) < 5

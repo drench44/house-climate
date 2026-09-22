@@ -704,3 +704,93 @@ def test_the_unknown_order_verdict_still_carries_its_exclusions():
         [_floor("A", 0.1), _floor("B", 0.6)], ordered=False, excluded=["A", "B"])
     assert out["verdict"] == "unknown_order"
     assert out["excluded"] == ["A", "B"]
+
+
+# ------------------------------------------------ interval coverage (seeded)
+
+def _ar1_series(rng, n, rho, sd=1.0):
+    x = [rng.gauss(0, sd)]
+    for _ in range(n - 1):
+        x.append(rho * x[-1] + math.sqrt(1 - rho * rho) * rng.gauss(0, sd))
+    return x
+
+
+def test_transport_gain_interval_has_honest_coverage():
+    """Seeded Monte Carlo against a known transport gain of 0.3, with the crawl,
+    the outdoor air and the floor's own noise all strongly hour-to-hour
+    correlated.
+
+    The Newey-West variance already accounts for that correlation. Scaling it
+    up again by sqrt(n / n_eff) counted it twice: the reported standard error
+    was about 2.2 times the real spread of the estimate, and the displayed
+    interval never missed the truth at all, so a real transport gain was far
+    too easily reported as 'not significant'. The standard error must match
+    the real spread, a plain 95% interval built on it must cover about 95% of
+    the time, and the displayed (Bonferroni over seven lags) interval must
+    still cover at least 95%."""
+    import random
+    import statistics
+    rng = random.Random(3)
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    n = 24 * 40
+    betas, ses, miss_pointwise, miss_displayed = [], [], 0, 0
+    for _ in range(200):
+        c = _ar1_series(rng, n, 0.9)
+        o = _ar1_series(rng, n, 0.9)
+        e = _ar1_series(rng, n, 0.8, 0.5)
+        rows = [{"bucket": t0 + timedelta(hours=i), "crawl": c[i],
+                 "floor": 0.3 * c[i] + 0.2 * o[i] + e[i], "outdoor": o[i]}
+                for i in range(n)]
+        f = coupling._fit_at_lag(rows, 0)
+        assert f is not None
+        betas.append(f["beta"])
+        ses.append(f["se"])
+        miss_pointwise += abs(f["beta"] - 0.3) > 1.96 * f["se"]
+        miss_displayed += abs(f["beta"] - 0.3) > coupling.t_crit_bonf7(f["dof"]) * f["se"]
+    ratio = statistics.mean(ses) / statistics.stdev(betas)
+    assert 0.75 <= ratio <= 1.3, f"reported SE is {ratio:.2f}x the true spread"
+    pointwise_coverage = 1 - miss_pointwise / len(betas)
+    assert 0.85 <= pointwise_coverage <= 0.99, pointwise_coverage
+    assert miss_displayed / len(betas) <= 0.05
+
+
+def test_interaction_interval_is_not_double_corrected(monkeypatch):
+    """stack_signature's interaction fit had the same double correction. Its
+    reported interval must be the Bonferroni critical value times the plain
+    Newey-West standard error, with no further scaling."""
+    import random
+    rng = random.Random(8)
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    n = 24 * 30
+    c = _ar1_series(rng, n, 0.9)
+    o = _ar1_series(rng, n, 0.9)
+    e = _ar1_series(rng, n, 0.8, 0.5)
+    rows = [{"bucket": t0 + timedelta(hours=i), "crawl": c[i],
+             "floor": 0.3 * c[i] + 0.2 * o[i] + e[i], "outdoor": o[i],
+             "dt": 10 + 5 * rng.random()}
+            for i in range(n)]
+    seen = []
+    real_hac = coupling.hac_var
+
+    def recording_hac(*a, **k):
+        v = real_hac(*a, **k)
+        seen.append(v)
+        return v
+    monkeypatch.setattr(coupling, "hac_var", recording_hac)
+    f = coupling._interaction_fit(rows, 0)
+    assert f is not None and len(seen) == 1
+    dof = f["n_eff"] - (4 + coupling.HOUR_OF_DAY_PARAMS - 1)
+    assert f["ci95"] == pytest.approx(
+        coupling.t_crit_bonf7(dof) * math.sqrt(seen[0]), rel=1e-3)
+
+
+def test_straddles_reads_markers_on_the_local_calendar():
+    """A marker is a local date. At 19:00 Pacific on 19 September the UTC date
+    is already the 20th, so a marker set for the 20th (tomorrow, locally) was
+    treated as inside the window and refused a perfectly good fit."""
+    now = datetime(2026, 9, 20, 2, 0, tzinfo=timezone.utc)
+    since = now - timedelta(days=30)
+    tomorrow_marker = [{"marked_on": date(2026, 9, 20)}]
+    assert coupling._straddles(tomorrow_marker, since, now, "America/Los_Angeles") is False
+    assert coupling._straddles([{"marked_on": date(2026, 9, 19)}], since, now,
+                               "America/Los_Angeles") is True
