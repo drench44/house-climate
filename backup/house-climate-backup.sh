@@ -157,7 +157,6 @@ if [ "${1:-}" = "--selftest" ]; then
   check "$(hc_lost "readings=10 air_readings=0" "readings=10 air_readings=0" "readings air_readings")" ""
   # A grown table (rows written between the count and the dump) is fine.
   check "$(hc_lost "readings=10" "readings=12" "readings")" ""
-  # Neighbouring names must not be confused for one another.
   # Neighbouring names must not be confused. This has to put BOTH names in the
   # tables list, give them DIFFERENT counts, and list the longer name first —
   # anything less and the case passes whether or not the lookup is exact.
@@ -201,13 +200,17 @@ fail() { echo "house-climate-backup FAIL: $1 $(now_iso)" >&2; exit 1; }
 # A table that cannot be counted is left OUT of the list, which hc_lost then
 # reports as MISSING (on the restored side) or UNCOUNTED-SOURCE (on the source
 # side) — never as a pass. ON_ERROR_STOP: without it psql can exit 0 on a
-# statement error.
+# statement error. psql's own error text for each failed count is appended to
+# the file named by $HC_COUNT_ERRS (when set), so a failure says WHY.
 hc_counts() {
   local ctr="$1" db="$2" out="" t c
   for t in $HC_VERIFY_TABLES; do
-    c="$(docker exec "$ctr" psql -U "$DB_USER" -d "$db" -v ON_ERROR_STOP=1 \
-         -tAc "SELECT count(*) FROM $t" 2>/dev/null)" || continue
-    out="$out $t=$c"
+    if c="$(docker exec "$ctr" psql -U "$DB_USER" -d "$db" -v ON_ERROR_STOP=1 \
+              -tAc "SELECT count(*) FROM $t" 2>&1)"; then
+      out="$out $t=$c"
+    elif [ -n "${HC_COUNT_ERRS:-}" ]; then
+      echo "$t: $(echo "$c" | head -n 1)" >> "$HC_COUNT_ERRS"
+    fi
   done
   echo "$out"
 }
@@ -239,7 +242,10 @@ if [ "${1:-}" = "--restore-selftest" ]; then
     || fail "container $CONTAINER not running"
   testdb="climate_restore_selftest"
   tmp="$(mktemp)"
-  trap 'rm -f "$tmp"' EXIT
+  # The throwaway DB lives in the LIVE container, so it is dropped on every
+  # exit path, not only the happy one.
+  trap 'rm -f "$tmp"; docker exec "$CONTAINER" psql -U "$DB_USER" -d postgres -q \
+          -c "DROP DATABASE IF EXISTS $testdb;" >/dev/null 2>&1' EXIT
   # Count the source rows FIRST — a restore that recovers only the schema (a
   # classic TimescaleDB pre/post_restore failure) leaves readings queryable but
   # EMPTY, which must be a failure, not a pass. We assert the restored count is
@@ -267,8 +273,6 @@ if [ "${1:-}" = "--restore-selftest" ]; then
   # coming back.
   restored_counts="$(hc_counts "$CONTAINER" "$testdb")"
   lost="$(hc_lost "$src_counts" "$restored_counts" "$HC_VERIFY_TABLES")"
-  docker exec "$CONTAINER" psql -U "$DB_USER" -d postgres \
-    -c "DROP DATABASE IF EXISTS $testdb;" >/dev/null
   # The data must survive, not just the schema.
   [ -z "$lost" ] || fail "restore lost data:$lost (schema-only restore?)"
   echo "restore-selftest OK:$restored_counts $(now_iso)"
@@ -286,12 +290,12 @@ fi
 #   2. the newest reading is within HC_VERIFY_MAX_LAG_SECS of the dump's own
 #      timestamp, so the file holds current history rather than a stale or
 #      wrong database.
-# `latest` picks the newest daily dump. On success it writes
+# `latest` picks the newest daily dump by the date in its name. On success it writes
 # $HC_VERIFY_STAMP, which a watchdog can age-check. Run it weekly.
 if [ "${1:-}" = "--verify-dump" ]; then
   file="${2:-}"
   if [ "$file" = "latest" ]; then
-    file="$(ls -1t "$DEST_DIR"/climate-*.dump 2>/dev/null | head -n 1)"
+    file="$(ls -1 "$DEST_DIR"/climate-*.dump 2>/dev/null | sort -r | head -n 1)"
     [ -n "$file" ] || fail "verify-dump: no dumps in $DEST_DIR"
   fi
   [ -n "$file" ] || fail "verify-dump: usage: --verify-dump <file|latest>"
@@ -302,7 +306,9 @@ if [ "${1:-}" = "--verify-dump" ]; then
   image="${HC_VERIFY_IMAGE:-$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null)}"
   [ -n "$image" ] || fail "verify-dump: cannot tell which image $CONTAINER runs (set HC_VERIFY_IMAGE)"
   vc="hc-verify-dump-$$"
-  trap 'docker rm -f "$vc" >/dev/null 2>&1' EXIT
+  # -v: the image keeps its data in an anonymous volume, and a plain rm -f
+  # leaves that volume (a full restored copy of the DB) behind on every run.
+  trap 'docker rm -f -v "$vc" >/dev/null 2>&1' EXIT
   docker run -d --name "$vc" --network none \
     -e POSTGRES_USER="$DB_USER" -e POSTGRES_PASSWORD=verify -e POSTGRES_DB="$DB_NAME" \
     "$image" >/dev/null || fail "verify-dump: could not start a throwaway $image container"
@@ -316,7 +322,10 @@ if [ "${1:-}" = "--verify-dump" ]; then
     fi
     sleep 2
   done
-  [ -n "$ready" ] || fail "verify-dump: throwaway container never accepted connections"
+  if [ -z "$ready" ]; then
+    docker logs --tail 30 "$vc" >&2 2>&1
+    fail "verify-dump: throwaway container never accepted connections (its log is above)"
+  fi
   echo "verify-dump: restoring $(basename "$file") into throwaway $vc"
   hc_restore "$vc" "$DB_NAME" "$file"
   restored_counts="$(hc_counts "$vc" "$DB_NAME")"
@@ -327,6 +336,7 @@ if [ "${1:-}" = "--verify-dump" ]; then
     || fail "verify-dump: cannot read the newest reading"
   written="$(stat -c %Y "$file" 2>/dev/null || stat -f %m "$file")"
   case "$newest$written" in ''|*[!0-9]*) fail "verify-dump: unreadable timestamps (newest=$newest written=$written)" ;; esac
+  [ "$newest" -gt 0 ] || fail "verify-dump: $(basename "$file") has no readings at all"
   lag=$(( written - newest ))
   [ "$lag" -le "$VERIFY_MAX_LAG" ] \
     || fail "verify-dump: newest reading in $(basename "$file") is ${lag}s older than the dump (max ${VERIFY_MAX_LAG}s) — was the DB still recording?"
@@ -350,6 +360,16 @@ case "$KEEP_MONTHLY" in ''|*[!0-9]*) fail "HC_KEEP_MONTHLY must be a whole numbe
 mkdir -p "$DEST_DIR" || fail "cannot create $DEST_DIR"
 mkdir -p "$(dirname "$STAMP")" || fail "cannot create stamp dir $(dirname "$STAMP")"
 
+# One run at a time. The nightly timer and the pre-deploy gate both call this
+# script, and two runs share the same temp names: one could move the other's
+# half-written dump into place and stamp it good.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$DEST_DIR/.lock" || fail "cannot open lock $DEST_DIR/.lock"
+  flock -n 9 || fail "another backup run holds $DEST_DIR/.lock"
+else
+  echo "house-climate-backup WARN: flock not found, running without the single-run lock" >&2
+fi
+
 docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true \
   || fail "container $CONTAINER not running"
 
@@ -361,10 +381,18 @@ rm -f "$tmp" "$tmp.counts"
 # Row counts taken just BEFORE the dump, saved beside it, so --verify-dump can
 # later prove the file restores every row it should. Rows written between the
 # count and the dump only make the dump bigger, which still passes.
-counts="$(hc_counts "$CONTAINER" "$DB_NAME")"
-[ -z "$(hc_lost "$counts" "$counts" "$HC_VERIFY_TABLES")" ] \
-  || fail "cannot count every table before the dump:$(hc_lost "$counts" "$counts" "$HC_VERIFY_TABLES")"
-echo "${counts# }" > "$tmp.counts" || fail "cannot write row counts"
+# A count that fails must not cost the night its backup: the dump is still
+# taken and put in place, and only THEN does the run fail (no .counts file, no
+# success stamp, no monthly copy), so the failure is loud and the data is safe.
+count_errs="$(mktemp)"
+counts="$(HC_COUNT_ERRS="$count_errs" hc_counts "$CONTAINER" "$DB_NAME")"
+uncounted="$(hc_lost "$counts" "$counts" "$HC_VERIFY_TABLES")"
+if [ -z "$uncounted" ]; then
+  echo "${counts# }" > "$tmp.counts" || { rm -f "$count_errs"; fail "cannot write row counts"; }
+else
+  uncounted="$uncounted ($(tr '\n' ';' < "$count_errs"))"
+fi
+rm -f "$count_errs"
 
 # -Fc = custom format: compressed and restorable with pg_restore (selective,
 # parallel, --clean). Write to temp first; never let a partial dump take the
@@ -379,8 +407,16 @@ if [ "$verdict" != "ok" ]; then
   fail "$verdict"
 fi
 
-# Counts first, so a dump never sits under its final name without them.
-mv -f "$tmp.counts" "$final.counts" && mv -f "$tmp" "$final" || fail "atomic move into place failed"
+# An earlier run today may have left a .counts file; remove it FIRST so a
+# failed move below can never pair this dump with that run's counts.
+rm -f "$final.counts" || fail "cannot replace $final.counts"
+mv -f "$tmp" "$final" || fail "atomic move into place failed"
+if [ -n "$uncounted" ]; then
+  # Keep the dump, but a dump nothing can verify is not a success.
+  fail "dump is safe at $final, but tables could not be counted, so it cannot be verified:$uncounted"
+fi
+mv -f "$tmp.counts" "$final.counts" \
+  || fail "dump is at $final but its row counts could not be put beside it"
 
 # Monthly keeper: the first good dump of each month is copied aside (temp name,
 # then renamed, same as the daily) and kept for $KEEP_MONTHLY months.
@@ -394,12 +430,21 @@ if [ ! -e "$monthly" ]; then
     || { rm -f "$monthly.partial"; fail "monthly copy to $monthly failed (daily dump is OK at $final)"; }
 fi
 
-# Rotate: keep the newest $KEEP daily dumps and $KEEP_MONTHLY monthly ones.
-# Each dump's .counts file goes with it. Monthly names sort by date.
-while IFS= read -r f; do rm -f -- "$f" "$f.counts"; done \
-  < <(ls -1t "$DEST_DIR"/climate-*.dump 2>/dev/null | hc_to_prune "$KEEP")
-while IFS= read -r f; do rm -f -- "$f" "$f.counts"; done \
-  < <(ls -1 "$month_dir"/climate-*.dump 2>/dev/null | sort -r | hc_to_prune "$KEEP_MONTHLY")
+# Rotate: keep the newest $KEEP daily dumps and $KEEP_MONTHLY monthly ones,
+# newest by the DATE IN THE NAME (a clock jump or a copied-in file can give an
+# old dump a new mtime), and never tonight's. Each .counts goes with its dump.
+# A delete that fails is a failure: pruning that silently stops fills the disk.
+prune_failed=""
+while IFS= read -r f; do
+  [ "$f" = "$final" ] && continue
+  rm -f -- "$f" "$f.counts" || prune_failed="$prune_failed $f"
+done < <(ls -1 "$DEST_DIR"/climate-*.dump 2>/dev/null | sort -r | hc_to_prune "$KEEP")
+while IFS= read -r f; do
+  [ "$f" = "$monthly" ] && continue
+  rm -f -- "$f" "$f.counts" || prune_failed="$prune_failed $f"
+done < <(ls -1 "$month_dir"/climate-*.dump 2>/dev/null | sort -r | hc_to_prune "$KEEP_MONTHLY")
+[ -z "$prune_failed" ] || fail "could not delete old dumps:$prune_failed"
+[ -s "$final" ] && [ -s "$final.counts" ] || fail "tonight's dump or its counts vanished during rotation ($final)"
 
 # The dump is already safely in place ($final); still, a stamp we cannot write
 # must FAIL LOUD, not print OK — the pre-deploy gate trusts this stamp to prove

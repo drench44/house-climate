@@ -65,8 +65,11 @@ touched. It passes only when:
    moment the dump was written, so the file holds current history and not a
    database that had stopped recording.
 
-On success it writes `HC_VERIFY_STAMP`, so a watchdog can alert when the
-weekly check stops passing. CI runs a nightly backup and then `--verify-dump`
+`backup/house-climate-backup-verify.timer` runs it weekly, with the same
+`OnFailure=` notifier as the nightly dump. On success it writes
+`HC_VERIFY_STAMP`, so a watchdog can also alert when the check simply stops
+running. The age check reads the dump file's modified time, so copy dumps with
+`cp -p` if you move them around. CI runs a nightly backup and then `--verify-dump`
 on the result, and also proves the check fails on a dump missing rows.
 
 The comparison logic is pure and is exercised by `--selftest`, which needs no

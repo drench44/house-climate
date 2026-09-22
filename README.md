@@ -197,9 +197,9 @@ is also kept in `monthly/` for two years, so damage you don't notice for weeks
 can still be undone.
 
 **Verify the restore, don't assume it.** A backup you've never restored is a
-guess. Run `house-climate-backup.sh --verify-dump latest` on a weekly timer: it
-restores your newest real dump into a throwaway container and checks every
-table and the newest reading. `house-climate-backup.sh --restore-selftest` does a real dump → restore
+guess. Install `house-climate-backup-verify.timer` too: once a week it runs
+`house-climate-backup.sh --verify-dump latest`, which restores your newest real
+dump into a throwaway container and checks every table and the newest reading. `house-climate-backup.sh --restore-selftest` does a real dump → restore
 into a throwaway database (using the pre/post-restore wrappers) → verify → drop,
 so you find a broken restore path on your schedule, not during an outage. CI
 runs this on every push/PR. **Store dumps off-box:** point `HC_BACKUP_DIR` at a
