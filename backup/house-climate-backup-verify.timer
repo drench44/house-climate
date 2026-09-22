@@ -1,0 +1,13 @@
+# /etc/systemd/system/house-climate-backup-verify.timer
+# Weekly restore check, well after the nightly dump has landed. Persistent so
+# a missed week fires on next boot.
+[Unit]
+Description=Weekly house-climate restore check timer
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
