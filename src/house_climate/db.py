@@ -567,6 +567,10 @@ def kv_get(conn, key):
     return {"value": row[0], "updated_at": row[1]}
 
 
+def kv_delete(conn, key) -> None:
+    conn.execute("DELETE FROM kv WHERE k=%s", (key,))
+
+
 def kv_prefix(conn, prefix) -> list[tuple]:
     """Every (key, value) whose key starts with `prefix`. Used by the alert
     cooldown, which keeps one row per alert so two writers can never clobber
