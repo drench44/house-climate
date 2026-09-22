@@ -1,0 +1,19 @@
+# /etc/systemd/system/house-climate-backup-verify.service
+# Weekly: restore the NEWEST real dump into a throwaway container and check it
+# (see --verify-dump in house-climate-backup.sh). The nightly run proves a dump
+# was written; this proves the file you would actually restore from works.
+[Unit]
+Description=Weekly restore check of the newest house-climate dump
+After=docker.service
+OnFailure=house-climate-backup-failure.service
+
+[Service]
+Type=oneshot
+# EDIT: same user, script path and env as house-climate-backup.service. Must
+# see the same HC_BACKUP_DIR. On success it writes HC_VERIFY_STAMP (default
+# ~/.local/state/house-climate-backup-last-verify) for a watchdog to age-check.
+User=YOUR-USER
+ExecStart=/home/YOUR-USER/bin/house-climate-backup.sh --verify-dump latest
+# Starting a TimescaleDB container and restoring takes about half a minute for
+# a year of data; this is generous headroom, not an expectation.
+TimeoutStartSec=30m
