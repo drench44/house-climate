@@ -327,6 +327,9 @@ def _validate_config(d: dict, table: "TouTable") -> None:
                       ("relay_heartbeat_hours", "hours")):
         if opt in alerts:
             v = alerts[opt]
+            # relay_heartbeat_hours 0 turns the heartbeat off.
+            if opt == "relay_heartbeat_hours" and v == 0 and not isinstance(v, bool):
+                continue
             if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
                 raise ValueError(f"config 'alerts.{opt}' must be a "
                                  f"positive number of {unit}; got {v!r}")
