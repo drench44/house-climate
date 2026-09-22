@@ -23,6 +23,11 @@ _seen_unknown = set()
 
 class DaikinError(Exception): ...
 class RateLimited(DaikinError): ...
+# The request never got an HTTP answer (no network, DNS failure, timeout,
+# dropped connection). A subclass so every DaikinError handler covers it: an
+# unwrapped requests exception used to escape poll_once and skip the rest of
+# the poll tick, and crash the process at startup.
+class DaikinUnreachable(DaikinError): ...
 
 
 def _map_enum(table: dict, raw, label: str) -> str:
@@ -86,14 +91,23 @@ class DaikinClient:
         self._access = None
         self._exp = 0.0
 
+    @staticmethod
+    def _send(method, url, **kw):
+        """One HTTP call, with any transport failure raised as
+        DaikinUnreachable. HTTP status errors are left to _raise."""
+        try:
+            return method(url, **kw)
+        except requests.RequestException as e:
+            raise DaikinUnreachable(f"Daikin unreachable: {e}") from e
+
     def access_token(self) -> str:
         if self._access and time.time() < self._exp - 30:
             return self._access
-        r = requests.post(f"{self._base}/v1/token",
-                          headers={"x-api-key": self._api_key,
-                                   "Content-Type": "application/json"},
-                          json={"email": self._email, "integratorToken": self._token},
-                          timeout=self._timeout)
+        r = self._send(requests.post, f"{self._base}/v1/token",
+                       headers={"x-api-key": self._api_key,
+                                "Content-Type": "application/json"},
+                       json={"email": self._email, "integratorToken": self._token},
+                       timeout=self._timeout)
         self._raise(r)
         try:
             body = r.json()
@@ -115,8 +129,8 @@ class DaikinClient:
                 "x-api-key": self._api_key}
 
     def list_devices(self) -> list[dict]:
-        r = requests.get(f"{self._base}/v1/devices/", headers=self._headers(),
-                         timeout=self._timeout)
+        r = self._send(requests.get, f"{self._base}/v1/devices/",
+                       headers=self._headers(), timeout=self._timeout)
         self._raise(r)
         # Response is a list of locations, each with a nested "devices" array.
         try:
@@ -126,8 +140,8 @@ class DaikinClient:
             raise DaikinError(f"unexpected devices response shape: {e}") from e
 
     def read_device(self, device_id: str) -> DeviceState:
-        r = requests.get(f"{self._base}/v1/devices/{device_id}",
-                         headers=self._headers(), timeout=self._timeout)
+        r = self._send(requests.get, f"{self._base}/v1/devices/{device_id}",
+                       headers=self._headers(), timeout=self._timeout)
         self._raise(r)
         try:
             return _parse_device(r.json())

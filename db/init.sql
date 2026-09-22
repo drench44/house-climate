@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS readings (
     wx_aqi                 double precision,
     wx_alert_count         integer,
     weather_ok             boolean NOT NULL DEFAULT false,
-    wx_rain_today_in       double precision
+    wx_rain_today_in       double precision,
+    wx_rain_source         text
 );
 SELECT create_hypertable('readings', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS readings_device_ts ON readings (device_id, ts DESC);
@@ -62,9 +63,11 @@ CREATE INDEX IF NOT EXISTS sensor_readings_id_ts ON sensor_readings (sensor_id, 
 -- most recent one is the start of the current filter's runtime clock (see
 -- build_health). Also created at runtime by db.ensure_app_schema so existing
 -- deployments get it without a fresh volume.
--- Rainfall, one row per local day. source 'station' = the house's own rain
--- gauge (wx.json rainToday); 'openmeteo' = gridded backfill for days before
--- station capture began. Station always wins (see db.upsert_precip).
+-- Rainfall, one row per local day. source 'station' = a complete day from the
+-- rain gauge (wx.json rainToday); 'openmeteo' = gridded backfill; lower-ranked
+-- placeholders 'station_partial' (a gauge day the poller did not see through)
+-- and 'model' (the feed's forecast-model estimate). See db.upsert_precip for
+-- the precedence.
 CREATE TABLE IF NOT EXISTS precip_daily (
     day        date PRIMARY KEY,
     inches     double precision NOT NULL,

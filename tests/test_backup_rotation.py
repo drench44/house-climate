@@ -305,3 +305,12 @@ def test_verify_dump_latest_picks_by_date_in_the_name(env):
     r = run(e, "--verify-dump", "latest")
     assert r.returncode == 0, r.stderr
     assert today_dump(dest).name in r.stdout
+
+
+@pytest.mark.parametrize("arg", ["--verify", "--verify-dumps", "latest"])
+def test_an_unknown_argument_is_refused_not_run_as_a_nightly(env, arg):
+    e, dest = env
+    r = run(e, arg)
+    assert r.returncode != 0
+    assert "unknown argument" in r.stderr
+    assert not today_dump(dest).exists()

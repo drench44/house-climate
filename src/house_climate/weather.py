@@ -1,5 +1,8 @@
+import logging
 from dataclasses import dataclass
 import requests
+
+log = logging.getLogger("house_climate.weather")
 
 
 @dataclass(frozen=True)
@@ -16,6 +19,10 @@ class WeatherSnapshot:
     aqi: float | None
     alert_count: int | None
     rain_today_in: float | None = None
+    # Where rain_today_in came from: "gauge" (a real rain gauge's running
+    # total) or "model" (a forecast-model estimate). None when there is no
+    # rain value. Only a gauge value may become the authoritative daily total.
+    rain_source: str | None = None
 
 
 _NULL = WeatherSnapshot(False, None, None, None, None, None, None, None, None, None, None)
@@ -31,6 +38,31 @@ def _num(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+_KNOWN_MODEL_SOURCES = ("partial", "model")
+_warned_rain_sources = set()
+
+
+def _rain_source(d: dict, rain_today) -> str | None:
+    """Normalize the feed's rainSource to "gauge" or "model". The weather-
+    dashboard feed says "gauge" when rainToday is the gauge's own running
+    total, and "partial" or "model" when rainToday is a forecast-model number
+    (the gauge leg is down, or it only produced other rain fields). A feed
+    that sends no rainSource at all keeps the original contract: rainToday is
+    the station's own gauge. Any other value fails safe to "model"."""
+    if rain_today is None:
+        return None
+    src = d.get("rainSource")
+    if src is None or src == "gauge":
+        return "gauge"
+    if src not in _KNOWN_MODEL_SOURCES and src not in _warned_rain_sources:
+        # A renamed or re-cased value would otherwise quietly turn every day
+        # into a model placeholder. Warn once per value so the drift shows.
+        _warned_rain_sources.add(src)
+        log.warning("unrecognized wx.json rainSource %r; treating rain as a"
+                    " model estimate, not a gauge reading", src)
+    return "model"
 
 
 def parse(d: dict) -> WeatherSnapshot:
@@ -56,6 +88,7 @@ def parse(d: dict) -> WeatherSnapshot:
     if temp is None and humidity is None and dewpoint is None:
         return _NULL
     alert = d.get("alertCount")
+    rain_today = _num(d.get("rainToday"))
     return WeatherSnapshot(
         ok=True,
         outdoor_temp_f=temp,
@@ -68,9 +101,11 @@ def parse(d: dict) -> WeatherSnapshot:
         conditions=d.get("conditions"),
         aqi=_num(d.get("aqi")),
         alert_count=int(alert) if isinstance(alert, (int, float)) and not isinstance(alert, bool) else None,
-        # The station's own rain gauge: cumulative inches since local
-        # midnight. The moisture case's rainfall series is built from this.
-        rain_today_in=_num(d.get("rainToday")))
+        # Cumulative inches since local midnight. The moisture case's
+        # rainfall series is built from this, trusting it only when
+        # rain_source says it came from a real gauge.
+        rain_today_in=rain_today,
+        rain_source=_rain_source(d, rain_today))
 
 
 def fetch(url: str, fallback: str | None = None, timeout: int = 5) -> WeatherSnapshot:
