@@ -3,7 +3,7 @@ import ipaddress
 import os
 import threading
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Query
@@ -215,7 +215,7 @@ def crawl_ep(range: str = "24h"):
 @app.get("/api/outdoor")
 def outdoor_ep(range: str = "24h"):
     c = _db()
-    return api.build_outdoor(c, _device(c), range)
+    return api.build_outdoor(c, _device(c), range, cfg=cfg)
 
 
 @app.get("/api/moisture")
@@ -349,15 +349,11 @@ def filter_changed_ep():
 
 @app.get("/api/anomalies")
 def anomalies_ep():
-    since = datetime.now(timezone.utc) - timedelta(hours=cfg.alerts.get("short_cycles_window_hours", 3))
+    """The wall's alert strip. Same evaluator as the push loop
+    (alerts.evaluate_current), so the strip shows exactly what is being
+    pushed, plus anything in alerts.push_suppress (shown, not pushed)."""
     c = _db()
-    rows = db.recent_readings(c, _device(c), since)
-    # daikin-only: Ecowitt failures are a different device (see alerts.py)
-    errs = c.execute(
-        "SELECT count(*) FROM poll_errors WHERE ts > now() - interval '20 minutes'"
-        " AND kind LIKE 'daikin%'"
-    ).fetchone()[0]
-    return [a.__dict__ for a in alerts.evaluate(rows, cfg, errs)]
+    return [a.__dict__ for a in alerts.evaluate_current(c, _device(c), cfg)]
 
 
 # HTML must always revalidate (no-cache still allows ETag 304s): the ?v=N
@@ -451,10 +447,10 @@ async def security_guard(request, call_next):
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
-# alert evaluator wired in Task 11. Supervised: if alert_loop ever escapes its
-# own inner try (it shouldn't now that config is validated at load, but a novel
-# failure must not leave the process alertless and silent), log and restart it
-# instead of letting the daemon thread die unnoticed.
+# Alert evaluator. Supervised: if alert_loop ever escapes its own inner try
+# (it shouldn't now that config is validated at load, but a novel failure must
+# not leave the process alertless and silent), log and restart it instead of
+# letting the daemon thread die unnoticed.
 def _supervised_alert_loop(cfg, secrets):
     while True:
         try:
@@ -465,6 +461,12 @@ def _supervised_alert_loop(cfg, secrets):
             time.sleep(30)
 
 
-threading.Thread(target=_supervised_alert_loop, args=(cfg, secrets), daemon=True).start()
-# alert evaluator wired in Task 11
-threading.Thread(target=alert_loop, args=(cfg, secrets), daemon=True).start()
+# Build the push sink once up front so a channel that cannot deliver (webhook
+# with no ALERT_WEBHOOK_URL) stops the process at startup with a clear error,
+# rather than the supervised loop crash-looping quietly in the background.
+alerts.make_sink(cfg)
+
+# Exactly ONE loop. A second, unsupervised alert_loop thread used to start
+# here too; each loop kept its own cooldown, so every alert was pushed twice.
+threading.Thread(target=_supervised_alert_loop, args=(cfg, secrets),
+                 name="alert-loop", daemon=True).start()
