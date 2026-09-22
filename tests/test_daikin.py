@@ -143,3 +143,41 @@ def test_string_humidity_raises_daikin_error_via_read_device(monkeypatch):
     monkeypatch.setattr(DaikinClient, "_headers", lambda self: {})
     with pytest.raises(DaikinError):
         _client().read_device("d1")
+
+
+# --- network failures: a dropped connection or timeout is not an HTTP status,
+# so _raise never sees it. Before this was wrapped, a requests exception
+# escaped poll_once (skipping the Ecowitt poll, the rain rollup, the heartbeat
+# and the poll_error row) and crash-looped the process at startup.
+
+def _net_error(*a, **k):
+    raise daikin.requests.ConnectionError("network is unreachable")
+
+
+def _timeout(*a, **k):
+    raise daikin.requests.Timeout("read timed out")
+
+
+def test_access_token_network_error_raises_unreachable(monkeypatch):
+    monkeypatch.setattr(daikin.requests, "post", _timeout)
+    with pytest.raises(daikin.DaikinUnreachable):
+        _client().access_token()
+
+
+def test_read_device_network_error_raises_unreachable(monkeypatch):
+    monkeypatch.setattr(daikin.requests, "get", _net_error)
+    monkeypatch.setattr(DaikinClient, "_headers", lambda self: {})
+    with pytest.raises(daikin.DaikinUnreachable):
+        _client().read_device("d1")
+
+
+def test_list_devices_network_error_raises_unreachable(monkeypatch):
+    monkeypatch.setattr(daikin.requests, "get", _net_error)
+    monkeypatch.setattr(DaikinClient, "_headers", lambda self: {})
+    with pytest.raises(daikin.DaikinUnreachable):
+        _client().list_devices()
+
+
+def test_unreachable_is_a_daikin_error():
+    # Every existing DaikinError handler must also cover a network failure.
+    assert issubclass(daikin.DaikinUnreachable, DaikinError)

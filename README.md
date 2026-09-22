@@ -156,6 +156,14 @@ self-hosted almanac dashboard built on
 with a small Open-Meteo adapter behind it. It's optional — everything else
 works without a weather source.
 
+Rainfall comes from the feed's `rainToday` (inches since local midnight). If
+the feed also sends `rainSource`, only `"gauge"` counts as a real gauge
+reading; `"partial"` or `"model"` (a forecast estimate) is kept only as a
+placeholder until Open-Meteo's total for that day replaces it. A feed with no
+`rainSource` is treated as a gauge. If the thermostat is unreachable, the
+poller still stores that tick's weather, with the thermostat fields left
+empty.
+
 ## Peak-cost guidance strip
 
 The main dashboard (not the compact `square.html` kiosk view) shows a live
@@ -213,8 +221,14 @@ alert instead of just sitting in the journal. The restore procedure (Timescale
 needs its pre/post-restore wrappers) is documented at the top of
 `backup/house-climate-backup.sh` — read it *before* you need it.
 
+Each nightly dump carries a row-count file, and the first dump of every month
+is also kept in `monthly/` for two years, so damage you don't notice for weeks
+can still be undone.
+
 **Verify the restore, don't assume it.** A backup you've never restored is a
-guess. `house-climate-backup.sh --restore-selftest` does a real dump → restore
+guess. Install `house-climate-backup-verify.timer` too: once a week it runs
+`house-climate-backup.sh --verify-dump latest`, which restores your newest real
+dump into a throwaway container and checks every table and the newest reading. `house-climate-backup.sh --restore-selftest` does a real dump → restore
 into a throwaway database (using the pre/post-restore wrappers) → verify → drop,
 so you find a broken restore path on your schedule, not during an outage. CI
 runs this on every push/PR. **Store dumps off-box:** point `HC_BACKUP_DIR` at a

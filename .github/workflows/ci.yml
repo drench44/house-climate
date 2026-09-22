@@ -103,6 +103,32 @@ jobs:
             -c "INSERT INTO air_readings (ts, room, pm25) VALUES (now(), 'test', 5.0);"
       - name: Restore self-test
         run: HC_DB_CONTAINER=hc-db bash backup/house-climate-backup.sh --restore-selftest
+      - name: Nightly backup, then restore that FILE in a throwaway container
+        env:
+          HC_DB_CONTAINER: hc-db
+          HC_BACKUP_DIR: ${{ runner.temp }}/hc-dumps
+          HC_VERIFY_STAMP: ${{ runner.temp }}/hc-verify-stamp
+        run: |
+          bash backup/house-climate-backup.sh
+          ls -R "$HC_BACKUP_DIR"
+          bash backup/house-climate-backup.sh --verify-dump latest
+          test -s "$HC_VERIFY_STAMP" || { echo "verify-dump passed but wrote no stamp"; exit 1; }
+          # No throwaway container or its data volume may be left behind.
+          if docker ps -a --format '{{.Names}}' | grep -q hc-verify-dump; then
+            echo "verify-dump left its container behind"; exit 1
+          fi
+          # The check must be able to fail, and for the RIGHT reason: claim the
+          # dump should hold more readings than it does.
+          rm -f "$HC_VERIFY_STAMP"
+          latest="$(ls -1 "$HC_BACKUP_DIR"/climate-*.dump | sort -r | head -n 1)"
+          sed -i 's/readings=[0-9]*/readings=999999/' "$latest.counts"
+          if bash backup/house-climate-backup.sh --verify-dump latest 2> verify.err; then
+            echo "verify-dump passed a dump that is missing rows"; exit 1
+          fi
+          cat verify.err
+          grep -q 'lost data:.*readings=' verify.err \
+            || { echo "verify-dump failed, but not because rows were missing"; exit 1; }
+          test ! -e "$HC_VERIFY_STAMP" || { echo "a failed verify wrote a stamp"; exit 1; }
 
   backup-selftest:
     # Pure-logic contract for the backup + pre-deploy guard scripts (no DB).

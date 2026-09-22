@@ -85,3 +85,147 @@ def test_poller_run_loops_and_recovers(conn, monkeypatch):
     with pytest.raises(_Stop):
         poller.run(cfg, secrets)
     assert calls["n"] >= 2   # recovered after the first tick raised
+
+
+# --- internet outage: Daikin unreachable at the network level ---
+
+def _no_network(*a, **k):
+    import requests
+    raise requests.ConnectionError("network is unreachable")
+
+
+def test_poller_loop_survives_daikin_network_outage(conn, monkeypatch):
+    """A network failure talking to Daikin must not skip the LAN-only Ecowitt
+    poll, the rain rollup, the heartbeat, or the poll_error row."""
+    from house_climate import daikin
+    from house_climate.weather import WeatherSnapshot
+    cfg = load_config(CFG_PATH)
+    secrets = Secrets("k", "t", "e@x", TEST_DSN)
+    monkeypatch.setattr(daikin.requests, "post", _no_network)
+    monkeypatch.setattr(daikin.requests, "get", _no_network)
+    monkeypatch.setattr(poller, "_discover_device_id", lambda c, cl: "dev1")
+    monkeypatch.setattr(poller.weather, "fetch", lambda *a, **k: WeatherSnapshot(
+        False, None, None, None, None, None, None, None, None, None, None))
+    calls = {"ecowitt": 0, "precip": 0}
+    monkeypatch.setattr(poller, "poll_ecowitt",
+                        lambda *a, **k: calls.__setitem__("ecowitt", calls["ecowitt"] + 1) or "ok")
+    monkeypatch.setattr(poller, "update_precip",
+                        lambda *a, **k: calls.__setitem__("precip", calls["precip"] + 1) or "precip_noop")
+    monkeypatch.setattr(poller.time, "sleep", _stop_after(1))
+    with pytest.raises(_Stop):
+        poller.run(cfg, secrets)
+    assert calls == {"ecowitt": 1, "precip": 1}
+    assert db_kinds(conn) >= {"daikin_network"}
+    assert conn.execute("SELECT count(*) FROM kv WHERE k='poller_heartbeat'").fetchone()[0] == 1
+
+
+def db_kinds(conn):
+    return {r[0] for r in conn.execute("SELECT kind FROM poll_errors").fetchall()}
+
+
+def test_poller_startup_retries_with_backoff_on_network_error(conn, monkeypatch):
+    """No known device and Daikin unreachable at boot: retry with a growing
+    delay instead of crashing (which crash-looped the container)."""
+    from house_climate import daikin
+    cfg = load_config(CFG_PATH)
+    secrets = Secrets("k", "t", "e@x", TEST_DSN)
+    monkeypatch.setattr(daikin.requests, "post", _no_network)
+    monkeypatch.setattr(daikin.requests, "get", _no_network)
+    delays = []
+
+    def sleep(s):
+        delays.append(s)
+        if len(delays) >= 4:
+            raise _Stop()
+    monkeypatch.setattr(poller.time, "sleep", sleep)
+    with pytest.raises(_Stop):
+        poller.run(cfg, secrets)
+    assert all(b > a for a, b in zip(delays, delays[1:])), delays
+    assert max(delays) <= poller._BOOT_RETRY_MAX_S
+
+
+def test_poller_startup_uses_known_device_when_daikin_unreachable(conn, monkeypatch):
+    """A restart during an internet outage must not hold the LAN sensors
+    hostage: if the database already knows the thermostat, start polling it
+    right away and let poll_once record the outage."""
+    from house_climate import daikin, db
+    cfg = load_config(CFG_PATH)
+    secrets = Secrets("k", "t", "e@x", TEST_DSN)
+    db.upsert_device(conn, "dev-known", "Main", "ONE")
+    monkeypatch.setattr(daikin.requests, "post", _no_network)
+    monkeypatch.setattr(daikin.requests, "get", _no_network)
+    seen = []
+    monkeypatch.setattr(poller, "poll_once", lambda c, cl, dev, cf: seen.append(dev) or "x")
+    monkeypatch.setattr(poller, "poll_ecowitt", lambda *a, **k: "ecowitt_off")
+    monkeypatch.setattr(poller, "update_precip", lambda *a, **k: "precip_noop")
+    monkeypatch.setattr(poller.time, "sleep", _stop_after(1))
+    with pytest.raises(_Stop):
+        poller.run(cfg, secrets)
+    assert seen == ["dev-known"]
+
+
+def test_poller_startup_does_not_fall_back_on_an_auth_error(conn, monkeypatch):
+    """A bad-credentials boot (HTTP 401) is not an outage: falling back to the
+    known device would start the loop and write a fresh heartbeat, so the
+    healthcheck would call a misconfigured poller healthy. Keep retrying."""
+    from house_climate import daikin, db
+    cfg = load_config(CFG_PATH)
+    secrets = Secrets("k", "t", "e@x", TEST_DSN)
+    db.upsert_device(conn, "dev-known", "Main", "ONE")
+
+    class Resp:
+        status_code, ok, text = 401, False, "unauthorized"
+    monkeypatch.setattr(daikin.requests, "post", lambda *a, **k: Resp())
+    seen = []
+    monkeypatch.setattr(poller, "poll_once", lambda *a, **k: seen.append(1) or "x")
+    monkeypatch.setattr(poller.time, "sleep", _stop_after(2))
+    with pytest.raises(_Stop):
+        poller.run(cfg, secrets)
+    assert seen == []
+    assert conn.execute("SELECT count(*) FROM kv WHERE k='poller_heartbeat'").fetchone()[0] == 0
+
+
+def test_poller_startup_empty_device_list_retries_without_fallback(conn, monkeypatch):
+    from house_climate import db
+    cfg = load_config(CFG_PATH)
+    secrets = Secrets("k", "t", "e@x", TEST_DSN)
+    db.upsert_device(conn, "dev-known", "Main", "ONE")
+
+    class Empty:
+        def list_devices(self): return []
+    monkeypatch.setattr(poller, "DaikinClient", lambda *a, **k: Empty())
+    seen = []
+    monkeypatch.setattr(poller, "poll_once", lambda *a, **k: seen.append(1) or "x")
+    delays = []
+
+    def sleep(s):
+        delays.append(s)
+        if len(delays) >= 3:
+            raise _Stop()
+    monkeypatch.setattr(poller.time, "sleep", sleep)
+    with pytest.raises(_Stop):
+        poller.run(cfg, secrets)
+    assert seen == [] and delays == sorted(delays) and delays[0] < delays[-1]
+
+
+def test_poller_startup_recovers_after_a_network_error(conn, monkeypatch):
+    from house_climate.daikin import DaikinUnreachable
+    cfg = load_config(CFG_PATH)
+    secrets = Secrets("k", "t", "e@x", TEST_DSN)
+
+    class Flaky:
+        n = 0
+        def list_devices(self):
+            Flaky.n += 1
+            if Flaky.n == 1:
+                raise DaikinUnreachable("down")
+            return [{"id": "dev-new", "name": "Main", "model": "ONE"}]
+    monkeypatch.setattr(poller, "DaikinClient", lambda *a, **k: Flaky())
+    seen = []
+    monkeypatch.setattr(poller, "poll_once", lambda c, cl, dev, cf: seen.append(dev) or "x")
+    monkeypatch.setattr(poller, "poll_ecowitt", lambda *a, **k: "ecowitt_off")
+    monkeypatch.setattr(poller, "update_precip", lambda *a, **k: "precip_noop")
+    monkeypatch.setattr(poller.time, "sleep", _stop_after(2))
+    with pytest.raises(_Stop):
+        poller.run(cfg, secrets)
+    assert seen == ["dev-new"]

@@ -67,6 +67,18 @@ rolls that section to a dated version via `python scripts/release.py`.
   window (weekends) are left out of the peak fit, and a day with no peak
   window forecasts zero peak cost.
 
+- `house-climate-backup.sh` refuses an unknown argument. A mistyped mode used
+  to run a full nightly backup, exit 0 and look like the mode had worked.
+- Backups keep the first dump of every month for two years
+  (`HC_KEEP_MONTHLY`), on top of the 14 dailies. Damage nobody notices for
+  two weeks used to be in every backup by the time anyone looked.
+- Each nightly dump now saves the row count of every table beside it, and
+  `house-climate-backup.sh --verify-dump latest` restores the newest real dump
+  into a throwaway container and checks those counts and the newest reading.
+  Before this, only a fresh test dump was ever restored, never the files you
+  would actually use. CI runs it, including a check that it fails on a dump
+  missing rows.
+
 ### Changed
 - The outdoor AQI now says on screen whether it is a real monitor reading or
   the weather feed's estimate. `resolve_outdoor_aqi` silently falls back to the
@@ -95,6 +107,38 @@ rolls that section to a dated version via `python scripts/release.py`.
   left the reader guessing which sensor to go and look at.
 
 ### Fixed
+- Rain from the weather feed's forecast model is no longer stored as a real
+  rain gauge total. The feed says where `rainToday` came from (`rainSource`);
+  only a gauge value can now become the day's authoritative total, and an
+  unrecognized `rainSource` is logged. A model
+  number is kept as a low-ranked placeholder that the next day's Open-Meteo
+  total replaces.
+- A day the poller stopped partway through no longer keeps its partial rain
+  total forever. The next day it is marked partial, and the Open-Meteo
+  backfill replaces it, keeping the gauge's number if it was already higher.
+  Existing partial days are healed the same way the first day after
+  upgrading. The backfill now asks for each stretch of missing days
+  separately, so one range Open-Meteo cannot serve no longer blocks the rest.
+- The "was the whole day seen" rain check now looks at the last hour that
+  actually had a gauge reading, not the last hour of any reading.
+- An internet outage no longer stops the poller from recording the local
+  Ecowitt sensors, writing its heartbeat, or logging the error. Network
+  failures talking to Daikin are now recorded as `daikin_network` poll
+  errors (which the thermostat-offline alert counts). At startup the poller
+  retries with a growing delay instead of crashing, and if Daikin is
+  unreachable but the poller already knows the thermostat, it starts polling
+  right away. A credentials error still keeps it in the retry loop, so the
+  healthcheck still flags it.
+- A thermostat outage no longer throws away the weather fetched on the same
+  tick. That weather is stored with the thermostat fields left empty; runtime,
+  cost, alerts, the 30-day chart and `/health` ignore those rows.
+- The crawl-space (outdoor slot) sensor's low-battery flag now works: the
+  gateway reports it on the dew point entry, which the parser skipped.
+- Ecowitt temperatures reported in Celsius are converted to Fahrenheit, and
+  an unknown unit is recorded as an error instead of being stored.
+- The poller healthcheck comments no longer claim Docker restarts an
+  unhealthy container. Compose only marks it unhealthy; an outside watchdog
+  has to act on it.
 - Four more display paths asserted something specific and false when they met a
   result they had no wording for, all found by reviewing the fix below:
   a metric downgraded as season-confounded printed "collecting (34+41 days,
