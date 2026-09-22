@@ -33,6 +33,7 @@ shown honestly. Every gate below refuses with a named reason.
 """
 import math
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 # --- preprocessing -----------------------------------------------------------
 # Window for the centred moving mean that removes slow drift. Seven days, not
@@ -430,7 +431,13 @@ def _longest_gap_h(buckets, since, now):
     return max(0, worst)
 
 
-def _straddles(interventions, since, now):
+def _straddles(interventions, since, now, tz=None):
+    """Does any marker fall inside the window? Markers are LOCAL dates, so
+    the window's edges are converted to local dates first when the timezone
+    is known; the UTC date runs a day ahead every evening in the Americas."""
+    if tz is not None:
+        zone = ZoneInfo(tz)
+        since, now = since.astimezone(zone), now.astimezone(zone)
     for iv in interventions or []:
         d = iv.get("marked_on")
         if d is not None and since.date() < d <= now.date():
@@ -503,10 +510,15 @@ def _fit_at_lag(rows, lag, extra_cols=(), diagnose=False):
     # zero-width interval, so it is refused alongside the impossible ones.
     if var is None or var <= 0:
         return None
-    # The HAC sum is built from the full hourly sample; the interval it feeds
-    # must be scaled to the honest sample size, or the correlation correction
-    # would be applied to the critical value and quietly undone here.
-    se = math.sqrt(var) * math.sqrt(max(len(X), 1) / n_eff)
+    # The Newey-West variance already carries the autocorrelation: its lag
+    # terms are exactly the "this hour repeats the last one" correction. It
+    # must NOT be scaled up again by sqrt(n / n_eff) as well. That counted the
+    # same correlation twice and reported intervals about 2.2 times too wide
+    # (seeded simulation: true spread 0.041, reported 0.090, not one miss in
+    # 150 fits), which hid real transport as "not significant". n_eff still
+    # does its own separate job: it sets the degrees of freedom, and so the
+    # critical value and the MIN_DOF refusal.
+    se = math.sqrt(var)
     return {"beta": fit["beta"][0], "se": se, "lag": lag, "n": len(X),
             "n_eff": n_eff, "dof": dof, "resid": fit["resid"],
             "t": (fit["beta"][0] / se) if se > 0 else 0.0,
@@ -514,7 +526,7 @@ def _fit_at_lag(rows, lag, extra_cols=(), diagnose=False):
 
 
 def coupling_window(crawl, floor, outdoor, days=30, now=None, crawl_rh=None,
-                    interventions=None, blower=None):
+                    interventions=None, blower=None, tz=None):
     """How much of a crawl moisture excursion reaches this floor.
 
     Returns {ready, beta, ci95, lag, n, n_eff, t, ...} or {ready: False,
@@ -529,7 +541,7 @@ def coupling_window(crawl, floor, outdoor, days=30, now=None, crawl_rh=None,
     if days < MIN_WINDOW_DAYS:
         return {"ready": False, "reason": "window_too_short", **base}
     since = now - timedelta(days=days)
-    if _straddles(interventions, since, now):
+    if _straddles(interventions, since, now, tz):
         return {"ready": False, "reason": "straddles_intervention", **base}
 
     extra = {"blower": (blower, "duty")} if blower else None
@@ -620,7 +632,7 @@ def _crawl_independent_sd(rows):
 
 
 def stack_signature(crawl, floor, outdoor, temp_diff, days=30, now=None,
-                    crawl_rh=None, interventions=None):
+                    crawl_rh=None, interventions=None, tz=None):
     """Does the transport strengthen as indoor-minus-outdoor temperature grows?
 
     This is the guard against the confounder that would otherwise sink the
@@ -640,7 +652,7 @@ def stack_signature(crawl, floor, outdoor, temp_diff, days=30, now=None,
     if days < MIN_WINDOW_DAYS:
         return {"ready": False, "reason": "window_too_short", **base}
     since = now - timedelta(days=days)
-    if _straddles(interventions, since, now):
+    if _straddles(interventions, since, now, tz):
         return {"ready": False, "reason": "straddles_intervention", **base}
 
     rows, info = _prepare(crawl, floor, outdoor, days, now, crawl_rh,
@@ -704,8 +716,8 @@ def _interaction_fit(rows, lag):
     var = hac_var(X, fit["resid"], fit["xtx"], buckets, col=0)
     if var is None or var <= 0:
         return None
-    se = math.sqrt(var) * math.sqrt(max(len(X), 1) / n_eff)
-    ci = t_crit_bonf7(dof) * se
+    se = math.sqrt(var)          # Newey-West already accounts for the
+    ci = t_crit_bonf7(dof) * se  # autocorrelation; see _fit_at_lag
     return {"delta": round(fit["beta"][0], 5), "ci95": round(ci, 5),
             "n_eff": n_eff, "lag": lag, "n": len(X),
             "beta": round(fit["beta"][1], 3),

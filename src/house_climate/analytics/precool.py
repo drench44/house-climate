@@ -15,8 +15,10 @@ This needs a control: some pre-cool-OFF days. With pre-cool always on there is
 nothing to compare against, so it reports {"ready": False} and the UI tells the
 user to run a few days with pre-cool disabled.
 """
-from datetime import time
+from datetime import time, timedelta
 from zoneinfo import ZoneInfo
+
+from .cost import MAX_GAP_S
 
 # Retained as the default window so a caller that doesn't pass one keeps the
 # example schedule's behavior; the config-derived window overrides these.
@@ -34,19 +36,31 @@ def _mins(t):
     return t.hour * 60 + t.minute
 
 
+# A day enters the comparison only when this share of its peak window was
+# observed. With a 60-minute floor, a day seen for one hour of a four-hour
+# window was averaged in beside fully observed days, dragging its group's
+# 'peak cooling minutes' toward zero and the savings figure with it.
+MIN_PEAK_COVERAGE = 0.9
+
+
 def effectiveness(readings, tz_name, *, min_days_each=2, base_f=75.0,
-                  min_peak_minutes=60.0, peak_start=PEAK_START, peak_end=PEAK_END,
-                  peak_weekday_only=True):
+                  min_peak_coverage=MIN_PEAK_COVERAGE, peak_start=PEAK_START,
+                  peak_end=PEAK_END, peak_weekday_only=True, off_days=None):
+    """`off_days(date)` marks extra days the weekday-only peak does not apply
+    to (the tariff's holidays), exactly like a weekend."""
     tz = ZoneInfo(tz_name)
     ps, pe = _mins(peak_start), _mins(peak_end)
     if pe <= ps:                              # wrap-aware (peak windows are midday, but be safe)
         pe += 24 * 60
+    min_peak_minutes = min_peak_coverage * (pe - ps)
+    max_gap_min = MAX_GAP_S / 60.0
     rows = sorted(readings, key=lambda r: r["ts"])
     days = {}
     for a, b in zip(rows, rows[1:]):
         la = a["ts"].astimezone(tz)
-        if peak_weekday_only and la.weekday() >= 5:   # peak applies to weekdays only
-            continue
+        if peak_weekday_only and (la.weekday() >= 5
+                                  or (off_days is not None and off_days(la.date()))):
+            continue                          # peak applies to working weekdays only
         d = days.setdefault(la.date(), {"cool_min": 0.0, "out_sum": 0.0,
                                         "out_min": 0.0, "min_sum": 0.0,
                                         "sp_before": None, "sp_after": None})
@@ -57,14 +71,17 @@ def effectiveness(readings, tz_name, *, min_days_each=2, base_f=75.0,
                 d["sp_before"] = sp
             elif ps <= m <= ps + 15:          # just after
                 d["sp_after"] = sp
-        dt = (b["ts"] - a["ts"]).total_seconds() / 60.0
+        # Each reading is credited with at most MAX_GAP_S (10 minutes), the
+        # cap cost and runtime use: anything longer is unobserved time, not
+        # 30 minutes of assumed cooling.
+        dt = min((b["ts"] - a["ts"]).total_seconds() / 60.0, max_gap_min)
         # Window membership by interval MIDPOINT: attributing by the start
         # timestamp smears up to one poll interval across the window edges
         # every single day.
-        lm = (a["ts"] + (b["ts"] - a["ts"]) / 2).astimezone(tz)
+        lm = (a["ts"] + timedelta(minutes=dt / 2)).astimezone(tz)
         lm_m = _mins(lm.time())
         lm_m_wrapped = lm_m + 24 * 60 if pe > 24 * 60 and lm_m < ps else lm_m
-        if ps <= lm_m_wrapped < pe and 0 < dt <= 30:
+        if ps <= lm_m_wrapped < pe and dt > 0:
             d["min_sum"] += dt
             o = _out(a)
             if o is not None:
@@ -75,7 +92,7 @@ def effectiveness(readings, tz_name, *, min_days_each=2, base_f=75.0,
 
     groups = {"precool": [], "normal": []}
     for v in days.values():
-        if v["min_sum"] < min_peak_minutes:    # need most of the peak window covered
+        if v["min_sum"] < min_peak_minutes:    # most of the peak window observed
             continue
         # avg over only the minutes that HAD an outdoor reading — dividing by
         # all minutes would drag the average toward zero during feed outages.

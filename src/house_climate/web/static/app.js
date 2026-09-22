@@ -477,7 +477,7 @@ function renderHumidity(h) {
   const w = h.window || { action: 'neutral', reason: 'Little to gain from opening windows right now.' };
   const winCls = w.action === 'open' ? 'open' : w.action === 'keep_closed' ? 'closed' : '';
   const ac = h.ac_effect
-    ? `Cooling pulls RH from <b>${Math.round(h.ac_effect.idle)}%</b> to <b>${Math.round(h.ac_effect.cooling)}%</b> — a <b>${h.ac_effect.drop.toFixed(1)}</b>-pt drop.`
+    ? `At the same hours of day, RH runs <b>${Math.round(h.ac_effect.cooling)}%</b> while cooling vs <b>${Math.round(h.ac_effect.idle)}%</b> idle (<b>${h.ac_effect.drop.toFixed(1)}</b> pts).`
     : '';
 
   el.innerHTML = `
@@ -1028,15 +1028,20 @@ function renderRibbon(history, timeline, cost) {
   // Iterate CALENDAR days from local midnight — stepping raw timestamps
   // from winStart skips the newest day whenever the window is under 24h
   // (the timeline-fallback path), leaving the live on-peak span unshaded.
+  // A TOU holiday (cost.tou_holidays, local YYYY-MM-DD) is priced like a
+  // weekend, so a weekday-only peak window is not shaded on it either.
   const peakWindows = (cost && Array.isArray(cost.peak_windows)) ? cost.peak_windows : [];
+  const touHolidays = new Set((cost && Array.isArray(cost.tou_holidays)) ? cost.tou_holidays : []);
   if (peakWindows.length) {
     const dayStart = new Date(winStart);
     dayStart.setHours(0, 0, 0, 0);
     for (const t = new Date(dayStart); t.getTime() <= winEnd; t.setDate(t.getDate() + 1)) {
       const ds = new Date(t.getFullYear(), t.getMonth(), t.getDate());
       const dow = ds.getDay();
+      const iso = `${ds.getFullYear()}-${String(ds.getMonth() + 1).padStart(2, '0')}-${String(ds.getDate()).padStart(2, '0')}`;
+      const offDay = dow === 0 || dow === 6 || touHolidays.has(iso);
       for (const w of peakWindows) {
-        if (w.weekday_only && (dow === 0 || dow === 6)) continue;
+        if (w.weekday_only && offDay) continue;
         const [sh, sm] = w.start.split(':').map(Number);
         const [eh, em] = w.end.split(':').map(Number);
         const ps = new Date(ds.getFullYear(), ds.getMonth(), ds.getDate(), sh, sm).getTime();

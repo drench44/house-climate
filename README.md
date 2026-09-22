@@ -88,6 +88,28 @@ firewall changes, works even if the thermostat sits on an isolated IoT VLAN.
   off-peak); replace the windows and `rate` values with your utility's
   published schedule. Flat-rate plans: one band, `00:00`–`00:00`, every day.
   Seasonal plans: split the `seasons` months and add per-season bands.
+  **Holidays** (optional, off by default): many tariffs price a short list of
+  holidays like a weekend. Add `tou.holidays` and those days use your
+  weekend bands:
+
+  ```json
+  "holidays": {
+    "rules": ["new_years_day", "memorial_day", "independence_day",
+              "labor_day", "thanksgiving_day", "christmas_day"],
+    "observed": "saturday_to_friday_sunday_to_monday",
+    "dates": ["2026-12-24"]
+  }
+  ```
+
+  `rules` are computed for every year. Available: `new_years_day`,
+  `martin_luther_king_day`, `presidents_day`, `memorial_day`, `juneteenth`,
+  `independence_day`, `labor_day`, `columbus_day`, `veterans_day`,
+  `thanksgiving_day`, `day_after_thanksgiving`, `christmas_day`. `observed`
+  (required when `rules` is set) says what happens when a fixed-date holiday
+  lands on a weekend: `none`, `sunday_to_monday`, or
+  `saturday_to_friday_sunday_to_monday`. `dates` adds one-off days. Copy the
+  list and the weekend rule from your utility's tariff sheet; they differ
+  between utilities.
 - **`system_kw`** — what your AC actually draws when cooling. The naive
   estimate is `tons × 1.2 kW/ton`; inverter systems draw meaningfully less,
   so check a real bill or an energy monitor if you have one. **`heat_kw`** is

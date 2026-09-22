@@ -1,10 +1,11 @@
 import math
+from zoneinfo import ZoneInfo
 
 # Magnus formula constants (Alduchov & Eskridge, 1996 — the "AERK" coefficients).
 _MAGNUS_A = 17.62
 _MAGNUS_B = 243.12  # deg C
 
-# Equipment states that count toward the "cooling" bucket in avg_rh_by_state.
+# Equipment states that count toward the "cooling" bucket in rh_by_state_same_hour.
 _COOLING_STATES = {"cooling", "overcool"}
 _IDLE_STATE = "idle"
 
@@ -16,9 +17,15 @@ WINDOW_CLOSE_DP_MARGIN_F = 2.0
 WINDOW_OPEN_TEMP_MIN_F = 50.0
 WINDOW_OPEN_TEMP_MAX_F = 74.0
 
-# avg_rh_by_state / ac_effect: minimum samples in each bucket before the
+# rh_by_state_same_hour / ac_effect: minimum samples in each bucket before the
 # cooling-vs-idle comparison is considered meaningful.
 AC_EFFECT_MIN_SAMPLES = 5
+# ac_effect compares cooling and idle readings only within the same local hour
+# of day. An hour takes part only with at least AC_EFFECT_MIN_PER_HOUR readings
+# on EACH side (one idle reading is not a baseline for forty cooling ones), and
+# at least AC_EFFECT_MIN_HOURS such hours are needed before it is shown.
+AC_EFFECT_MIN_PER_HOUR = 3
+AC_EFFECT_MIN_HOURS = 3
 
 # US AQI (Open-Meteo outdoor reading) at/above which smoke-season window
 # advice overrides the dew-point comparison entirely -- keeping windows shut
@@ -116,27 +123,52 @@ def _vapor_density(vapor_pressure_hpa, temp_f):
     return _VAPOR_DENSITY_K * vapor_pressure_hpa / (temp_c - _ABS_ZERO_C)
 
 
-def avg_rh_by_state(readings):
-    """Mean indoor_humidity while the equipment is actively cooling
-    (cooling/overcool) vs idle. Readings in any other state (heating, fan)
-    are excluded from both buckets. None for an empty bucket."""
-    cooling_vals = []
-    idle_vals = []
+def rh_by_state_same_hour(readings, tz):
+    """Indoor RH while cooling vs while idle, compared only WITHIN the same
+    local hour of day.
+
+    A plain average of every cooling reading against every idle one mostly
+    compares hot afternoons (when the AC runs) with nights (when it does not),
+    and the daily humidity cycle then reads as something the AC did. Here each
+    hour of day that has both cooling and idle readings contributes its own
+    idle-minus-cooling difference (given enough readings on both sides),
+    weighted by how many cooling readings it has, so the figure describes the
+    hours the AC actually runs. It is still an
+    association, not a controlled test: a humid day can both start the AC and
+    raise RH within the same hour.
+
+    Returns {cooling, idle, cooling_n, idle_n, hours_matched}; cooling/idle
+    are None when no hour has both."""
+    zone = ZoneInfo(tz)
+    by_hour = {}
     for r in readings:
         rh = r.get("indoor_humidity")
         if rh is None:
             continue
         status = r.get("equipment_status")
         if status in _COOLING_STATES:
-            cooling_vals.append(rh)
+            key = "cool"
         elif status == _IDLE_STATE:
-            idle_vals.append(rh)
-    return {
-        "cooling": (sum(cooling_vals) / len(cooling_vals)) if cooling_vals else None,
-        "idle": (sum(idle_vals) / len(idle_vals)) if idle_vals else None,
-        "cooling_n": len(cooling_vals),
-        "idle_n": len(idle_vals),
-    }
+            key = "idle"
+        else:
+            continue
+        h = r["ts"].astimezone(zone).hour
+        by_hour.setdefault(h, {"cool": [], "idle": []})[key].append(rh)
+    matched = {h: v for h, v in by_hour.items()
+               if len(v["cool"]) >= AC_EFFECT_MIN_PER_HOUR
+               and len(v["idle"]) >= AC_EFFECT_MIN_PER_HOUR}
+    weight = sum(len(v["cool"]) for v in matched.values())
+    out = {"cooling": None, "idle": None,
+           "cooling_n": sum(len(v["cool"]) for v in matched.values()),
+           "idle_n": sum(len(v["idle"]) for v in matched.values()),
+           "hours_matched": len(matched)}
+    if not weight:
+        return out
+    out["cooling"] = sum(len(v["cool"]) * (sum(v["cool"]) / len(v["cool"]))
+                         for v in matched.values()) / weight
+    out["idle"] = sum(len(v["cool"]) * (sum(v["idle"]) / len(v["idle"]))
+                      for v in matched.values()) / weight
+    return out
 
 
 def window_advice(indoor_dp, outdoor_dp, outdoor_temp_f, outdoor_aqi=None,

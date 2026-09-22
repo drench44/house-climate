@@ -23,32 +23,141 @@ CRAWL_CFG = dataclasses.replace(CFG, ecowitt={
 
 
 # --- _day_is_complete: pure, DB-free. A day anchors the cost average / forecast
-# fit only if it both spans the day AND has no long interior gap. (Runs locally,
-# no Postgres needed.)
+# fit only if nearly all of it, midnight to midnight, was actually observed.
+# (Runs locally, no Postgres needed.)
 
-def _day_rows(hours, day=10):
-    return [{"ts": datetime(2026, 8, day, h, 0, tzinfo=TZ).astimezone(timezone.utc)}
-            for h in hours]
+from datetime import date as _date
 
-
-def test_day_is_complete_full_day_every_two_hours():
-    # 0,2,...,22: spans the day, max interior gap 2h < 3h -> complete.
-    assert api._day_is_complete(_day_rows(list(range(0, 24, 2))), TZ) is True
+DAY = _date(2026, 8, 10)          # a Monday
 
 
-def test_day_is_complete_rejects_short_span():
-    # Last reading at 14:00 never reaches ~10pm -> incomplete.
-    assert api._day_is_complete(_day_rows([0, 2, 4, 8, 12, 14]), TZ) is False
+def _poll_rows(day=DAY, every_min=3, skip=None, status=lambda local: "idle",
+               start_day_offset=-1, end_day_offset=2):
+    """Readings every `every_min` minutes from the day before `day` to the day
+    after it, like the real poller, minus any local [a, b) spans in `skip`."""
+    rows = []
+    t = datetime(day.year, day.month, day.day, tzinfo=TZ) + timedelta(days=start_day_offset)
+    end = datetime(day.year, day.month, day.day, tzinfo=TZ) + timedelta(days=end_day_offset)
+    while t < end:
+        if not any(a <= t < b for a, b in (skip or [])):
+            rows.append({"ts": t.astimezone(timezone.utc),
+                         "equipment_status": status(t)})
+        t += timedelta(minutes=every_min)
+    return rows
 
 
-def test_day_is_complete_rejects_midday_outage():
-    # Spans 00:00..22:00 but an 08:00->14:00 hole is a >3h interior gap: the
-    # exact partial day the endpoint-only check used to pass as complete.
-    assert api._day_is_complete(_day_rows([0, 2, 4, 6, 8, 14, 16, 18, 20, 22]), TZ) is False
+def _local(h, m=0, day=DAY):
+    return datetime(day.year, day.month, day.day, h, m, tzinfo=TZ)
+
+
+def test_day_is_complete_fully_polled_day():
+    assert api._day_is_complete(_poll_rows(), DAY, TZ) is True
+
+
+def test_day_is_complete_tolerates_a_few_missed_polls():
+    # A 12-minute hole: 10 of it credited, 2 unobserved. Not an outage.
+    rows = _poll_rows(skip=[(_local(9, 1), _local(9, 12))])
+    assert api._day_is_complete(rows, DAY, TZ) is True
+
+
+def test_day_is_complete_rejects_an_outage_that_could_hide_runtime():
+    """The audit case: a 2.5-hour outage across the afternoon peak used to pass
+    (no gap over 3 hours, spans 2am to 10pm) and priced the day at about 60%
+    of its real cost."""
+    rows = _poll_rows(skip=[(_local(16, 31), _local(19, 0))])
+    assert api._day_is_complete(rows, DAY, TZ) is False
+
+
+def test_day_is_complete_rejects_sparse_readings():
+    # Two-hourly readings span the day but vouch for only 10 minutes of each
+    # two hours; the old rule called this complete.
+    rows = _poll_rows(every_min=120)
+    assert api._day_is_complete(rows, DAY, TZ) is False
+
+
+def test_day_is_complete_rejects_a_late_start():
+    # First reading of the day at 01:30: the first hour and a half is unseen.
+    rows = [r for r in _poll_rows(start_day_offset=0)
+            if r["ts"] >= _local(1, 30).astimezone(timezone.utc)]
+    assert api._day_is_complete(rows, DAY, TZ) is False
+
+
+@pytest.mark.parametrize("day,hours", [(_date(2026, 3, 8), 23), (_date(2026, 11, 1), 25)])
+def test_day_is_complete_on_clock_change_days(day, hours):
+    """Subtracting two local midnights that share a tzinfo is wall-clock math
+    in Python, so every day measured 24 hours: a perfect spring-forward day
+    (23h) was always refused, and a fall-back day (25h) let a 70-minute
+    outage through."""
+    start, end = api._local_day_bounds(day, TZ)
+    assert (end - start).total_seconds() == hours * 3600
+    rows, t = [], start - timedelta(hours=1)
+    while t < end + timedelta(hours=1):
+        rows.append({"ts": t, "equipment_status": "idle"})
+        t += timedelta(minutes=3)
+    assert api._day_is_complete(rows, day, TZ) is True
+    hole = [r for r in rows
+            if not (start + timedelta(hours=14) <= r["ts"] < start + timedelta(hours=15, minutes=10))]
+    assert api._day_is_complete(hole, day, TZ) is False
 
 
 def test_day_is_complete_empty_is_false():
-    assert api._day_is_complete([], TZ) is False
+    assert api._day_is_complete([], DAY, TZ) is False
+
+
+def test_undercounted_outage_day_cost_is_what_the_old_rule_let_through():
+    """The number the fix keeps out of avg_per_day: with the outage, the day
+    prices well under the same day fully observed."""
+    busy = lambda t: "cooling" if 14 <= t.hour < 21 else "idle"
+    full = _poll_rows(status=busy)
+    gappy = _poll_rows(status=busy, skip=[(_local(16, 31), _local(19, 0))])
+    start, end = api._local_day_bounds(DAY, TZ)
+    c_full = api.cost.compute(full, CFG.tou, CFG.system_kw, CFG.timezone, start=start, end=end)
+    c_gap = api.cost.compute(gappy, CFG.tou, CFG.system_kw, CFG.timezone, start=start, end=end)
+    assert c_gap.total_dollars < 0.75 * c_full.total_dollars
+    assert api._day_is_complete(gappy, DAY, TZ) is False
+    assert api._day_is_complete(full, DAY, TZ) is True
+
+
+# --- day slicing across midnight (pure). Every interval belongs to exactly one
+# day, by its midpoint, the rule cost.compute prices bands by.
+
+def test_a_day_of_continuous_cooling_is_a_full_day_of_minutes():
+    """Slicing rows by timestamp first gave each day's last reading zero
+    minutes: a day of nonstop cooling came to 1437 minutes, not 1440."""
+    rows = _poll_rows(status=lambda t: "cooling")
+    start, end = api._local_day_bounds(DAY, TZ)
+    assert api.runtime.status_minutes(rows, api.runtime.COOL_STATUSES,
+                                      start=start, end=end) == pytest.approx(1440)
+    res = api.cost.compute(rows, CFG.tou, CFG.system_kw, CFG.timezone, start=start, end=end)
+    assert sum(b["minutes"] for b in res.by_band.values()) == pytest.approx(1440)
+
+
+def test_day_slices_partition_the_total():
+    """Days priced one at a time add up to the same span priced at once, with
+    polls that do not line up with midnight."""
+    rows = _poll_rows(every_min=7, status=lambda t: "cooling" if t.minute % 2 else "idle")
+    d0, d1 = DAY, DAY + timedelta(days=1)
+    s0, e0 = api._local_day_bounds(d0, TZ)
+    s1, e1 = api._local_day_bounds(d1, TZ)
+    whole = api.cost.compute(rows, CFG.tou, CFG.system_kw, CFG.timezone, start=s0, end=e1)
+    parts = [api.cost.compute(rows, CFG.tou, CFG.system_kw, CFG.timezone, start=a, end=b)
+             for a, b in ((s0, e0), (s1, e1))]
+    assert sum(p.total_dollars for p in parts) == pytest.approx(whole.total_dollars)
+    assert sum(p.total_kwh for p in parts) == pytest.approx(whole.total_kwh)
+
+
+def test_peak_minutes_use_the_midpoint_like_the_bill():
+    """An interval 16:58:30 -> 17:01:30 is billed as peak (midpoint 17:00). The
+    forecast's peak minutes classified it by its start and called it
+    mid-peak, and dropped the last peak interval of the window outright."""
+    rows = [{"ts": datetime(2026, 8, 10, 16, 58, 30, tzinfo=TZ).astimezone(timezone.utc),
+             "equipment_status": "cooling"},
+            {"ts": datetime(2026, 8, 10, 17, 1, 30, tzinfo=TZ).astimezone(timezone.utc),
+             "equipment_status": "idle"}]
+    peak = api.runtime.status_minutes(
+        rows, api.runtime.COOL_STATUSES,
+        include=lambda m: CFG.tou.is_peak(m.astimezone(TZ)))
+    assert peak == pytest.approx(3.0)
 
 
 # --- _extremes / _coverage: pure outdoor-history helpers, DB-free. ---
@@ -382,16 +491,16 @@ def test_cost_has_total(conn):
 
 
 def _seed_forecast_history(conn):
-    """Four COMPLETE past local days (hourly 0-23) with varying highs, plus a
-    single fresh reading today carrying the forecast high. build_forecast now
-    excludes today and partial days from the fit, so the seed must supply
-    full days."""
+    """Four COMPLETE past local days (a reading every 10 minutes, the longest
+    spacing the gap cap fully credits) with varying highs, plus a single fresh
+    reading today carrying the forecast high. build_forecast excludes today
+    and any day not observed end to end, so the seed must supply full days."""
     now_local = datetime.now(TZ)
     highs = [82, 88, 95, 91]
     for day_offset, high in enumerate(reversed(highs), start=1):
         day = (now_local - timedelta(days=day_offset)).date()
-        for h in range(24):
-            local = datetime(day.year, day.month, day.day, h, 30, tzinfo=TZ)
+        for h, minute in ((h, m) for h in range(24) for m in range(0, 60, 10)):
+            local = datetime(day.year, day.month, day.day, h, minute, tzinfo=TZ)
             db.insert_reading(conn, dict(
                 ts=local.astimezone(timezone.utc), device_id="dev1",
                 indoor_temp_f=74, indoor_humidity=45, heat_setpoint_f=68,
@@ -423,6 +532,47 @@ def test_forecast_available(conn):
     assert fc["days_of_history"] == 4
     # peak-window minutes are a subset of the day
     assert fc["predicted_peak_cool_minutes"] <= fc["predicted_cool_minutes"]
+
+
+def test_forecast_history_counts_minutes_like_the_bill(conn, monkeypatch):
+    """Each past day is polled every 10 minutes at :05, :15 ... and cools from
+    12:05 to 14:05 and from 16:55 to 19:05. The 16:55 -> 17:05 interval is
+    billed as peak (midpoint 17:00); classifying by its start called it
+    mid-peak, so the forecast learned 120 peak minutes a day, not 130."""
+    now_local = datetime.now(TZ)
+    today = now_local.date()
+    days = [today - timedelta(days=k) for k in range(1, 5)]
+    for day in sorted(days):
+        for h in range(24):
+            for m in range(5, 60, 10):
+                local = datetime(day.year, day.month, day.day, h, m, tzinfo=TZ)
+                hm = (h, m)
+                cooling = (12, 5) <= hm < (14, 5) or (16, 55) <= hm < (19, 5)
+                db.insert_reading(conn, dict(
+                    ts=local.astimezone(timezone.utc), device_id="dev1",
+                    indoor_temp_f=74, indoor_humidity=45, heat_setpoint_f=68,
+                    cool_setpoint_f=72, equipment_status="cooling" if cooling else "idle",
+                    mode="cool", daikin_outdoor_temp_f=90, daikin_outdoor_humidity=25,
+                    wx_outdoor_temp_f=90, wx_humidity=25, wx_dewpoint_f=52,
+                    wx_solar_wm2=700, wx_uv=6, wx_fc_high_f=95, wx_fc_low_f=60,
+                    wx_conditions="Clear", wx_aqi=32, wx_alert_count=0, weather_ok=True))
+    _insert_reading(conn, datetime.now(timezone.utc), "idle")
+    seen = {}
+
+    def fake_predict(fc_high, history, *a, **k):
+        seen["history"] = history
+        return {"predicted_cool_minutes": 0, "predicted_peak_cool_minutes": 0,
+                "predicted_peak_dollars": 0, "peak_band": "peak", "basis": "stub"}
+    monkeypatch.setattr(api.correlation, "predict_peak_cost", fake_predict)
+    api.build_forecast(conn, "dev1", CFG)
+    weekday_days = sum(1 for d in days if d.weekday() < 5)
+    hist = seen["history"]
+    assert len(hist) == 4
+    assert all(h["cool_minutes"] == pytest.approx(250) for h in hist)
+    # The example tariff's peak is weekday-only: 130 peak minutes on each
+    # weekday, none at the weekend.
+    assert sorted(h["peak_cool_minutes"] for h in hist) == pytest.approx(
+        sorted([130.0] * weekday_days + [0.0] * (4 - weekday_days)))
 
 
 def test_forecast_unavailable_when_empty(conn):
@@ -460,8 +610,31 @@ def test_humidity_available_with_ac_effect_and_window(conn):
     assert h["outdoor_dp"] == 40
     assert h["ac_effect"] is not None
     assert h["ac_effect"]["idle"] >= h["ac_effect"]["cooling"]
+    assert h["ac_effect"]["basis"] == "same_hour_of_day"
+    assert h["ac_effect"]["hours_matched"] >= humidity.AC_EFFECT_MIN_HOURS
     assert h["window"]["action"] in ("open", "keep_closed", "neutral")
     assert isinstance(h["trend"], list) and len(h["trend"]) > 0
+
+
+def test_humidity_ac_effect_needs_matching_hours(conn):
+    """Plenty of cooling readings in the afternoon and plenty of idle ones at
+    night, but never both in the same hour: nothing fair to compare, so no
+    'AC effect' is claimed."""
+    day = datetime.now(TZ).date() - timedelta(days=1)
+    for hour, status, rh in ((15, "cooling", 45), (3, "idle", 60)):
+        for m in range(0, 60, 6):
+            local = datetime(day.year, day.month, day.day, hour, m, tzinfo=TZ)
+            db.insert_reading(conn, dict(
+                ts=local.astimezone(timezone.utc), device_id="dev1",
+                indoor_temp_f=75, indoor_humidity=rh, heat_setpoint_f=68,
+                cool_setpoint_f=72, equipment_status=status, mode="cool",
+                daikin_outdoor_temp_f=65, daikin_outdoor_humidity=30,
+                wx_outdoor_temp_f=65, wx_humidity=30, wx_dewpoint_f=40,
+                wx_solar_wm2=400, wx_uv=4, wx_fc_high_f=80, wx_fc_low_f=55,
+                wx_conditions="Clear", wx_aqi=20, wx_alert_count=0, weather_ok=True))
+    h = api.build_humidity(conn, "dev1", CFG)
+    assert h["available"] is True
+    assert h["ac_effect"] is None
 
 
 def test_humidity_ac_effect_none_with_too_few_samples(conn):
@@ -600,20 +773,26 @@ def test_humidity_aqi_unhealthy_defaults_when_unset_in_config(conn):
 
 
 def _seed_local_day(conn, day, hours):
-    """Insert one cooling/idle reading per hour in `hours` (LOCAL, on 2026-08-<day>)."""
-    for i, h in enumerate(hours):
-        local = datetime(2026, 8, day, h, 0, tzinfo=TZ)
-        db.insert_reading(conn, dict(
-            ts=local.astimezone(timezone.utc), device_id="dev1",
-            indoor_temp_f=73, indoor_humidity=48, heat_setpoint_f=68,
-            cool_setpoint_f=72, equipment_status="cooling" if i % 2 else "idle",
-            mode="cool", daikin_outdoor_temp_f=88, daikin_outdoor_humidity=30,
-            wx_outdoor_temp_f=88, wx_humidity=30, wx_dewpoint_f=55, wx_solar_wm2=750,
-            wx_uv=6, wx_fc_high_f=90, wx_fc_low_f=60, wx_conditions="Clear",
-            wx_aqi=30, wx_alert_count=0, weather_ok=True))
+    """Insert a reading every 10 minutes through each hour in `hours` (LOCAL,
+    on 2026-08-<day>), alternating cooling/idle. Ten minutes is the longest
+    spacing the gap cap fully credits, so a run of whole hours is fully
+    observed; a missing hour is an hour nobody saw."""
+    i = 0
+    for h in hours:
+        for minute in range(0, 60, 10):
+            local = datetime(2026, 8, day, h, minute, tzinfo=TZ)
+            db.insert_reading(conn, dict(
+                ts=local.astimezone(timezone.utc), device_id="dev1",
+                indoor_temp_f=73, indoor_humidity=48, heat_setpoint_f=68,
+                cool_setpoint_f=72, equipment_status="cooling" if i % 2 else "idle",
+                mode="cool", daikin_outdoor_temp_f=88, daikin_outdoor_humidity=30,
+                wx_outdoor_temp_f=88, wx_humidity=30, wx_dewpoint_f=55, wx_solar_wm2=750,
+                wx_uv=6, wx_fc_high_f=90, wx_fc_low_f=60, wx_conditions="Clear",
+                wx_aqi=30, wx_alert_count=0, weather_ok=True))
+            i += 1
 
 
-FULL_DAY_HOURS = list(range(0, 24, 2))  # 0,2,...,22 -> covers 00-02 through 22-23
+FULL_DAY_HOURS = list(range(24))
 
 
 def test_cost_summary_monotonic_and_projected(conn):
@@ -642,6 +821,39 @@ def test_cost_summary_monotonic_and_projected(conn):
     assert summary["projected_month"] == round(summary["avg_per_day"] * days_in_month, 2)
     assert summary["tz"] == CFG.timezone
     assert "peak" in summary["by_band"] or "midpeak" in summary["by_band"] or "offpeak" in summary["by_band"]
+
+
+def test_cost_summary_average_excludes_a_day_whose_outage_hid_runtime(conn):
+    """A 2h10m hole in the afternoon passed the old rule (spans the day, no gap
+    over 3 hours) and entered avg_per_day priced as if nothing ran in it. The
+    average must be built from fully observed days only."""
+    now = datetime(2026, 8, 10, 15, 0, tzinfo=TZ).astimezone(timezone.utc)
+    _seed_local_day(conn, 6, [h for h in FULL_DAY_HOURS if h not in (16, 17)])
+    for d in (7, 8, 9):
+        _seed_local_day(conn, d, FULL_DAY_HOURS)
+    summary = api.build_cost_summary(conn, "dev1", CFG, now=now)
+    assert summary["complete_days"] == 3
+    rows = db.recent_readings(conn, "dev1", now - timedelta(days=40))
+    full = [api.cost.compute(rows, CFG.tou, CFG.system_kw, CFG.timezone,
+                             heat_kw=CFG.heat_kw,
+                             start=api._local_day_bounds(datetime(2026, 8, d).date(), TZ)[0],
+                             end=api._local_day_bounds(datetime(2026, 8, d).date(), TZ)[1]
+                             ).total_dollars for d in (7, 8, 9)]
+    assert summary["avg_per_day"] == round(sum(full) / 3, 2)
+
+
+def test_cost_summary_today_counts_the_interval_across_midnight(conn):
+    """The 23:55 -> 00:05 interval has its midpoint at midnight, so it is
+    today's. Slicing the rows by timestamp first dropped it: today showed 20
+    minutes of cooling instead of 30."""
+    now = datetime(2026, 8, 10, 0, 30, tzinfo=TZ).astimezone(timezone.utc)
+    for local in (datetime(2026, 8, 9, 23, 55, tzinfo=TZ),
+                  datetime(2026, 8, 10, 0, 5, tzinfo=TZ),
+                  datetime(2026, 8, 10, 0, 15, tzinfo=TZ),
+                  datetime(2026, 8, 10, 0, 25, tzinfo=TZ)):
+        _insert_reading(conn, local.astimezone(timezone.utc), "cooling")
+    summary = api.build_cost_summary(conn, "dev1", CFG, now=now)
+    assert summary["today"]["kwh"] == round(30 / 60 * CFG.system_kw, 2)
 
 
 def test_cost_summary_no_projection_with_only_partial_today(conn):
@@ -725,6 +937,27 @@ def test_cost_summary_has_band_and_next_fields(conn):
     # used to hardcode weekday 17:00-21:00, wrong for any other utility).
     # The example config's single peak band is weekday 17:00-21:00.
     assert s["peak_windows"] == [{"start": "17:00", "end": "21:00", "weekday_only": True}]
+
+
+def test_cost_summary_on_a_tou_holiday(conn):
+    """Labor Day 2026 at 18:00 with a holiday-aware tariff: the band now is
+    off-peak, the live accrual runs at the off-peak rate, and the date is
+    listed so the ribbon leaves it unshaded."""
+    from house_climate.config import TouTable
+    tou = TouTable(CFG.tou.summer_months, CFG.tou.bands,
+                   holiday_rules=("labor_day",), holiday_observed="none")
+    cfg = dataclasses.replace(CFG, tou=tou)
+    now_local = datetime(2026, 9, 7, 18, 0, tzinfo=TZ)
+    _insert_reading(conn, (now_local - timedelta(minutes=2)).astimezone(timezone.utc), "cooling")
+    s = api.build_cost_summary(conn, "dev1", cfg, now=now_local.astimezone(timezone.utc))
+    offpeak = min(b.rate for b in CFG.tou.bands)
+    assert s["tier_now"] == "off"
+    assert s["rate_now"] == offpeak
+    assert s["live_rate_per_hr"] == round(CFG.system_kw * offpeak, 4)
+    assert s["tou_holidays"] == ["2026-09-07"]
+    # Without the holiday config the same instant is peak, as before.
+    s0 = api.build_cost_summary(conn, "dev1", CFG, now=now_local.astimezone(timezone.utc))
+    assert s0["tier_now"] == "peak" and s0["tou_holidays"] == []
 
 
 def _insert_precool_reading(conn, ts_utc, status, fc_high):
@@ -970,22 +1203,38 @@ def test_health_hold_tight_and_skips_off_mode(conn):
 
 
 def test_health_hold_mixed_modes_and_tolerance(conn):
-    # 4 cool-mode readings 6.0F off cool_setpoint_f (outside the 1.0F
-    # tolerance) + 4 heat-mode readings 0.5F off heat_setpoint_f (inside
+    # 4 cool-mode readings 6.0F over cool_setpoint_f (outside the 1.0F
+    # tolerance) + 4 heat-mode readings 0.5F under heat_setpoint_f (inside
     # tolerance). If the active-setpoint-by-mode selection were wrong (e.g.
-    # always comparing against cool_setpoint_f), the heat-mode deviation
-    # would compute as |68.5 - 72| = 3.5 instead of |68.5 - 68| = 0.5, and
-    # every assertion below would fail.
+    # always comparing against cool_setpoint_f), the heat-mode readings would
+    # count as no miss at all instead of 0.5, and the average below would fail.
     base = datetime.now(timezone.utc) - timedelta(hours=2)
     for i in range(4):
         _health_reading(conn, base + timedelta(minutes=5 * i), mode="cool", cool=72, heat=68, indoor=78)
     for i in range(4):
-        _health_reading(conn, base + timedelta(minutes=100 + 5 * i), mode="heat", cool=72, heat=68, indoor=68.5)
+        _health_reading(conn, base + timedelta(minutes=100 + 5 * i), mode="heat", cool=72, heat=68, indoor=67.5)
 
     h = api.build_health(conn, "dev1", CFG)
     assert h["hold"]["pct_within_tol"] == 50.0
     assert h["hold"]["avg_abs_dev"] == 3.25
     assert h["hold"]["max_abs_dev"] == 6.0
+
+
+def test_health_hold_counts_only_the_miss_side_of_each_setpoint(conn):
+    """A 70F house under a 76F cool setpoint is the weather doing the AC's
+    job, not a 6-degree miss. In cool mode only overshoot above the cool
+    setpoint counts; in heat mode only a shortfall below the heat setpoint."""
+    base = datetime.now(timezone.utc) - timedelta(hours=2)
+    for i in range(4):   # cool mode, well under the cool setpoint: perfect
+        _health_reading(conn, base + timedelta(minutes=5 * i), mode="cool", cool=76, indoor=70)
+    for i in range(4):   # heat mode, warmer than the heat setpoint: perfect
+        _health_reading(conn, base + timedelta(minutes=30 + 5 * i), mode="heat", heat=66, indoor=71)
+    for i in range(2):   # cool mode, 2F OVER the cool setpoint: a real miss
+        _health_reading(conn, base + timedelta(minutes=60 + 5 * i), mode="cool", cool=74, indoor=76)
+    h = api.build_health(conn, "dev1", CFG)
+    assert h["hold"]["max_abs_dev"] == 2.0
+    assert h["hold"]["avg_abs_dev"] == 0.4          # 2 misses of 2F over 10 readings
+    assert h["hold"]["pct_within_tol"] == 80.0
 
 
 def test_health_short_cycling_unhealthy(conn):
@@ -1944,3 +2193,49 @@ def test_resolve_logs_when_it_silently_swaps_in_the_model(monkeypatch, caplog):
     with caplog.at_level("WARNING", logger="house_climate.api"):
         _resolved(monkeypatch, {"aqi": 85}, age_s=60)
     assert not caplog.records, "a healthy monitor read must not log a warning"
+
+
+# --- local calendar, not UTC (fix: evening windows shifted a day) -----------
+
+EVENING_UTC = datetime(2026, 9, 20, 2, 0, tzinfo=timezone.utc)   # 19:00 PDT on the 19th
+
+
+def test_local_today_is_the_configured_timezone_date():
+    assert EVENING_UTC.date().day == 20
+    assert api._local_today(EVENING_UTC, CFG) == datetime(2026, 9, 19).date()
+
+
+def test_gap_trend_windows_use_the_local_date(conn, monkeypatch):
+    """After 17:00 Pacific the UTC date is already tomorrow. Handing that to
+    _gap_trend moved both seven-day windows a day forward, so 'this week'
+    silently lost a day of real data every evening."""
+    _seed_moisture(conn, EVENING_UTC, days=1)
+    seen = []
+    monkeypatch.setattr(api, "_gap_trend", lambda gap_daily, today: seen.append(today))
+    api._ah_gap_summary(conn, "dev1", CRAWL_CFG, EVENING_UTC)
+    api._build_ah_section(conn, "dev1", CRAWL_CFG, EVENING_UTC, allow_fit=False)
+    assert seen and set(seen) == {datetime(2026, 9, 19).date()}
+
+
+def test_coupling_window_length_counts_local_days(conn, monkeypatch):
+    """The fit window is sized from the first LOCAL day of data to LOCAL
+    today; using the UTC date added a phantom day every evening."""
+    _seed_moisture(conn, EVENING_UTC, days=1)
+    first_local = min(d["day"] for d in db.sensor_daily_stats(
+        conn, "ecowitt_outdoor", CRAWL_CFG.timezone))
+    got = {}
+
+    def fake_window(*a, **k):
+        got["days"], got["tz"] = k["days"], k.get("tz")
+        return {"ready": False, "reason": "stub"}
+    monkeypatch.setattr(api.coupling, "coupling_window", fake_window)
+    monkeypatch.setattr(api.coupling, "stack_signature",
+                        lambda *a, **k: {"ready": False, "reason": "stub"})
+    later = EVENING_UTC + timedelta(days=30)      # 30 days on, still the evening
+    api._build_fits(conn, "dev1", CRAWL_CFG, later, "ecowitt_outdoor",
+                    [("ecowitt_ch7", "Downstairs")])
+    # Data starts 18 Sept local (19:00 PDT); `later` is 19 Oct local but
+    # already 20 Oct in UTC.
+    assert first_local == datetime(2026, 9, 18).date()
+    assert got["days"] == 31                       # the UTC date made it 32
+    assert got["tz"] == CRAWL_CFG.timezone
