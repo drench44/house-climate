@@ -23,6 +23,96 @@ rolls that section to a dated version via `python scripts/release.py`.
   `alerts.crawl_offline_minutes` (default 45).
 - The humidity, outdoor and moisture payloads now say how old their "now"
   values are (`age_s`, `obs_age_s`, `crawl_age_s` and friends).
+- Absolute humidity (g/m³) as a first-class moisture measure:
+  `absolute_humidity_gm3` plus a dew-point variant, and a matching SQL fragment
+  so daily and hourly rollups convert per reading (AH is nonlinear in
+  temperature — averaging temperature first would be wrong). The SQL
+  interpolates the Magnus constants from `analytics/humidity` rather than
+  repeating them, so the two paths cannot drift apart.
+- Crawl-to-floor absolute humidity gap analytics: hourly and daily gap series
+  against every configured non-crawl channel, and a before/after comparison
+  across each intervention marker with the existing Welch-t and
+  seasonal-confound guards. The gap is reported without a directional verdict
+  — narrowing and widening are both consistent with a successful intervention,
+  depending on which mechanism the work targeted.
+- Transport gain (`analytics/coupling.py`): measures how much of the crawl's
+  own dampness reaches each floor above, controlling for outdoor air and time
+  of day, with Newey-West intervals and an effective-sample-size correction so
+  a month of correlated hourly readings is not counted as 720 independent
+  ones. Six readiness gates, each refusing with a named reason.
+- Stack-effect check: tests whether the crawl-to-floor link strengthens with
+  the indoor-to-outdoor temperature difference. This is the guard against a
+  vented crawl acting as a better local weather station than the outdoor feed,
+  which would otherwise produce coupling with no air movement at all.
+- Transport prediction test: predicts each floor's moisture change after an
+  intervention from the measured transport gain, then checks it against what
+  actually happened — the direction-unambiguous proof that crawl air is
+  reaching the living space.
+- Cross-floor consistency check: flags an upper floor that follows the crawl
+  more closely than the floor below it, which points at leaky ducts or an open
+  chase rather than air working up through the floor assembly.
+- Moisture page: a crawl-to-floor gap panel (tiles, 60-day multi-line chart,
+  intervention before/after) and a transport panel carrying the gain, the
+  stack check, the prediction test and a methodology note.
+- Dashboard: a gap strip under the crawl panel — current gap and direction per
+  floor, plus the transport verdict when it is already cached. It reads from
+  `/api/crawl`, which the dashboard already polls, and never triggers a fit.
+- `db.indoor_hourly()` for the hourly indoor-to-outdoor temperature difference
+  and air-handler duty that the stack-effect check needs.
+
+### Changed
+- `poll_interval_s` must now be between 1 and 600 seconds; the config
+  fails to load otherwise. Readings more than 10 minutes apart already count
+  as unobserved time everywhere, so a slower poller would leave every day
+  "incomplete" and the cost average and forecast would never appear.
+- The outdoor AQI now says on screen whether it is a real monitor reading or
+  the weather feed's estimate. `resolve_outdoor_aqi` silently falls back to the
+  feed's modeled `wx_aqi` after 30 quiet minutes, and the two disagree in the
+  direction that matters, so the number was presented identically either way.
+  The wall chip, the compact kiosk chip, the smoke banner, the windows verdict
+  and the unhealthy-air push all mark a modeled value now; a monitor reading
+  stays unqualified. The smoke banner is MARKED, never suppressed: during a
+  monitor outage the model is the only evidence of smoke there is. Both AQI
+  chips moved into `common.js` so they are executable-tested rather than
+  grep-tested.
+- The air-quality push's cooldown keys on the provenance as well as the alert
+  key, so a corrected, caveated message is no longer swallowed as a duplicate
+  of the unqualified one already on the phone.
+- `resolve_outdoor_aqi` logs at WARNING when it rejects a monitor row (stale,
+  malformed, or stamped in the future) instead of swapping in the model in
+  total silence, and a future-stamped row is no longer trusted as fresh
+  forever.
+- `scripts/release.py` stamps the `?v=` cache-busts on every static page, not
+  only `index.html`. `square.html` and `moisture.html` were pinned at a
+  hand-written `?v=2` that no release ever moved, so a change to the shared
+  `common.js` reached the dashboard and never reached the wall kiosk.
+- A coverage refusal in the transport measurement now names which readings were
+  thin — crawl, indoor or outdoor. Coverage is counted across all three series
+  together, so one patchy sensor refuses every floor, and "thin coverage" alone
+  left the reader guessing which sensor to go and look at.
+- Before/after comparisons now discount consecutive days for autocorrelation
+  before forming their confidence interval. Counting a smooth run of damp days
+  as that many independent observations made the interval too narrow and let
+  ordinary weather read as a real change. Existing crawl intervention verdicts
+  become slightly more conservative as a result.
+- The crawl-to-floor gap comparison additionally requires 14 days on each side
+  (up from 10) and drops the first week after an intervention, where an open
+  hatch and disturbed soil produce a transient that is not the result of the
+  work.
+- Autocorrelation is now measured on the clock rather than on row position, in
+  both the hourly and the daily paths. Rows either side of an outage are not
+  neighbours, and pairing them made the data look choppier than it is —
+  inflating the effective sample size and narrowing every interval built on it.
+- An intervention comparison that could not be checked against outdoor air now
+  reports `unchecked` instead of `real`. A seasonal swing cannot be ruled out
+  without that check, and the two were previously displayed identically.
+- Two flat runs at different values now report `collecting` rather than a
+  `real` change with a zero-width interval — that pattern is a stuck sensor,
+  not a perfectly clean result.
+- Per-day absolute-humidity means now carry a reading count, and days below the
+  threshold are dropped. SQL averages skip missing readings silently, so a day
+  with two dew-point readings previously weighed as much as a fully observed
+  one.
 
 ### Fixed
 - A monitor AQI reading stamped a few milliseconds "in the future" (the DB
@@ -85,39 +175,6 @@ rolls that section to a dated version via `python scripts/release.py`.
   weekend, and any extra one-off dates. Holidays use the weekend bands for
   cost, the peak strip, alerts, the pre-cool analysis and the chart's peak
   shading. Off by default, and a typo in the list fails loud at startup.
-
-### Changed
-- `poll_interval_s` must now be between 1 and 600 seconds; the config
-  fails to load otherwise. Readings more than 10 minutes apart already count
-  as unobserved time everywhere, so a slower poller would leave every day
-  "incomplete" and the cost average and forecast would never appear.
-- The outdoor AQI now says on screen whether it is a real monitor reading or
-  the weather feed's estimate. `resolve_outdoor_aqi` silently falls back to the
-  feed's modeled `wx_aqi` after 30 quiet minutes, and the two disagree in the
-  direction that matters, so the number was presented identically either way.
-  The wall chip, the compact kiosk chip, the smoke banner, the windows verdict
-  and the unhealthy-air push all mark a modeled value now; a monitor reading
-  stays unqualified. The smoke banner is MARKED, never suppressed: during a
-  monitor outage the model is the only evidence of smoke there is. Both AQI
-  chips moved into `common.js` so they are executable-tested rather than
-  grep-tested.
-- The air-quality push's cooldown keys on the provenance as well as the alert
-  key, so a corrected, caveated message is no longer swallowed as a duplicate
-  of the unqualified one already on the phone.
-- `resolve_outdoor_aqi` logs at WARNING when it rejects a monitor row (stale,
-  malformed, or stamped in the future) instead of swapping in the model in
-  total silence, and a future-stamped row is no longer trusted as fresh
-  forever.
-- `scripts/release.py` stamps the `?v=` cache-busts on every static page, not
-  only `index.html`. `square.html` and `moisture.html` were pinned at a
-  hand-written `?v=2` that no release ever moved, so a change to the shared
-  `common.js` reached the dashboard and never reached the wall kiosk.
-- A coverage refusal in the transport measurement now names which readings were
-  thin — crawl, indoor or outdoor. Coverage is counted across all three series
-  together, so one patchy sensor refuses every floor, and "thin coverage" alone
-  left the reader guessing which sensor to go and look at.
-
-### Fixed
 - Before/after moisture verdicts no longer call about one in four no-change
   comparisons "real". Small samples got the wrong critical value (2.26 for
   every sample size under 9, when 1 or 2 independent days need 12.71 or
@@ -247,71 +304,6 @@ rolls that section to a dated version via `python scripts/release.py`.
   take part in the floor-to-floor check and in what order, but only sensor ids
   were in the cache key, so a rename served a verdict computed over a different
   set of floors until the entry expired.
-
-### Added
-- Absolute humidity (g/m³) as a first-class moisture measure:
-  `absolute_humidity_gm3` plus a dew-point variant, and a matching SQL fragment
-  so daily and hourly rollups convert per reading (AH is nonlinear in
-  temperature — averaging temperature first would be wrong). The SQL
-  interpolates the Magnus constants from `analytics/humidity` rather than
-  repeating them, so the two paths cannot drift apart.
-- Crawl-to-floor absolute humidity gap analytics: hourly and daily gap series
-  against every configured non-crawl channel, and a before/after comparison
-  across each intervention marker with the existing Welch-t and
-  seasonal-confound guards. The gap is reported without a directional verdict
-  — narrowing and widening are both consistent with a successful intervention,
-  depending on which mechanism the work targeted.
-- Transport gain (`analytics/coupling.py`): measures how much of the crawl's
-  own dampness reaches each floor above, controlling for outdoor air and time
-  of day, with Newey-West intervals and an effective-sample-size correction so
-  a month of correlated hourly readings is not counted as 720 independent
-  ones. Six readiness gates, each refusing with a named reason.
-- Stack-effect check: tests whether the crawl-to-floor link strengthens with
-  the indoor-to-outdoor temperature difference. This is the guard against a
-  vented crawl acting as a better local weather station than the outdoor feed,
-  which would otherwise produce coupling with no air movement at all.
-- Transport prediction test: predicts each floor's moisture change after an
-  intervention from the measured transport gain, then checks it against what
-  actually happened — the direction-unambiguous proof that crawl air is
-  reaching the living space.
-- Cross-floor consistency check: flags an upper floor that follows the crawl
-  more closely than the floor below it, which points at leaky ducts or an open
-  chase rather than air working up through the floor assembly.
-- Moisture page: a crawl-to-floor gap panel (tiles, 60-day multi-line chart,
-  intervention before/after) and a transport panel carrying the gain, the
-  stack check, the prediction test and a methodology note.
-- Dashboard: a gap strip under the crawl panel — current gap and direction per
-  floor, plus the transport verdict when it is already cached. It reads from
-  `/api/crawl`, which the dashboard already polls, and never triggers a fit.
-- `db.indoor_hourly()` for the hourly indoor-to-outdoor temperature difference
-  and air-handler duty that the stack-effect check needs.
-
-### Changed
-- Before/after comparisons now discount consecutive days for autocorrelation
-  before forming their confidence interval. Counting a smooth run of damp days
-  as that many independent observations made the interval too narrow and let
-  ordinary weather read as a real change. Existing crawl intervention verdicts
-  become slightly more conservative as a result.
-- The crawl-to-floor gap comparison additionally requires 14 days on each side
-  (up from 10) and drops the first week after an intervention, where an open
-  hatch and disturbed soil produce a transient that is not the result of the
-  work.
-- Autocorrelation is now measured on the clock rather than on row position, in
-  both the hourly and the daily paths. Rows either side of an outage are not
-  neighbours, and pairing them made the data look choppier than it is —
-  inflating the effective sample size and narrowing every interval built on it.
-- An intervention comparison that could not be checked against outdoor air now
-  reports `unchecked` instead of `real`. A seasonal swing cannot be ruled out
-  without that check, and the two were previously displayed identically.
-- Two flat runs at different values now report `collecting` rather than a
-  `real` change with a zero-width interval — that pattern is a stuck sensor,
-  not a perfectly clean result.
-- Per-day absolute-humidity means now carry a reading count, and days below the
-  threshold are dropped. SQL averages skip missing readings silently, so a day
-  with two dew-point readings previously weighed as much as a fully observed
-  one.
-
-### Fixed
 - Critical values for the transport-gain interval were wrong below 20 degrees
   of freedom and badly wrong below 10 — a range that is routinely reached,
   since 24 degrees of freedom are spent absorbing the daily rhythm. The table
@@ -376,7 +368,6 @@ rolls that section to a dated version via `python scripts/release.py`.
 - `changelog-guard` no longer fails a release PR: a diff that bumps `VERSION`
   (a `scripts/release.py` release, which rolls `[Unreleased]` rather than adding
   a bullet) is now exempt. Releases can PR on their own.
-
 
 ## [1.1.0] — 2026-08-17
 
