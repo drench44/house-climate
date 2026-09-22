@@ -11,6 +11,8 @@ rolls that section to a dated version via `python scripts/release.py`.
 ## [Unreleased]
 
 ### Added
+- `house-climate-backup.sh` refuses an unknown argument. A mistyped mode used
+  to run a full nightly backup, exit 0 and look like the mode had worked.
 - Backups keep the first dump of every month for two years
   (`HC_KEEP_MONTHLY`), on top of the 14 dailies. Damage nobody notices for
   two weeks used to be in every backup by the time anyone looked.
