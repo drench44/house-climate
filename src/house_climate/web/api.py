@@ -1759,23 +1759,31 @@ def filter_status(conn, device_id, cfg, rows_all=None, now=None) -> dict:
     running_minutes = rt_filter.minutes["cool"] + rt_filter.minutes["heat"] + rt_filter.minutes["fan"]
     runtime_hours = running_minutes / 60.0
 
-    fractions = []
+    fractions = []           # (fraction used, why it would be due)
     threshold = cfg.filter_reminder_hours
     if threshold:
-        fractions.append(runtime_hours / threshold)
-    months = getattr(cfg, "filter_reminder_months", None)
+        fractions.append((runtime_hours / threshold, f"{threshold:g} blower hours"))
+    months = cfg.filter_reminder_months
     due_on = None
-    if months and changed_at is not None:
-        zone = ZoneInfo(cfg.timezone)
-        start = changed_at.astimezone(zone).date()
+    zone = ZoneInfo(cfg.timezone)
+    # The months clock starts at the last logged change; with none logged it
+    # starts at the first reading, as the hours clock does, and says so
+    # (start_estimated), rather than never reminding at all.
+    start_ts = changed_at or (filter_rows[0]["ts"] if filter_rows else None)
+    if months and start_ts is not None:
+        start = start_ts.astimezone(zone).date()
         due_on = _add_months(start, months)
         elapsed = (now.astimezone(zone).date() - start).days
-        fractions.append(elapsed / max((due_on - start).days, 1))
-    # No usable limit (a months-only rule with no logged change yet) is
-    # unknown, never "0% used".
+        fractions.append((elapsed / max((due_on - start).days, 1),
+                          f"{months} months since the last change"))
     known = bool(fractions)
-    due = known and max(fractions) >= 1.0
-    pct = round(min(max(fractions), 1.0) * 100, 0) if known else None
+    worst = max(fractions, key=lambda f: f[0]) if known else None
+    due = known and worst[0] >= 1.0
+    # Floor, and never 100 until actually due: a rounded 99.6% used to read
+    # "100%" the day before the reminder fired.
+    pct = None
+    if known:
+        pct = float(min(int(worst[0] * 100), 100 if due else 99))
     days_since = (now - changed_at).days if changed_at is not None else None
     return {
         "runtime_hours": round(runtime_hours, 1),
@@ -1783,15 +1791,17 @@ def filter_status(conn, device_id, cfg, rows_all=None, now=None) -> dict:
         "months": months,
         "due_on": due_on.isoformat() if due_on is not None else None,
         "due": due,
+        "due_reason": worst[1] if due else None,
         "pct": pct,
+        "start_estimated": changed_at is None,
         "changed_at": changed_at.isoformat() if changed_at is not None else None,
         "days_since": days_since,
     }
 
 
 def build_health(conn, device_id, cfg, now=None) -> dict:
-    """System Health panel: setpoint hold tightness, short-cycling, and a
-    cumulative HVAC-runtime filter reminder.
+    """System Health panel: setpoint hold tightness, short-cycling, and the
+    filter reminder (blower hours and/or calendar months, see filter_status).
 
     One query loads ~400 days of history; the 14-day hold/short-cycling
     window is sliced from that in memory rather than issued as a second
@@ -1858,13 +1868,12 @@ def build_health(conn, device_id, cfg, now=None) -> dict:
     short_cycles_induced = rt_14d.short_cycles_setpoint_induced
     short_cycles_healthy = short_cycles == 0
 
-    # --- Filter reminder: cumulative RUNNING minutes (cool + heat + fan
-    # buckets, which already fold cooling/overcool together) since the filter
-    # was last changed. The clock starts at the most recent filter_events row;
-    # with no logged change it falls back to all loaded history ("hours since
-    # we started recording"). Note the runtime clock can only count runtime we
-    # actually tracked, so a change logged before recording began shows a real
-    # calendar age but a low hours figure until new runtime accrues.
+    # --- Filter reminder: blower hours (cool + heat + fan) and/or calendar
+    # months since the filter was last changed. Both clocks start at the most
+    # recent filter_events row; with no logged change they fall back to the
+    # first loaded reading (start_estimated). The hours clock can only count
+    # runtime we actually tracked, so a change logged before recording began
+    # shows a real calendar age but a low hours figure until runtime accrues.
     filter_info = filter_status(conn, device_id, cfg, rows_all=rows_all, now=now)
 
     return {

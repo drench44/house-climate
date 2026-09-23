@@ -1220,7 +1220,8 @@ function renderHealthCard(h) {
     <div class="lead"><span class="v num ${pctKnown ? filterClass(pct) : ''}">${pctKnown ? Math.round(pct) : '—'}</span><span class="u">% filter life used</span></div>
     <div class="minibar"><i class="mb-filter ${barCls}" style="width:${pct}%"></i></div>
     <div class="row"><span>Filter changed</span><b>${fmtDaysAgo(filt.days_since)}</b></div>
-    ${filt.due_on ? `<div class="row"><span>Change by</span><b>${fmtDueOn(filt.due_on)}</b></div>` : ''}
+    ${filt.due_on ? `<div class="row"><span>Change by</span><b>${fmtDueOn(filt.due_on)}${filt.start_estimated ? ' (est.)' : ''}</b></div>` : ''}
+    ${filt.start_estimated ? `<div class="row"><span>No change logged yet: press Changed Filters to start the clock</span></div>` : ''}
     <div class="row"><span>Holding setpoint ±${tol}${DEG}</span><b class="${holdClass(holdPct)}"${holdPct != null && holdPct < 70 ? ' title="Pre-cool swings pull this down on purpose; low is expected while pre-cooling."' : ''}>${holdPct != null ? Math.round(holdPct) + '%' : '—'}</b></div>
     <button type="button" class="ghost-btn${due ? ' due' : ''}" data-action="filter-changed">Changed Filters</button>
   `;
@@ -1386,8 +1387,8 @@ function renderBackup(status) {
 }
 
 /* "Changed Filters" — delegated (the button is re-rendered every refresh).
-   A native are-you-sure prompt guards the click: logging a change resets the
-   filter runtime clock, which is not undoable from the UI. */
+   A native are-you-sure prompt guards the click: logging a change restarts
+   the filter clock, which is not undoable from the UI. */
 async function markFilterChanged(btn) {
   if (!window.confirm('Log a filter change now? This restarts the filter clock from today.')) {
     return;
