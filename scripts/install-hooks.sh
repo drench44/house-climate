@@ -24,9 +24,12 @@ if [ -n "$global_hooks" ] && [ -x "$global_hooks/pre-push" ] \
   # leaves .githooks still running (directly), never neither.
   git config --local ci-policy.chainHooksPath .githooks
   git config --local --unset-all core.hooksPath 2>/dev/null || true
-  # A local core.hooksPath that survived (any value) wins over the global
-  # hooks, so the chain would never run: refuse rather than report success.
-  if [ -n "$(git config --local --get-all core.hooksPath 2>/dev/null || true)" ]; then
+  # The hooks path git will actually use (every scope, includes followed) must
+  # be the global one, or the chain never runs: a local value that survived
+  # (a second copy, or one pulled in by an include file) wins over it. Refuse
+  # rather than report success.
+  if [ "$(git config --includes --get core.hooksPath 2>/dev/null || true)" \
+      != "$(git config --global --includes --get core.hooksPath 2>/dev/null || true)" ]; then
     echo "error: could not clear this clone's local core.hooksPath; the repo hooks would not run. Fix .git/config and rerun." >&2
     exit 1
   fi

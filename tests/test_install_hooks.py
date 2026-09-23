@@ -42,6 +42,9 @@ def repo(tmp_path):
         subprocess.run(["git", "config", "--global", "core.hooksPath", str(hooks)],
                        env=env, check=True)
 
+    run.home = home
+    run.env = env
+    run.work = work
     return git, run, global_hooks
 
 
@@ -105,4 +108,76 @@ def test_a_multi_valued_local_hooks_path_becomes_githooks_in_plain_mode(repo):
     git("config", "--local", "--add", "core.hooksPath", "other-hooks")
     run()
     assert git("config", "--local", "--get-all", "core.hooksPath").stdout.strip() == ".githooks"
+
+
+def test_a_hooks_path_that_survives_the_unset_is_refused_not_reported_as_installed(repo):
+    git, run, global_hooks = repo
+    # an include file the script cannot unset from (--local only edits .git/config)
+    inc = run.work / "extra.gitconfig"
+    inc.write_text("[core]\n\thooksPath = somewhere-else\n")
+    git("config", "--local", "include.path", str(inc))
+    global_hooks()
+    p = subprocess.run(["bash", "scripts/install-hooks.sh"], cwd=run.work, env=run.env,
+                       capture_output=True, text=True)
+    assert p.returncode == 1
+    assert "could not clear" in p.stderr
+    assert "installed:" not in p.stdout
+
+
+def test_operator_mode_is_set_only_with_the_private_scanner(repo):
+    git, run, _ = repo
+    run()
+    assert local(git, "guard.operator") == ""
+    scanner = run.home / "Documents" / "garage" / "privacy" / "scan-repo.sh"
+    scanner.parent.mkdir(parents=True)
+    scanner.write_text("#!/bin/sh\nexit 0\n")
+    scanner.chmod(0o755)
+    out = run().stdout
+    assert local(git, "guard.operator") == "true"
+    assert "operator mode" in out
+
+
+def test_a_tilde_global_hooks_path_is_found(repo):
+    git, run, global_hooks = repo
+    global_hooks()
+    subprocess.run(["git", "config", "--global", "core.hooksPath", "~/global-hooks"],
+                   env=run.env, check=True)
+    run()
+    assert local(git, "ci-policy.chainHooksPath") == ".githooks"
+    assert local(git, "core.hooksPath") == ""
+
+
+def test_a_rerun_after_the_global_hooks_are_removed_goes_back_to_plain(repo):
+    git, run, global_hooks = repo
+    global_hooks()
+    run()
+    assert local(git, "ci-policy.chainHooksPath") == ".githooks"
+    subprocess.run(["git", "config", "--global", "--unset", "core.hooksPath"],
+                   env=run.env, check=True)
+    run()
+    assert local(git, "core.hooksPath") == ".githooks"
+    assert local(git, "ci-policy.chainHooksPath") == ""
+
+
+def test_a_crash_while_clearing_still_leaves_the_chain_written(repo):
+    """Fault injection: a git that dies on the unset. The chain must already be
+    written, so .githooks still runs (never a state with neither key)."""
+    git, run, global_hooks = repo
+    git("config", "--local", "core.hooksPath", ".githooks")
+    global_hooks()
+    real_git = shutil.which("git")
+    fake = run.home / "fakebin"
+    fake.mkdir()
+    (fake / "git").write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"$*\" in *'--unset-all core.hooksPath'*) kill -9 $PPID; exit 137;; esac\n"
+        f"exec {real_git} \"$@\"\n")
+    (fake / "git").chmod(0o755)
+    env = dict(run.env, PATH=f"{fake}:{run.env['PATH']}")
+    p = subprocess.run(["bash", "scripts/install-hooks.sh"], cwd=run.work, env=env,
+                       capture_output=True, text=True)
+    assert p.returncode != 0
+    assert local(git, "ci-policy.chainHooksPath") == ".githooks"
+    # the old local value is still there too, so .githooks still runs directly
+    assert local(git, "core.hooksPath") == ".githooks"
 
