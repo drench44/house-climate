@@ -43,6 +43,13 @@ function holdClass(v) {
   if (v >= 50) return 'v-watch';
   return 'v-out';
 }
+/* "2026-12-26" -> "Dec 26" (a local calendar date, so no timezone shift). */
+function fmtDueOn(iso) {
+  const [y, m, d] = String(iso).split('-').map(Number);
+  if (!y || !m || !d) return '—';
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
 function filterClass(pct) {
   if (pct == null) return '';
   if (pct < 80) return 'v-ok';
@@ -1200,6 +1207,7 @@ function renderHealthCard(h) {
     return;
   }
   const filt = h.filter || {};
+  const pctKnown = filt.pct != null;
   const pct = clamp(filt.pct ?? 0, 0, 100);
   const due = !!filt.due;
   el.classList.toggle('due', due);
@@ -1209,9 +1217,10 @@ function renderHealthCard(h) {
 
   el.innerHTML = `
     <span class="micro">Health</span>
-    <div class="lead"><span class="v num ${filterClass(pct)}">${Math.round(pct)}</span><span class="u">% filter life used</span></div>
+    <div class="lead"><span class="v num ${pctKnown ? filterClass(pct) : ''}">${pctKnown ? Math.round(pct) : '—'}</span><span class="u">% filter life used</span></div>
     <div class="minibar"><i class="mb-filter ${barCls}" style="width:${pct}%"></i></div>
     <div class="row"><span>Filter changed</span><b>${fmtDaysAgo(filt.days_since)}</b></div>
+    ${filt.due_on ? `<div class="row"><span>Change by</span><b>${fmtDueOn(filt.due_on)}</b></div>` : ''}
     <div class="row"><span>Holding setpoint ±${tol}${DEG}</span><b class="${holdClass(holdPct)}"${holdPct != null && holdPct < 70 ? ' title="Pre-cool swings pull this down on purpose; low is expected while pre-cooling."' : ''}>${holdPct != null ? Math.round(holdPct) + '%' : '—'}</b></div>
     <button type="button" class="ghost-btn${due ? ' due' : ''}" data-action="filter-changed">Changed Filters</button>
   `;
@@ -1380,7 +1389,7 @@ function renderBackup(status) {
    A native are-you-sure prompt guards the click: logging a change resets the
    filter runtime clock, which is not undoable from the UI. */
 async function markFilterChanged(btn) {
-  if (!window.confirm('Log a filter change now? This resets the filter runtime clock to zero.')) {
+  if (!window.confirm('Log a filter change now? This restarts the filter clock from today.')) {
     return;
   }
   btn.disabled = true;
