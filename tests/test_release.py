@@ -6,6 +6,7 @@ and stamping every `?v=` in index.html to the new version so the cache-busts
 can never drift.
 """
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -281,3 +282,20 @@ def test_main_reports_honestly_when_the_restore_also_fails(tmp_path, monkeypatch
     err = capsys.readouterr().err.lower()
     assert "restore also failed" in err
     assert "nothing committed" not in err
+
+
+def test_release_commit_matches_the_ci_policy_main_allowlist(tmp_path, monkeypatch):
+    """The release commit is the one commit that reaches main without a PR.
+    drench44/ci-policy's main-watch lets it through only because its allowlist
+    (policy/main-allowlist.json, read at the SHA .github/workflows/main-watch.yml
+    pins) accepts exactly this subject and file set. A release that writes any
+    other file, or another subject, opens a main-watch issue on every release.
+    If this test has to change, change that allowlist rule (a ci-policy PR) and
+    bump the pinned SHA here in the same breath."""
+    repo = _release_repo(tmp_path, monkeypatch)
+    assert release.main(["minor"]) == 0
+    subject = _git(repo, "log", "-1", "--format=%s").strip()
+    assert re.fullmatch(r"release: v\d+\.\d+\.\d+", subject), subject
+    files = _git(repo, "show", "--name-only", "--format=", "HEAD").split()
+    allowed = re.compile(r"(VERSION|CHANGELOG\.md|src/house_climate/web/static/[^/]+\.html)")
+    assert files and all(allowed.fullmatch(f) for f in files), files
