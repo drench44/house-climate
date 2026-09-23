@@ -7,21 +7,27 @@ name: main-watch
 on:
   push:
     branches: [main]
+  # Hourly re-check of commits whose PR checks were still running at merge.
+  schedule:
+    - cron: 41 * * * *
+  workflow_dispatch:
 permissions:
   contents: read
   pull-requests: read
   checks: read
-  statuses: read
+  actions: read
+  statuses: write
   issues: write
 jobs:
   watch:
     # Pinned to a commit, not @main, so a change to ci-policy (including its
-    # allowlist) reaches this repo only through a PR here. b03c60d is
-    # ci-policy main as of 2026-09-23 ("Shared PR policy, main watch, git hooks
-    # and homelab deploy (#1)"). ci-policy-ref must name the same commit: it
-    # picks the watch code and the allowlist the job checks out.
-    uses: drench44/ci-policy/.github/workflows/main-watch.yml@b03c60de2110f69391159ed73d773adc8bfe6d6e # main @ b03c60d
+    # allowlist) reaches this repo only through a PR here. 2c990d5 is
+    # ci-policy PR #2 (every check green, waits for checks still running at
+    # merge, stacked PRs, ci-policy/main-watch commit status for the
+    # out-of-band audit). ci-policy-ref must name the same commit: it picks
+    # the watch code and the allowlist the job checks out.
+    uses: drench44/ci-policy/.github/workflows/main-watch.yml@2c990d56f10ceb29fda3a0da1010fb96f53e0cb8 # main @ 2c990d5
     with:
-      ci-policy-ref: b03c60de2110f69391159ed73d773adc8bfe6d6e
+      ci-policy-ref: 2c990d56f10ceb29fda3a0da1010fb96f53e0cb8
       # Public repo: GitHub-hosted runner (free for public repos).
       runs-on: '"ubuntu-latest"'
