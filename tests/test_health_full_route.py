@@ -30,6 +30,7 @@ from house_climate.web import app as appmod  # noqa: E402
 
 client = TestClient(appmod.app)
 COMMIT = "c0ffee" + "0" * 34
+BUILT = "2026-09-23T12:00:00Z"
 
 
 def _now():
@@ -51,13 +52,13 @@ def house(conn, monkeypatch):
     on, the alert loop just ran."""
     monkeypatch.setattr(appmod, "BUILD_INFO", {
         "engine_commit": COMMIT, "overlay_commit": None,
-        "config_sha256": appmod.CONFIG_SHA256, "built_at": None})
+        "config_sha256": appmod.CONFIG_SHA256, "built_at": BUILT})
     monkeypatch.setattr(appmod, "cfg", dataclasses.replace(appmod.cfg, ecowitt={
         "enabled": True, "channels": {"1": "Upstairs"}, "outdoor_name": "Crawl"}))
     monkeypatch.setitem(alertsmod.LOOP_STATE, "last_run", _now())
     started = _now() - timedelta(minutes=10)
     db.kv_set(conn, "poller_heartbeat", {"ts": _now().isoformat(), "commit": COMMIT,
-                                         "started_at": started.isoformat()})
+                                         "built_at": BUILT, "started_at": started.isoformat()})
     _reading(conn, _now() - timedelta(minutes=2))
     db.insert_sensor_reading(conn, "ecowitt_ch1", _now() - timedelta(minutes=1), temp_f=70.0)
     return conn, started
@@ -98,7 +99,7 @@ def test_the_old_poller_still_ticking_fails(house):
 def test_readings_from_before_the_poller_started_do_not_count(house):
     conn, _ = house
     db.kv_set(conn, "poller_heartbeat", {"ts": _now().isoformat(), "commit": COMMIT,
-                                         "started_at": _now().isoformat()})
+                                         "built_at": BUILT, "started_at": _now().isoformat()})
     r = _full()
     assert r["sources"]["thermostat"]["status"] == "waiting"
     assert r["sources"]["rooms"]["status"] == "waiting"
@@ -150,3 +151,27 @@ def test_the_database_down_is_named(house, monkeypatch):
     r = _full()
     assert r["db"] == {"ok": False, "error": "RuntimeError: db down"}
     assert r["poller"]["status"] == "waiting" and r["status"] == "degraded"
+
+
+def test_a_dead_room_sensor_among_live_ones_fails(house):
+    conn, _ = house
+    db.insert_sensor_reading(conn, "ecowitt_outdoor", _now() - timedelta(hours=3), temp_f=60.0)
+    r = _full()
+    assert r["sources"]["rooms"]["status"] == "degraded"
+    assert r["sources"]["rooms"]["stale_items"] == ["ecowitt_outdoor"]
+
+
+def test_a_daikin_outage_since_the_poller_started_is_named(house):
+    conn, _ = house
+    db.kv_set(conn, "poller_heartbeat", {"ts": _now().isoformat(), "commit": COMMIT,
+                                         "built_at": BUILT, "started_at": _now().isoformat()})
+    conn.execute("INSERT INTO poll_errors (device_id, kind, detail) VALUES ('dev1', 'daikin_network', 'x')")
+    assert _full()["sources"]["thermostat"]["status"] == "upstream_down"
+
+
+def test_the_old_poller_of_the_same_commit_fails(house):
+    conn, started = house
+    db.kv_set(conn, "poller_heartbeat", {"ts": _now().isoformat(), "commit": COMMIT,
+                                         "built_at": "2026-01-01T00:00:00Z",
+                                         "started_at": started.isoformat()})
+    assert _full()["poller"]["status"] == "other_build"

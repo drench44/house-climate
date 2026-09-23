@@ -74,12 +74,15 @@ gate on. It always returns 200 with a report:
 
 - `poller`: the heartbeat's age, and the commit and start time the poller
   writes into it. When the image has a deploy record, the poller must report
-  the same commit as `web` (`status: other_commit` is the old container still
-  ticking).
+  the same commit and build as `web` (`status: other_commit` or `other_build`
+  is the old container still ticking; the build time tells two deploys of
+  one commit apart).
 - `sources`: `thermostat`, `rooms` (Ecowitt) and `weather`, each with the
   newest reading's `data_ts`. `ok` needs it recent AND written after the
   running poller started, so a reading the previous container wrote never
-  counts.
+  counts. Each room sensor that has ever reported is judged on its own
+  (`stale_items`), and a Daikin outage since the poller started reads
+  `upstream_down`.
 - `alerts`: the alert loop in this process evaluated recently.
 - `settings`: the Daikin credentials, and `ALERT_WEBHOOK_URL` when alerts go
   to a webhook.

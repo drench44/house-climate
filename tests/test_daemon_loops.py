@@ -240,7 +240,8 @@ def test_poller_heartbeat_carries_its_commit_and_start(conn, monkeypatch):
     cfg = load_config(CFG_PATH)
     secrets = Secrets("k", "t", "e@x", TEST_DSN)
     monkeypatch.setattr(deep_health, "read_build_info",
-                        lambda *a, **k: {"engine_commit": "c0ffee1234567"})
+                        lambda *a, **k: {"engine_commit": "c0ffee1234567",
+                                          "built_at": "2026-09-23T12:00:00Z"})
     monkeypatch.setattr(poller, "_discover_device_id", lambda c, cl: "dev1")
     monkeypatch.setattr(poller, "poll_once", lambda *a, **k: "ok")
     monkeypatch.setattr(poller, "poll_ecowitt", lambda *a, **k: "ok")
@@ -251,5 +252,6 @@ def test_poller_heartbeat_carries_its_commit_and_start(conn, monkeypatch):
         poller.run(cfg, secrets)
     hb = db.kv_get(conn, "poller_heartbeat")["value"]
     assert hb["commit"] == "c0ffee1234567"
+    assert hb["built_at"] == "2026-09-23T12:00:00Z"
     started = datetime.fromisoformat(hb["started_at"])
     assert before <= started <= datetime.fromisoformat(hb["ts"])

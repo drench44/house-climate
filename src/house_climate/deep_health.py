@@ -124,7 +124,7 @@ def setting(required: bool, present: bool, why: str) -> dict:
 
 
 def poller_block(heartbeat: dict | None, now: dt.datetime, max_age_s: float,
-                 engine_commit: str | None) -> dict:
+                 engine_commit: str | None, built_at: str | None = None) -> dict:
     """The poller's liveness. `heartbeat` is kv poller_heartbeat as kv_get
     returns it ({value: {ts, commit, started_at}, updated_at}). When this web
     image knows its commit, the poller must report the SAME one: web and poller
@@ -137,13 +137,19 @@ def poller_block(heartbeat: dict | None, now: dt.datetime, max_age_s: float,
     at = parse_ts(heartbeat.get("updated_at"))
     commit = value.get("commit") if isinstance(value.get("commit"), str) else None
     started = parse_ts(value.get("started_at"))
-    out = {"heartbeat_at": iso(at), "commit": commit, "started_at": iso(started),
+    hb_built = value.get("built_at") if isinstance(value.get("built_at"), str) else None
+    out = {"heartbeat_at": iso(at), "commit": commit, "built_at": hb_built,
+           "started_at": iso(started),
            "max_age_s": max_age_s,
            "age_s": None if at is None else round((now - at).total_seconds(), 1)}
     if at is None or (now - at).total_seconds() > max_age_s:
         out["status"] = "stale"
     elif engine_commit and commit != engine_commit:
         out["status"] = "other_commit"
+    elif built_at and hb_built != built_at:
+        # same commit, other build: the poller this deploy replaced (a config
+        # change keeps the commit) is the one still ticking
+        out["status"] = "other_build"
     else:
         out["status"] = "ok"
     out["ok"] = out["status"] == "ok"
@@ -161,13 +167,19 @@ def data_source(*, configured: bool, latest, now: dt.datetime, max_age_s: float,
     since = parse_ts(since)
     out = {"configured": True, "data_ts": iso(latest), "max_age_s": max_age_s,
            "data_age_s": None if latest is None else round((now - latest).total_seconds(), 1)}
-    if latest is None:
+    if (extra or {}).get("upstream_down") and (latest is None or (since is not None and latest < since)):
+        # nothing new since the poller started, and it has been logging
+        # outage errors: the cloud is down, not this build
+        out["status"] = "upstream_down"
+    elif latest is None:
         out["status"] = "waiting"
     elif (now - latest).total_seconds() > max_age_s:
         out["status"] = "stale"
     elif since is not None and latest < since:
         # the previous poller wrote it; the running one has not yet
         out["status"] = "waiting"
+    elif (extra or {}).get("stale_items"):
+        out["status"] = "degraded"
     else:
         out["status"] = "ok"
     out.update(extra or {})
