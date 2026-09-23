@@ -1,3 +1,4 @@
+import math
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -300,7 +301,7 @@ def _validate_filter_reminder(d: dict) -> None:
     hours = d.get("filter_reminder_hours", 300.0)
     months = d.get("filter_reminder_months")
     if hours is not None and (isinstance(hours, bool) or not isinstance(hours, (int, float))
-                              or hours <= 0):
+                              or not math.isfinite(hours) or hours <= 0):
         raise ValueError(f"config 'filter_reminder_hours' must be a positive number of "
                          f"blower hours, or null to turn it off; got {hours!r}")
     if months is not None and (isinstance(months, bool) or not isinstance(months, int)
