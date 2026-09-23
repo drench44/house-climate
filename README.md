@@ -63,6 +63,41 @@ the server itself. To serve the wall display to your LAN, set `CLIMATE_BIND` in
 `.env` to the server's LAN IP. `config.json` is copied into the image at build
 time, so re-run `docker compose up -d --build` after editing it.
 
+### Health: `/health` and `/health/full`
+
+`/health` is the container healthcheck: 503 only when the database is
+unreachable, with data ages as information, so an outage elsewhere never
+marks `web` unhealthy.
+
+`/health/full` answers "does it actually work?" and is what a deploy should
+gate on. It always returns 200 with a report:
+
+- `poller`: the heartbeat's age, and the commit and start time the poller
+  writes into it. When the image has a deploy record, the poller must report
+  the same commit and build as `web` (`status: other_commit` or `other_build`
+  is the old container still ticking; the build time tells two deploys of
+  one commit apart).
+- `sources`: `thermostat`, `rooms` (Ecowitt) and `weather`, each with the
+  newest reading's `data_ts`. `ok` needs it recent AND written after the
+  running poller started, so a reading the previous container wrote never
+  counts. Each room sensor that has ever reported is judged on its own
+  (`stale_items`), and a Daikin outage since the poller started reads
+  `upstream_down`.
+- `alerts`: the alert loop in this process evaluated recently.
+- `settings`: the Daikin credentials, and `ALERT_WEBHOOK_URL` when alerts go
+  to a webhook.
+- `config`: the sha256 of the `config.json` baked into the image, and whether
+  it is the one the deploy recorded (`matches_deploy`).
+- `deploy`: `src/house_climate/build_info.json` as a deploy wrote it
+  (`engine_commit`, `overlay_commit`, `config_sha256`, `built_at`), or null.
+  Never commit that file; it is git-ignored.
+- `status` is `ok` only when nothing above failed; `problems` names each
+  failure. `notes` (the backup heartbeat) is information only.
+
+```bash
+curl -s http://<your-server>:8090/health/full | jq '{status, problems}'
+```
+
 Dashboard: `http://<your-server>:8090/` — a wall-friendly night design with a
 compact `square.html` view for small kiosk screens, plus `moisture.html` for
 the humidity/moisture deep-dive.

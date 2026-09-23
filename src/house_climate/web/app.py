@@ -11,13 +11,20 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import db
+from .. import deep_health
 from .. import version as hcversion
 from ..config import load_config, load_secrets
 from . import alerts, api
 from .alerts import alert_loop
 from .build import compute_build
 
-cfg = load_config(os.environ.get("CONFIG_PATH", "config.json"))
+# When this process started, and what the deploy recorded when it built the
+# image (commit + the sha256 of the config.json it staged): /health/full.
+PROCESS_STARTED_AT = datetime.now(timezone.utc)
+CONFIG_PATH = os.environ.get("CONFIG_PATH", "config.json")
+cfg = load_config(CONFIG_PATH)
+CONFIG_SHA256 = deep_health.file_sha256(CONFIG_PATH)
+BUILD_INFO = deep_health.read_build_info()
 secrets = load_secrets(os.environ)
 conn = db.connect(secrets.db_dsn)
 db.ensure_app_schema(conn)  # create runtime-added tables (filter_events) if missing
@@ -137,6 +144,100 @@ def health():
     except Exception:
         checks["backup_heartbeat_age_s"] = None
     return {"status": "ok", "checks": checks}
+
+
+def _room_sensor_ids(config) -> list[str]:
+    """The sensor ids the dashboard's rooms card reads (api.build_rooms)."""
+    ec = config.ecowitt or {}
+    ids = [f"ecowitt_ch{ch}" for ch in (ec.get("channels") or {})]
+    if ec.get("outdoor_name"):
+        ids.append("ecowitt_outdoor")
+    return ids
+
+
+def _newest(c, sql, params=()):
+    row = c.execute(sql, params).fetchone()
+    return row[0] if row else None
+
+
+@app.get("/health/full")
+def health_full():
+    """Does house-climate WORK? The new poller ticking (its heartbeat carries
+    its commit), readings it wrote since it started, the alert loop in this
+    process running, the settings present, the shipped config baked in. See
+    deep_health.py. The deploy gate (homelab-deploy, in the garage overlay)
+    reads it. Always 200: a report, not a liveness probe."""
+    now = datetime.now(timezone.utc)
+    engine_commit = (BUILD_INFO or {}).get("engine_commit")
+    db_ok, db_error = True, None
+    hb = thermostat = rooms = weather_ts = backup = None
+    stale_rooms: list[str] = []
+    daikin_errors = False
+    try:
+        c = _db()
+        hb = db.kv_get(c, "poller_heartbeat")
+        thermostat = _newest(c, f"SELECT max(ts) FROM readings WHERE {db.THERMOSTAT_ROW_SQL}")
+        # Per sensor, so one live channel cannot hide a dead one. A sensor
+        # that never reported (not installed) is not judged.
+        for sid in _room_sensor_ids(cfg):
+            latest = db.latest_sensor_reading(c, sid)
+            ts = latest and latest.get("ts")
+            if ts is None:
+                continue
+            rooms = ts if rooms is None or ts > rooms else rooms
+            if (now - ts).total_seconds() > deep_health.ROOMS_MAX_AGE_S:
+                stale_rooms.append(sid)
+        weather_ts = _newest(c, "SELECT max(ts) FROM readings WHERE weather_ok")
+        hb_started = deep_health.parse_ts(((hb or {}).get("value") or {}).get("started_at")
+                                          if isinstance((hb or {}).get("value"), dict) else None)
+        if hb_started is not None:
+            daikin_errors = bool(_newest(
+                c, "SELECT count(*) FROM poll_errors WHERE ts >= %s AND kind LIKE 'daikin%%'",
+                (hb_started,)))
+        bh = db.kv_get(c, "backup_heartbeat")
+        backup = deep_health.iso(bh["updated_at"]) if bh else None
+    except Exception as e:
+        logging.getLogger("house_climate.health").error("health/full: database: %s", e)
+        db_ok, db_error = False, f"{type(e).__name__}: {e}"
+    poller = deep_health.poller_block(
+        hb, now, deep_health.heartbeat_max_age_s(cfg.poll_interval_s), engine_commit,
+        (BUILD_INFO or {}).get("built_at"))
+    since = poller.get("started_at")
+    ec = cfg.ecowitt or {}
+    sources = {
+        "thermostat": deep_health.data_source(
+            configured=True, latest=thermostat, now=now,
+            max_age_s=deep_health.THERMOSTAT_MAX_AGE_S, since=since,
+            extra={"upstream_down": True} if daikin_errors else None),
+        "rooms": deep_health.data_source(
+            configured=bool(ec.get("enabled")) and bool(_room_sensor_ids(cfg)),
+            latest=rooms, now=now, max_age_s=deep_health.ROOMS_MAX_AGE_S, since=since,
+            extra={"stale_items": stale_rooms} if stale_rooms else None),
+        "weather": deep_health.data_source(
+            configured=bool(cfg.weather_url or cfg.weather_url_fallback),
+            latest=weather_ts, now=now, max_age_s=deep_health.WEATHER_MAX_AGE_S,
+            since=since),
+    }
+    webhook = cfg.alerts.get("channel") == "webhook"
+    url = (os.environ.get("ALERT_WEBHOOK_URL") or "").strip().lower()
+    settings = {
+        "daikin": deep_health.setting(
+            True, all(v.strip() for v in (secrets.api_key, secrets.integrator_token,
+                                          secrets.email)),
+            "DAIKIN_API_KEY, DAIKIN_INTEGRATOR_TOKEN and DAIKIN_EMAIL must be set"),
+        "alert_channel": deep_health.setting(
+            webhook, url.startswith(("http://", "https://")),
+            "alerts go to a webhook, so ALERT_WEBHOOK_URL must be an http(s) URL"),
+    }
+    return deep_health.assemble(
+        now=now, started_at=PROCESS_STARTED_AT, version=APP_VERSION, build=BUILD,
+        build_info=BUILD_INFO,
+        config=deep_health.config_block(CONFIG_PATH, CONFIG_SHA256, BUILD_INFO),
+        db_ok=db_ok, db_error=db_error, settings=settings, poller=poller,
+        alerts=deep_health.alerts_block(
+            alerts.LOOP_STATE.get("last_run"), now,
+            deep_health.heartbeat_max_age_s(cfg.poll_interval_s)),
+        sources=sources, notes={"backup_heartbeat_at": backup})
 
 
 @app.get("/api/now")
