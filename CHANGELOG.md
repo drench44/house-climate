@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every code-changing pull request adds a line under `## [Unreleased]`; a release
 rolls that section to a dated version via `python scripts/release.py`.
 
+### Fixed
+- `scripts/install-hooks.sh` no longer bypasses the ci-policy global git
+  hooks: when they are the machine's global `core.hooksPath`, it chains this
+  repo's `.githooks` behind them (`ci-policy.chainHooksPath`) instead of
+  setting `core.hooksPath=.githooks`, which had silently skipped them.
+
 ## [Unreleased]
 
 ### Added
