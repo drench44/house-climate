@@ -32,7 +32,8 @@ rolls that section to a dated version via `python scripts/release.py`.
 ### Changed
 - `docker-compose.yml`: every service caps its json-file log at 10 MB x 5
   files (logs used to grow forever), and the poller and web get memory
-  limits (256 MB and 384 MB, 3-4x their measured peak, no swap on top). The
+  limits (256 MB, 4x its measured peak; 1 GB for web, sized for the 400 days
+  of history its filter clock loads; no swap on top). The
   database is deliberately left without a limit (the comment on `db` says
   why). Both Dockerfiles pin `python:3.12.14-slim-trixie` instead of the
   moving `python:3.12-slim`. `tests/test_compose.py` pins all of it.

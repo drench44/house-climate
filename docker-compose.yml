@@ -67,7 +67,8 @@ services:
     logging: *default-logging
     # Measured peak on a running install: about 60 MiB (cgroup memory.peak,
     # page cache included). About 4x headroom, so a slow tick or a big
-    # Daikin answer never trips it. memswap_limit = mem_limit: no swap on
+    # Daikin answer never trips it. Unlike web, the poller never loads
+    # history, so this does not grow with the database. memswap_limit = mem_limit: no swap on
     # top, so the limit is the real ceiling. A container over it is
     # OOM-killed and restarted (restart: unless-stopped), never left wedged.
     mem_limit: 256m
@@ -91,11 +92,15 @@ services:
       retries: 3
     restart: unless-stopped
     logging: *default-logging
-    # Measured peak on a running install: about 110 MiB (cgroup memory.peak,
-    # page cache included). About 3.5x headroom for the heavier report
-    # routes. memswap_limit = mem_limit, as for the poller.
-    mem_limit: 384m
-    memswap_limit: 384m
+    # Sized for a FULL history, not today's: the filter clock and /health/full
+    # load up to 400 days of readings into memory (the alert loop runs them
+    # in this process too). Measured peak about 110 MiB with ~40 days stored;
+    # 400 days at the default 180 s poll is roughly 10x the rows, so an
+    # estimated ~450 MiB peak. 1g is about 2x that. A faster poll_interval_s
+    # stores more rows: raise this with it. memswap_limit = mem_limit, as for
+    # the poller.
+    mem_limit: 1g
+    memswap_limit: 1g
 
 volumes:
   climate_pgdata:
