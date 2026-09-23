@@ -74,6 +74,12 @@ def test_ci_policy_caller_is_exactly_the_shared_shape(name):
         CI_POLICY_HEAD[name]
         + f"    uses: drench44/ci-policy/.github/workflows/{name}@{sha.group(1)}\n"
         + f"    with:\n      ci-policy-ref: {sha.group(1)}\n      runs-on: {CI_POLICY_RUNNER}\n"
-        + {}.get(name, "")
     )
     assert text == want
+
+
+def test_ci_policy_callers_pin_the_same_commit():
+    """A pin bump edits both callers. main-watch never runs on a PR, so a typo
+    in its SHA alone would pass every other test and only break after merge."""
+    shas = {n: set(re.findall(r"@([0-9a-f]{40})\b", ((WORKFLOWS) / n).read_text())) for n in ("pr-policy.yml", "main-watch.yml")}
+    assert all(len(s) == 1 for s in shas.values()) and shas["pr-policy.yml"] == shas["main-watch.yml"], shas
