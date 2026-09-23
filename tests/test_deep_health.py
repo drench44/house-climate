@@ -125,3 +125,28 @@ def test_iso_and_parse_ts():
     assert dh.iso(NOW.replace(tzinfo=None)) == "2026-09-23T12:00:00Z"
     assert dh.parse_ts("2026-09-23T05:00:00-07:00") == NOW
     assert dh.parse_ts("junk") is None and dh.parse_ts(None) is None
+
+
+def test_a_poller_from_another_build_of_the_same_commit_is_the_old_one():
+    hb = _hb()
+    hb["value"]["built_at"] = "2026-09-23T10:00:00Z"
+    p = dh.poller_block(hb, NOW, 600, "abc1234", "2026-09-23T11:00:00Z")
+    assert p["status"] == "other_build" and p["ok"] is False
+    assert dh.poller_block(hb, NOW, 600, "abc1234", "2026-09-23T10:00:00Z")["ok"] is True
+
+
+def test_a_stale_room_among_live_ones_is_degraded():
+    s = dh.data_source(configured=True, latest=ago(60), now=NOW, max_age_s=900,
+                       since=ago(300).isoformat(), extra={"stale_items": ["ecowitt_ch5"]})
+    assert s["status"] == "degraded" and s["ok"] is False
+    assert s["stale_items"] == ["ecowitt_ch5"]
+
+
+def test_a_daikin_outage_is_named_and_still_fails():
+    s = dh.data_source(configured=True, latest=ago(600), now=NOW, max_age_s=900,
+                       since=ago(300).isoformat(), extra={"upstream_down": True})
+    assert s["status"] == "upstream_down" and s["ok"] is False
+    # a fresh reading since the start wins over old errors
+    s = dh.data_source(configured=True, latest=ago(60), now=NOW, max_age_s=900,
+                       since=ago(300).isoformat(), extra={"upstream_down": True})
+    assert s["status"] == "ok"

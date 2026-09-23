@@ -171,31 +171,48 @@ def health_full():
     engine_commit = (BUILD_INFO or {}).get("engine_commit")
     db_ok, db_error = True, None
     hb = thermostat = rooms = weather_ts = backup = None
+    stale_rooms: list[str] = []
+    daikin_errors = False
     try:
         c = _db()
         hb = db.kv_get(c, "poller_heartbeat")
         thermostat = _newest(c, f"SELECT max(ts) FROM readings WHERE {db.THERMOSTAT_ROW_SQL}")
-        ids = _room_sensor_ids(cfg)
-        if ids:
-            rooms = _newest(c, "SELECT max(ts) FROM sensor_readings WHERE sensor_id = ANY(%s)",
-                            (ids,))
+        # Per sensor, so one live channel cannot hide a dead one. A sensor
+        # that never reported (not installed) is not judged.
+        for sid in _room_sensor_ids(cfg):
+            latest = db.latest_sensor_reading(c, sid)
+            ts = latest and latest.get("ts")
+            if ts is None:
+                continue
+            rooms = ts if rooms is None or ts > rooms else rooms
+            if (now - ts).total_seconds() > deep_health.ROOMS_MAX_AGE_S:
+                stale_rooms.append(sid)
         weather_ts = _newest(c, "SELECT max(ts) FROM readings WHERE weather_ok")
+        hb_started = deep_health.parse_ts(((hb or {}).get("value") or {}).get("started_at")
+                                          if isinstance((hb or {}).get("value"), dict) else None)
+        if hb_started is not None:
+            daikin_errors = bool(_newest(
+                c, "SELECT count(*) FROM poll_errors WHERE ts >= %s AND kind LIKE 'daikin%%'",
+                (hb_started,)))
         bh = db.kv_get(c, "backup_heartbeat")
         backup = deep_health.iso(bh["updated_at"]) if bh else None
     except Exception as e:
         logging.getLogger("house_climate.health").error("health/full: database: %s", e)
         db_ok, db_error = False, f"{type(e).__name__}: {e}"
     poller = deep_health.poller_block(
-        hb, now, deep_health.heartbeat_max_age_s(cfg.poll_interval_s), engine_commit)
+        hb, now, deep_health.heartbeat_max_age_s(cfg.poll_interval_s), engine_commit,
+        (BUILD_INFO or {}).get("built_at"))
     since = poller.get("started_at")
     ec = cfg.ecowitt or {}
     sources = {
         "thermostat": deep_health.data_source(
             configured=True, latest=thermostat, now=now,
-            max_age_s=deep_health.THERMOSTAT_MAX_AGE_S, since=since),
+            max_age_s=deep_health.THERMOSTAT_MAX_AGE_S, since=since,
+            extra={"upstream_down": True} if daikin_errors else None),
         "rooms": deep_health.data_source(
             configured=bool(ec.get("enabled")) and bool(_room_sensor_ids(cfg)),
-            latest=rooms, now=now, max_age_s=deep_health.ROOMS_MAX_AGE_S, since=since),
+            latest=rooms, now=now, max_age_s=deep_health.ROOMS_MAX_AGE_S, since=since,
+            extra={"stale_items": stale_rooms} if stale_rooms else None),
         "weather": deep_health.data_source(
             configured=bool(cfg.weather_url or cfg.weather_url_fallback),
             latest=weather_ts, now=now, max_age_s=deep_health.WEATHER_MAX_AGE_S,
