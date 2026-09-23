@@ -58,7 +58,14 @@ CI_POLICY_HEAD = {
     ),
     "main-watch.yml": (
         "name: main-watch\non:\n  push:\n    branches: [main]\n"
-        "permissions:\n  contents: read\n  pull-requests: read\n  checks: read\n  statuses: read\n  issues: write\n"
+        # 2026-09-24 (ci-policy PR #2): the hourly schedule re-checks commits
+        # whose PR checks were still running at merge; statuses: write marks
+        # every judged commit for the out-of-band audit; actions: read lets it
+        # tell workflows apart. The called workflow asks for exactly these, and
+        # a caller granting less fails to start.
+        '  schedule:\n    - cron: 41 * * * *\n  workflow_dispatch:\n'
+        "permissions:\n  contents: read\n  pull-requests: read\n  checks: read\n  actions: read\n"
+        "  statuses: write\n  issues: write\n"
         "jobs:\n  watch:\n"
     ),
 }
