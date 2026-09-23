@@ -251,7 +251,7 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
     # it any less true.
     if filter_due:
         out.append(Alert("filter_due", "warning",
-                         "HVAC filter is due for a change (runtime threshold reached)"))
+                         "HVAC filter is due for a change (its reminder limit is reached)"))
 
     # Air quality: evaluated on the latest value only, not sustained -- smoke
     # is actionable the moment it shows up. Prefer the caller-resolved AirNow

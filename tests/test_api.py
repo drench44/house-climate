@@ -2270,3 +2270,48 @@ def test_coupling_window_length_counts_local_days(conn, monkeypatch):
     assert first_local == datetime(2026, 9, 18).date()
     assert got["days"] == 31                       # the UTC date made it 32
     assert got["tz"] == CRAWL_CFG.timezone
+
+
+
+# --- filter reminder by calendar months ---------------------------------------
+
+def _filter_cfg(hours, months):
+    return dataclasses.replace(CFG, filter_reminder_hours=hours, filter_reminder_months=months)
+
+
+def test_add_months_clamps_to_the_month_end():
+    from datetime import date
+    assert api._add_months(date(2026, 8, 31), 6) == date(2027, 2, 28)
+    assert api._add_months(date(2026, 6, 26), 6) == date(2026, 12, 26)
+    assert api._add_months(date(2027, 8, 31), 6) == date(2028, 2, 29)
+
+
+def test_filter_due_by_months_not_hours(conn):
+    changed = datetime(2026, 6, 26, 19, 0, tzinfo=timezone.utc)
+    db.record_filter_change(conn, "dev1", changed_at=changed)
+    cfg = _filter_cfg(None, 6)
+    before = api.filter_status(conn, "dev1", cfg, rows_all=[],
+                               now=datetime(2026, 12, 20, 12, tzinfo=timezone.utc))
+    assert before["due"] is False and before["due_on"] == "2026-12-26"
+    assert 90 < before["pct"] < 100
+    after = api.filter_status(conn, "dev1", cfg, rows_all=[],
+                              now=datetime(2026, 12, 27, 12, tzinfo=timezone.utc))
+    assert after["due"] is True and after["pct"] == 100
+
+
+def test_filter_due_when_either_limit_is_reached(conn):
+    changed = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
+    db.record_filter_change(conn, "dev1", changed_at=changed)
+    rows = [{"ts": changed + timedelta(minutes=10 * i), "equipment_status": "cooling"}
+            for i in range(7)]                                  # one hour of cooling
+    now = datetime(2026, 9, 2, 12, tzinfo=timezone.utc)
+    hours_hit = api.filter_status(conn, "dev1", _filter_cfg(1.0, 6), rows_all=rows, now=now)
+    assert hours_hit["due"] is True
+    neither = api.filter_status(conn, "dev1", _filter_cfg(100.0, 6), rows_all=rows, now=now)
+    assert neither["due"] is False
+
+
+def test_months_only_with_no_logged_change_is_unknown_not_zero(conn):
+    conn.execute("DELETE FROM filter_events")
+    st = api.filter_status(conn, "dev1", _filter_cfg(None, 6), rows_all=[])
+    assert st["pct"] is None and st["due"] is False and st["due_on"] is None

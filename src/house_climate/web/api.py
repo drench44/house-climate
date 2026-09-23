@@ -1734,11 +1734,21 @@ _HEALTH_HISTORY_DAYS = 400  # "all available history" for the filter clock, boun
 _HOLD_WINDOW_DAYS = 14
 
 
+def _add_months(d, months):
+    """Calendar date `months` after date `d`, clamped to the month's last day
+    (Aug 31 + 6 months = Feb 28/29)."""
+    y, m = divmod(d.month - 1 + months, 12)
+    y, m = d.year + y, m + 1
+    return d.replace(year=y, month=m, day=min(d.day, calendar.monthrange(y, m)[1]))
+
+
 def filter_status(conn, device_id, cfg, rows_all=None, now=None) -> dict:
-    """Cumulative HVAC-running-hours since the last logged filter change vs the
-    reminder threshold. Shared by the System Health panel and the filter-due
-    alert so both use the identical clock. Loads its own ~400-day window if the
-    caller doesn't supply rows_all."""
+    """Filter life since the last logged change, against every configured
+    limit: blower hours (filter_reminder_hours) and/or calendar months
+    (filter_reminder_months). Due when ANY limit is reached; `pct` is the
+    furthest-along limit. Shared by the System Health panel and the
+    filter-due alert so both use the identical clock. Loads its own ~400-day
+    window if the caller doesn't supply rows_all."""
     now = now or datetime.now(timezone.utc)
     if rows_all is None:
         rows_all = db.recent_readings(conn, device_id, now - timedelta(days=_HEALTH_HISTORY_DAYS))
@@ -1748,13 +1758,30 @@ def filter_status(conn, device_id, cfg, rows_all=None, now=None) -> dict:
     rt_filter = runtime.compute(filter_rows, short_cycle_min=cfg.short_cycle_minutes)
     running_minutes = rt_filter.minutes["cool"] + rt_filter.minutes["heat"] + rt_filter.minutes["fan"]
     runtime_hours = running_minutes / 60.0
+
+    fractions = []
     threshold = cfg.filter_reminder_hours
-    due = runtime_hours >= threshold
-    pct = round(min(runtime_hours / threshold, 1.0) * 100, 0) if threshold > 0 else 0.0
+    if threshold:
+        fractions.append(runtime_hours / threshold)
+    months = getattr(cfg, "filter_reminder_months", None)
+    due_on = None
+    if months and changed_at is not None:
+        zone = ZoneInfo(cfg.timezone)
+        start = changed_at.astimezone(zone).date()
+        due_on = _add_months(start, months)
+        elapsed = (now.astimezone(zone).date() - start).days
+        fractions.append(elapsed / max((due_on - start).days, 1))
+    # No usable limit (a months-only rule with no logged change yet) is
+    # unknown, never "0% used".
+    known = bool(fractions)
+    due = known and max(fractions) >= 1.0
+    pct = round(min(max(fractions), 1.0) * 100, 0) if known else None
     days_since = (now - changed_at).days if changed_at is not None else None
     return {
         "runtime_hours": round(runtime_hours, 1),
         "threshold": threshold,
+        "months": months,
+        "due_on": due_on.isoformat() if due_on is not None else None,
         "due": due,
         "pct": pct,
         "changed_at": changed_at.isoformat() if changed_at is not None else None,
