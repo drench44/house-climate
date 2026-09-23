@@ -62,7 +62,10 @@ def _alert_context(conn, device_id, cfg, since, rows, now=None):
     now_mono = time.monotonic()
     if _filter_due_cache is None or now_mono - _filter_due_at >= _FILTER_RECHECK_S:
         try:
-            _filter_due_cache = bool(api.filter_status(conn, device_id, cfg)["due"])
+            st = api.filter_status(conn, device_id, cfg)
+            # The reason string (truthy) names the limit that was reached, so
+            # the push says WHY; False when not due.
+            _filter_due_cache = (st.get("due_reason") or "reminder limit reached") if st["due"] else False
             _filter_due_at = now_mono        # only extend the TTL on a real result
         except Exception:
             # Don't advance _filter_due_at on failure: a transient DB hiccup
@@ -202,8 +205,10 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
                       gone quiet: crawl_sensor_offline fires and the condition
                       alerts stand down (old readings are not a current
                       condition).
-      filter_due   -- precomputed bool from the same runtime-hours logic the
-                      dashboard shows. None -> filter alert skipped.
+      filter_due   -- precomputed from the same filter_status the dashboard
+                      shows: False when not due, or a string naming the limit
+                      reached ("6 months since the last change"). None ->
+                      filter alert skipped.
       outdoor_aqi  -- the effective outdoor AQI (AirNow-preferred, resolved by
                       the caller). None -> falls back to the reading's wx_aqi.
       aqi_source   -- provenance of that number, from resolve_outdoor_aqi:
@@ -245,13 +250,14 @@ def evaluate(rows, cfg, poll_errors_recent, now=None, *,
 
     out.extend(_crawl_alerts(crawl_rows, a, now))
 
-    # Filter due: the runtime-hours threshold the dashboard already tracks,
-    # surfaced as a push so it isn't only visible to someone who opens the
-    # page. Computed from runtime history, so a thermostat outage doesn't make
-    # it any less true.
+    # Filter due: the reminder limit (blower hours and/or calendar months)
+    # the dashboard already tracks, surfaced as a push so it isn't only
+    # visible to someone who opens the page. Computed from history and the
+    # calendar, so a thermostat outage doesn't make it any less true.
     if filter_due:
+        why = filter_due if isinstance(filter_due, str) else "reminder limit reached"
         out.append(Alert("filter_due", "warning",
-                         "HVAC filter is due for a change (runtime threshold reached)"))
+                         f"HVAC filter is due for a change ({why})"))
 
     # Air quality: evaluated on the latest value only, not sustained -- smoke
     # is actionable the moment it shows up. Prefer the caller-resolved AirNow

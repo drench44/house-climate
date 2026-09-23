@@ -1,3 +1,4 @@
+import math
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -272,11 +273,15 @@ class Config:
     web_port: int
     tou: TouTable
     alerts: dict
-    filter_reminder_hours: float
+    # Filter change reminder: due when EITHER configured limit is reached.
+    # None disables that limit. Blower hours suit thin 1" filters; a 4-5"
+    # media cabinet is usually rated by calendar months instead.
+    filter_reminder_hours: float | None
     setpoint_tolerance_f: float
     ecowitt: dict | None
     latitude: float | None
     longitude: float | None
+    filter_reminder_months: int | None = None
 
 
 @dataclass(frozen=True)
@@ -287,11 +292,33 @@ class Secrets:
     db_dsn: str
 
 
+def _filter_hours(d):
+    v = d.get("filter_reminder_hours", 300.0)
+    return None if v is None else float(v)
+
+
+def _validate_filter_reminder(d: dict) -> None:
+    hours = d.get("filter_reminder_hours", 300.0)
+    months = d.get("filter_reminder_months")
+    if hours is not None and (isinstance(hours, bool) or not isinstance(hours, (int, float))
+                              or not math.isfinite(hours) or hours <= 0):
+        raise ValueError(f"config 'filter_reminder_hours' must be a positive number of "
+                         f"blower hours, or null to turn it off; got {hours!r}")
+    if months is not None and (isinstance(months, bool) or not isinstance(months, int)
+                               or months <= 0):
+        raise ValueError(f"config 'filter_reminder_months' must be a positive whole "
+                         f"number of months, or null; got {months!r}")
+    if hours is None and months is None:
+        raise ValueError("config needs a filter reminder: set filter_reminder_hours, "
+                         "filter_reminder_months, or both")
+
+
 def _validate_config(d: dict, table: "TouTable") -> None:
     """Fail LOUD at load for the misconfigurations that used to fail silently or
     per-request at runtime: a missing alert key (killed the alert thread), an
     unknown timezone (500'd every panel), or a TOU table with an uncovered
     minute (500'd cost/forecast). Raises ValueError with a specific reason."""
+    _validate_filter_reminder(d)
     alerts = d.get("alerts")
     if not isinstance(alerts, dict):
         raise ValueError("config 'alerts' must be an object")
@@ -431,7 +458,8 @@ def load_config(path: str) -> Config:
         web_port=int(d["web_port"]),
         tou=table,
         alerts=d["alerts"],
-        filter_reminder_hours=float(d.get("filter_reminder_hours", 300.0)),
+        filter_reminder_hours=_filter_hours(d),
+        filter_reminder_months=d.get("filter_reminder_months"),
         setpoint_tolerance_f=float(d.get("setpoint_tolerance_f", 1.0)),
         ecowitt=d.get("ecowitt"),
         # For the Open-Meteo rainfall backfill (days before the station gauge

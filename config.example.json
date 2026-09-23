@@ -8,6 +8,7 @@
   "weather_url_fallback": "http://192.168.1.50:8137/wx.json",
   "web_port": 8090,
   "filter_reminder_hours": 300.0,
+  "filter_reminder_months": null,
   "setpoint_tolerance_f": 1.0,
   "latitude": 40.0,
   "longitude": -100.0,
