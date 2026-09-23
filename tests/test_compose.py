@@ -14,7 +14,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
 SERVICES = COMPOSE["services"]
-DOCKERFILES = sorted(ROOT.glob("*.Dockerfile"))
+DOCKERFILES = sorted({*ROOT.glob("*.Dockerfile"), *ROOT.glob("Dockerfile")})
 
 _UNITS = {"": 1, "b": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
 
@@ -32,6 +32,8 @@ def test_there_are_services_to_check():
     # A rename that nests services elsewhere must not leave every
     # parametrized test below with nothing to run.
     assert set(SERVICES) == {"db", "poller", "web"}
+    # The pulled-image pin test below only sees services with `image:`.
+    assert "image" in SERVICES["db"], "db no longer pulls an image; revisit the pin tests"
     assert DOCKERFILES, "no *.Dockerfile found at the repo root"
 
 
