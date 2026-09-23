@@ -50,7 +50,8 @@ def test_every_service_has_a_healthcheck(name):
     assert hc and hc.get("test"), f"{name} has no healthcheck"
 
 
-@pytest.mark.parametrize("name, floor", [("poller", 256 * 1024**2), ("web", 384 * 1024**2)])
+# web's floor is sized for 400 days of history (see its comment), not today's peak.
+@pytest.mark.parametrize("name, floor", [("poller", 256 * 1024**2), ("web", 1024**3)])
 def test_app_services_have_a_memory_limit_with_no_swap_on_top(name, floor):
     svc = SERVICES[name]
     assert "mem_limit" in svc, f"{name} has no mem_limit"
