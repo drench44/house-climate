@@ -14,12 +14,12 @@ permissions:
 jobs:
   policy:
     # Pinned to a commit, not @main, so a change to ci-policy reaches this repo
-    # only through a PR here. b03c60d is ci-policy main as of 2026-09-23
-    # ("Shared PR policy, main watch, git hooks and homelab deploy (#1)").
+    # only through a PR here. 2c990d5 is ci-policy PR #2; pr-policy only had its
+    # checkout action pinned there; it stays on the same commit as main-watch.yml.
     # ci-policy-ref must name the same commit: it picks the policy code the
     # job checks out and runs.
-    uses: drench44/ci-policy/.github/workflows/pr-policy.yml@b03c60de2110f69391159ed73d773adc8bfe6d6e # main @ b03c60d
+    uses: drench44/ci-policy/.github/workflows/pr-policy.yml@2c990d56f10ceb29fda3a0da1010fb96f53e0cb8 # main @ 2c990d5
     with:
-      ci-policy-ref: b03c60de2110f69391159ed73d773adc8bfe6d6e
+      ci-policy-ref: 2c990d56f10ceb29fda3a0da1010fb96f53e0cb8
       # Public repo: GitHub-hosted runner (free for public repos).
       runs-on: '"ubuntu-latest"'
