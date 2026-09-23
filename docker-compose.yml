@@ -1,3 +1,12 @@
+# Every service caps its json-file log (10 MB x 5 files) so a chatty or
+# crash-looping container cannot fill the disk. The default json-file driver
+# keeps logs forever.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   db:
     # Pinned on purpose: a floating `latest-pg16` tag could silently jump a
@@ -22,6 +31,17 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *default-logging
+    # No mem_limit on the database, on purpose. The image's timescaledb-tune
+    # sizes shared_buffers (25% of the HOST's RAM) and maintenance_work_mem
+    # (up to 2 GB) once, at initdb, from whatever memory it saw then, and
+    # Postgres assumes that memory is really there. A cgroup limit below those
+    # settings gets a backend OOM-killed in the middle of a write or a vacuum
+    # (Postgres then restarts every connection and replays WAL), which is a
+    # worse outcome than the runaway it guards against. A limit that is safe
+    # for every host would have to exceed shared_buffers + maintenance_work_mem,
+    # so it would not protect anything. To cap it, lower those two settings
+    # first (postgresql.conf in the volume), then add a limit well above them.
 
   poller:
     build: { context: ., dockerfile: poller.Dockerfile }
@@ -44,6 +64,14 @@ services:
       retries: 3
       start_period: 180s
     restart: unless-stopped
+    logging: *default-logging
+    # Measured peak on a running install: about 60 MiB (cgroup memory.peak,
+    # page cache included). About 4x headroom, so a slow tick or a big
+    # Daikin answer never trips it. memswap_limit = mem_limit: no swap on
+    # top, so the limit is the real ceiling. A container over it is
+    # OOM-killed and restarted (restart: unless-stopped), never left wedged.
+    mem_limit: 256m
+    memswap_limit: 256m
 
   web:
     build: { context: ., dockerfile: web.Dockerfile }
@@ -62,6 +90,12 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+    logging: *default-logging
+    # Measured peak on a running install: about 110 MiB (cgroup memory.peak,
+    # page cache included). About 3.5x headroom for the heavier report
+    # routes. memswap_limit = mem_limit, as for the poller.
+    mem_limit: 384m
+    memswap_limit: 384m
 
 volumes:
   climate_pgdata:
