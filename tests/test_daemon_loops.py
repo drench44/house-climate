@@ -229,3 +229,27 @@ def test_poller_startup_recovers_after_a_network_error(conn, monkeypatch):
     with pytest.raises(_Stop):
         poller.run(cfg, secrets)
     assert seen == ["dev-new"]
+
+
+def test_poller_heartbeat_carries_its_commit_and_start(conn, monkeypatch):
+    """/health/full requires the NEW poller to be the one ticking after a
+    deploy (commit) and its readings to be newer than its start: both ride in
+    every heartbeat."""
+    from datetime import datetime, timezone
+    from house_climate import db, deep_health
+    cfg = load_config(CFG_PATH)
+    secrets = Secrets("k", "t", "e@x", TEST_DSN)
+    monkeypatch.setattr(deep_health, "read_build_info",
+                        lambda *a, **k: {"engine_commit": "c0ffee1234567"})
+    monkeypatch.setattr(poller, "_discover_device_id", lambda c, cl: "dev1")
+    monkeypatch.setattr(poller, "poll_once", lambda *a, **k: "ok")
+    monkeypatch.setattr(poller, "poll_ecowitt", lambda *a, **k: "ok")
+    monkeypatch.setattr(poller, "update_precip", lambda *a, **k: "precip_noop")
+    monkeypatch.setattr(poller.time, "sleep", _stop_after(1))
+    before = datetime.now(timezone.utc)
+    with pytest.raises(_Stop):
+        poller.run(cfg, secrets)
+    hb = db.kv_get(conn, "poller_heartbeat")["value"]
+    assert hb["commit"] == "c0ffee1234567"
+    started = datetime.fromisoformat(hb["started_at"])
+    assert before <= started <= datetime.fromisoformat(hb["ts"])

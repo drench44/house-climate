@@ -6,3 +6,5 @@ config.json
 .claude/
 .superpowers/
 .venv/
+# Written into the staged tree by the deploy (commit + config hash), never here.
+src/house_climate/build_info.json
