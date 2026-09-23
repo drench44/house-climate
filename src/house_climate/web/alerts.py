@@ -805,6 +805,12 @@ def evaluate_current(conn, device_id, cfg, now=None, checked=None):
                     aqi_source=aqi_source, checked=checked)
 
 
+# When the loop in THIS process last evaluated the alerts (an aware datetime,
+# or None before the first pass). /health/full requires it to be recent: a
+# loop that died or wedged leaves the wall's strip and every push silent.
+LOOP_STATE: dict = {"last_run": None}
+
+
 def alert_loop(cfg, secrets):
     conn = db.connect(secrets.db_dsn)
     sink = make_sink(cfg)
@@ -828,6 +834,7 @@ def alert_loop(cfg, secrets):
             fired = evaluate_current(conn, device_id, cfg, checked=checked)
             live = conn
             now = datetime.now(timezone.utc)
+            LOOP_STATE["last_run"] = now
             _rearm_cleared(fired, last_sent, cleared_since, grace, now,
                            on_rearm=lambda k: forget_sent(live, k), last_level=last_level,
                            checked=checked)

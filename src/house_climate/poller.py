@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
-from . import db, weather, ecowitt
+from . import db, deep_health, weather, ecowitt
 from .analytics import humidity as humidity_an
 from .daikin import DaikinClient, DeviceState, RateLimited, DaikinError, DaikinUnreachable
 from .weather import WeatherSnapshot
@@ -314,6 +314,16 @@ def _boot_device_id(conn, client):
 
 def run(cfg, secrets):
     logging.basicConfig(level=logging.INFO)
+    # Carried in every heartbeat: the commit this poller was built from (the
+    # deploy's build_info.json; None in a hand-built image) and when it
+    # started, so /health/full can require the NEW poller to be the one
+    # ticking and its readings to be newer than its start.
+    started_at = datetime.now(timezone.utc).isoformat()
+    build = deep_health.read_build_info() or {}
+    commit = build.get("engine_commit")
+    # built_at is unique per deploy, so a deploy that keeps the engine commit
+    # (a config change) is still told apart from the poller it replaced.
+    built_at = build.get("built_at")
     conn = db.connect(secrets.db_dsn)
     # The poller writes columns (dewpoint_f, wx_rain_today_in) that only exist
     # after the schema catch-up, and it can start before/without the web
@@ -346,7 +356,9 @@ def run(cfg, secrets):
             # is caught separately by /health + the offline alert). The poller
             # container's healthcheck (house_climate.healthcheck) probes its age.
             db.kv_set(conn, "poller_heartbeat",
-                      {"ts": datetime.now(timezone.utc).isoformat()})
+                      {"ts": datetime.now(timezone.utc).isoformat(),
+                       "commit": commit, "built_at": built_at,
+                       "started_at": started_at})
         except Exception:                       # never let the loop die
             log.exception("poll failed")
             try:                                # replace a broken connection

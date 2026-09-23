@@ -10,6 +10,19 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+### Added
+- `GET /health/full`: a report of whether the stack actually works, for
+  deploy gates and people. The poller's heartbeat now carries its commit and
+  start time; the report requires the running poller to be the one ticking,
+  the newest thermostat, room-sensor and weather readings to be recent and
+  written since it started, the alert loop to have run, the Daikin
+  credentials and the alert webhook URL to be set, and the image to carry the
+  `config.json` the deploy recorded. `/health` is unchanged.
+- `/health/full` judges each room sensor on its own (one live sensor no longer
+  hides a dead one), tells the poller a deploy replaced from the new one even
+  when the commit is the same (the heartbeat carries the build time), and
+  names a Daikin outage since the poller started as `upstream_down`.
+
 ## [1.3.0] — 2026-09-22
 
 ### Added
