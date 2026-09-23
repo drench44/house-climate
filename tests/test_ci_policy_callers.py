@@ -41,3 +41,39 @@ def test_caller_is_pinned_and_runs_on_a_github_hosted_runner(name):
 def test_no_workflow_uses_a_self_hosted_runner():
     for w in sorted(WORKFLOWS.glob("*.y*ml")):
         assert "self-hosted" not in _code(w.name), w.name
+
+
+# The whole caller, comments dropped, must be exactly the shared shape
+# (2026-09-23): the triggers, the permissions each called workflow needs, one
+# job with no `if:`, and only the inputs below. A trigger typo, a dropped
+# `issues: write` or an `if: false` would otherwise make the check never run,
+# with nothing red anywhere. Only the pinned SHA may vary (a bump edits both
+# refs together).
+CI_POLICY_RUNNER = """'"ubuntu-latest"'"""
+CI_POLICY_HEAD = {
+    "pr-policy.yml": (
+        "name: pr-policy\non:\n  pull_request:\n"
+        "    types: [opened, edited, synchronize, reopened, labeled, unlabeled, ready_for_review]\n"
+        "permissions:\n  contents: read\n  pull-requests: read\njobs:\n  policy:\n"
+    ),
+    "main-watch.yml": (
+        "name: main-watch\non:\n  push:\n    branches: [main]\n"
+        "permissions:\n  contents: read\n  pull-requests: read\n  checks: read\n  statuses: read\n  issues: write\n"
+        "jobs:\n  watch:\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("name", ["pr-policy.yml", "main-watch.yml"])
+def test_ci_policy_caller_is_exactly_the_shared_shape(name):
+    lines = (WORKFLOWS / name).read_text().splitlines()
+    text = "".join(re.sub(r"\s+#.*$", "", l) + "\n" for l in lines if not l.lstrip().startswith("#"))
+    sha = re.search(r"@([0-9a-f]{40})\n", text)
+    assert sha, text
+    want = (
+        CI_POLICY_HEAD[name]
+        + f"    uses: drench44/ci-policy/.github/workflows/{name}@{sha.group(1)}\n"
+        + f"    with:\n      ci-policy-ref: {sha.group(1)}\n      runs-on: {CI_POLICY_RUNNER}\n"
+        + {}.get(name, "")
+    )
+    assert text == want
