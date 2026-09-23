@@ -87,3 +87,22 @@ def test_a_global_hook_that_is_not_a_working_ci_policy_hook_gets_the_plain_path(
     run()
     assert local(git, "core.hooksPath") == ".githooks"
     assert local(git, "ci-policy.chainHooksPath") == ""
+
+
+def test_a_multi_valued_local_hooks_path_is_fully_cleared_when_chaining(repo):
+    git, run, global_hooks = repo
+    git("config", "--local", "--add", "core.hooksPath", "old-hooks")
+    git("config", "--local", "--add", "core.hooksPath", "other-hooks")
+    global_hooks()
+    run()
+    assert git("config", "--local", "--get-all", "core.hooksPath").stdout.strip() == ""
+    assert local(git, "ci-policy.chainHooksPath") == ".githooks"
+
+
+def test_a_multi_valued_local_hooks_path_becomes_githooks_in_plain_mode(repo):
+    git, run, _ = repo
+    git("config", "--local", "--add", "core.hooksPath", "old-hooks")
+    git("config", "--local", "--add", "core.hooksPath", "other-hooks")
+    run()
+    assert git("config", "--local", "--get-all", "core.hooksPath").stdout.strip() == ".githooks"
+
