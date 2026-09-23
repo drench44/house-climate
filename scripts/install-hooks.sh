@@ -2,14 +2,37 @@
 # Install the pre-push privacy guard for this clone. Safe for anyone to
 # run: without the operator's private scanner on disk, the hook stays an
 # inert no-op.
+#
+# Two setups run this repo's .githooks:
+#   - plain: core.hooksPath=.githooks (the default for any clone).
+#   - chained: when the machine has the ci-policy global git hooks
+#     (github.com/drench44/ci-policy) installed as its global core.hooksPath,
+#     those run first and hand off to .githooks via ci-policy.chainHooksPath.
+#     Setting core.hooksPath=.githooks here would bypass them, so in that case
+#     this chains instead.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-git config core.hooksPath .githooks
+
+global_hooks=$(git config --global core.hooksPath || true)
+case "$global_hooks" in
+  "~"*) global_hooks="$HOME${global_hooks#\~}" ;;
+esac
+if [ -n "$global_hooks" ] && [ -x "$global_hooks/pre-push" ] \
+  && head -n 2 "$global_hooks/pre-push" | tail -n 1 \
+    | grep -qE '^# ci-policy managed: global pre-push hook'; then
+  git config --local --unset core.hooksPath 2>/dev/null || true
+  git config --local ci-policy.chainHooksPath .githooks
+  how="chained behind the ci-policy global hooks (ci-policy.chainHooksPath=.githooks)"
+else
+  git config --local --unset ci-policy.chainHooksPath 2>/dev/null || true
+  git config --local core.hooksPath .githooks
+  how="core.hooksPath=.githooks"
+fi
 # .githooks/pre-commit (the changelog guard) is now active for everyone; the
-# pre-push privacy guard below only does work in operator mode.
+# pre-push privacy guard only does work in operator mode.
 if [ -x "$HOME/Documents/garage/privacy/scan-repo.sh" ]; then
   git config guard.operator true
-  echo "installed: core.hooksPath=.githooks, guard.operator=true (operator mode — pushes are scanned)"
+  echo "installed: $how, guard.operator=true (operator mode: pushes are scanned)"
 else
-  echo "installed: core.hooksPath=.githooks (inert — private scanner not present on this machine)"
+  echo "installed: $how (inert: private scanner not present on this machine)"
 fi
