@@ -29,6 +29,14 @@ rolls that section to a dated version via `python scripts/release.py`.
   when the commit is the same (the heartbeat carries the build time), and
   names a Daikin outage since the poller started as `upstream_down`.
 
+### Changed
+- `docker-compose.yml`: every service caps its json-file log at 10 MB x 5
+  files (logs used to grow forever), and the poller and web get memory
+  limits (256 MB and 384 MB, 3-4x their measured peak, no swap on top). The
+  database is deliberately left without a limit (the comment on `db` says
+  why). Both Dockerfiles pin `python:3.12.14-slim-trixie` instead of the
+  moving `python:3.12-slim`. `tests/test_compose.py` pins all of it.
+
 ## [1.3.0] — 2026-09-22
 
 ### Added
