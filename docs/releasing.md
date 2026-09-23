@@ -40,6 +40,16 @@ Pushing the `vX.Y.Z` tag triggers `.github/workflows/release.yml`, which publish
 a GitHub Release whose notes are that version's changelog section
 (`scripts/changelog_notes.py`).
 
+The release commit is the only commit that reaches `main` without a pull
+request. Two shared checks from
+[drench44/ci-policy](https://github.com/drench44/ci-policy) run here:
+`pr-policy` on every PR (the body states which review band ran, a PR that says
+it fixes a regression changes a test, and a size limit), and `main-watch` on
+every push to `main`, which opens an issue labeled `main-watch` for any commit
+that did not come through a merged PR with green checks. Its allowlist accepts
+exactly `release: vX.Y.Z` commits that touch only `VERSION`, `CHANGELOG.md` and
+`src/house_climate/web/static/*.html`, which is what `release.py` writes.
+
 Because browsers cache assets, **treat any deploy as at least a `patch`** so the
 `?v=` moves and clients pick up the new bytes. Don't hand-edit `?v=` numbers — a
 `test_static.py` guard fails CI on any drift.
