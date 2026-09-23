@@ -10,6 +10,8 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-09-22
+
 ### Added
 - `filter_reminder_months`: the filter can be due by calendar months since the
   last change, as media-cabinet filters are rated, instead of (or as well as)
