@@ -115,7 +115,11 @@ firewall changes, works even if the thermostat sits on an isolated IoT VLAN.
   so check a real bill or an energy monitor if you have one. **`heat_kw`** is
   used while heating — for gas furnaces that's just the blower (~0.5 kW).
 - **`latitude`/`longitude`** — your rough location, for sun/weather math.
-- **`filter_reminder_hours`** — blower-hours between filter changes.
+- **`filter_reminder_hours`** / **`filter_reminder_months`** — when the
+  filter is due: after that many blower hours, after that many calendar
+  months since the last logged change, or whichever comes first if you set
+  both. Blower hours suit thin 1" filters; a 4-5" media cabinet is usually
+  rated in months (often 6-12). Set the one you do not use to `null`.
 - **`alerts`** — thresholds for humidity, setpoint drift, short-cycling,
   offline, peak-hour surges, AQI, and the crawl-space probe. The crawl gets
   three tiers: sustained RH over `crawl_mold_pct` (mold watch, 75%), sustained

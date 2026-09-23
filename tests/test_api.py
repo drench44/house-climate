@@ -2270,3 +2270,87 @@ def test_coupling_window_length_counts_local_days(conn, monkeypatch):
     assert first_local == datetime(2026, 9, 18).date()
     assert got["days"] == 31                       # the UTC date made it 32
     assert got["tz"] == CRAWL_CFG.timezone
+
+
+# --- filter reminder by calendar months ---------------------------------------
+
+def _filter_cfg(hours, months):
+    # Pin the zone: CFG may be an operator's config.json.
+    return dataclasses.replace(CFG, filter_reminder_hours=hours, filter_reminder_months=months,
+                               timezone="America/Los_Angeles")
+
+
+def _utc(y, m, d, h=12):
+    return datetime(y, m, d, h, tzinfo=timezone.utc)
+
+
+def test_add_months_clamps_to_the_month_end():
+    from datetime import date
+    assert api._add_months(date(2026, 8, 31), 6) == date(2027, 2, 28)
+    assert api._add_months(date(2026, 6, 26), 6) == date(2026, 12, 26)
+    assert api._add_months(date(2027, 8, 31), 6) == date(2028, 2, 29)
+
+
+def test_months_clock_uses_the_local_date_of_the_change(conn):
+    # 03:00 UTC on Jun 27 is the evening of Jun 26 in Los Angeles.
+    db.record_filter_change(conn, "dev1", changed_at=_utc(2026, 6, 27, 3))
+    st = api.filter_status(conn, "dev1", _filter_cfg(None, 6), rows_all=[],
+                           now=_utc(2026, 9, 22))
+    assert st["due_on"] == "2026-12-26"
+
+
+def test_filter_is_due_on_the_change_by_date_not_the_day_before(conn):
+    db.record_filter_change(conn, "dev1", changed_at=_utc(2026, 6, 26, 19))
+    cfg = _filter_cfg(None, 6)
+    before = api.filter_status(conn, "dev1", cfg, rows_all=[], now=_utc(2026, 12, 25, 20))
+    on = api.filter_status(conn, "dev1", cfg, rows_all=[], now=_utc(2026, 12, 26, 20))
+    assert before["due"] is False and before["pct"] == 99
+    assert on["due"] is True and on["pct"] == 100
+    assert on["due_reason"] == "6 months since the last change"
+
+
+def test_long_intervals_never_read_100_percent_before_due(conn):
+    db.record_filter_change(conn, "dev1", changed_at=_utc(2026, 1, 10, 20))
+    st = api.filter_status(conn, "dev1", _filter_cfg(None, 12), rows_all=[],
+                           now=_utc(2027, 1, 9, 20))
+    assert st["due"] is False and st["pct"] == 99
+
+
+def test_filter_due_when_either_limit_is_reached(conn):
+    changed = _utc(2026, 3, 1)
+    db.record_filter_change(conn, "dev1", changed_at=changed)
+    rows = [{"ts": changed + timedelta(minutes=10 * i), "equipment_status": "cooling"}
+            for i in range(7)]                                  # one hour of cooling
+    soon = _utc(2026, 3, 2)
+    hours_hit = api.filter_status(conn, "dev1", _filter_cfg(1.0, 6), rows_all=rows, now=soon)
+    assert hours_hit["due"] and hours_hit["due_reason"] == "1 blower hours"
+    assert not api.filter_status(conn, "dev1", _filter_cfg(1000.0, 6), rows_all=rows, now=soon)["due"]
+    months_hit = api.filter_status(conn, "dev1", _filter_cfg(1000.0, 6), rows_all=rows,
+                                   now=_utc(2026, 9, 2))
+    assert months_hit["due"] and months_hit["due_reason"] == "6 months since the last change"
+
+
+def test_months_only_with_no_logged_change_starts_at_the_first_reading(conn):
+    first = _utc(2026, 1, 5)
+    rows = [{"ts": first, "equipment_status": "idle"}]
+    st = api.filter_status(conn, "dev1", _filter_cfg(None, 6), rows_all=rows,
+                           now=_utc(2026, 8, 1))
+    assert st["start_estimated"] is True and st["due"] is True
+    assert st["due_on"] == "2026-07-05"
+
+
+def test_months_only_with_no_data_at_all_is_unknown_not_zero(conn):
+    st = api.filter_status(conn, "dev1", _filter_cfg(None, 6), rows_all=[])
+    assert st["pct"] is None and st["due"] is False and st["due_on"] is None
+
+
+def test_filter_push_names_the_limit_reached():
+    from house_climate.web import alerts
+    now = datetime.now(timezone.utc)
+    row = {"ts": now, "indoor_temp_f": 70, "indoor_humidity": 40, "heat_setpoint_f": 68,
+           "cool_setpoint_f": 76, "equipment_status": "idle", "mode": "auto",
+           "wx_outdoor_temp_f": 60, "wx_alert_count": 0, "weather_ok": True}
+    out = {a.key: a for a in alerts.evaluate([row], CFG, 0, now,
+                                             filter_due="6 months since the last change")}
+    assert "6 months since the last change" in out["filter_due"].message
+    assert "filter_due" not in {a.key for a in alerts.evaluate([row], CFG, 0, now, filter_due=False)}

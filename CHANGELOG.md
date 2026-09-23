@@ -10,6 +10,20 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+### Added
+- `filter_reminder_months`: the filter can be due by calendar months since the
+  last change, as media-cabinet filters are rated, instead of (or as well as)
+  blower hours. Due when any configured limit is reached; the Health card
+  shows the change-by date. `filter_reminder_hours: null` turns the hours
+  limit off.
+
+### Changed
+- `filter_reminder_hours` must now be a real positive number (or `null`); a
+  quoted string, NaN or Infinity is refused at startup instead of loading.
+- The filter-due push names the limit reached ("6 months since the last
+  change" or "300 blower hours"), and filter life never reads 100% until the
+  filter is actually due.
+
 ## [1.2.0] — 2026-09-22
 
 ### Added

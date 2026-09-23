@@ -343,3 +343,32 @@ def test_poll_interval_beyond_the_gap_cap_fails_loud(tmp_path, poll):
 
 def test_poll_interval_at_the_cap_loads(tmp_path):
     assert _fixture_cfg(tmp_path, lambda d: d.update({"poll_interval_s": 600})).poll_interval_s == 600
+
+
+@pytest.mark.parametrize("over,msg", [
+    ({"filter_reminder_hours": None, "filter_reminder_months": None}, "needs a filter reminder"),
+    ({"filter_reminder_months": 0}, "filter_reminder_months"),
+    ({"filter_reminder_months": 6.0}, "filter_reminder_months"),
+    ({"filter_reminder_months": 6.5}, "filter_reminder_months"),
+    ({"filter_reminder_months": True}, "filter_reminder_months"),
+    ({"filter_reminder_hours": -5}, "filter_reminder_hours"),
+    ({"filter_reminder_hours": "300"}, "filter_reminder_hours"),
+    ({"filter_reminder_hours": float("nan")}, "filter_reminder_hours"),
+    ({"filter_reminder_hours": float("inf")}, "filter_reminder_hours"),
+])
+def test_filter_reminder_config_is_validated(tmp_path, over, msg):
+    import json
+    from conftest import CFG_PATH
+    d = json.load(open(CFG_PATH)); d.update(over)
+    p = tmp_path / "c.json"; p.write_text(json.dumps(d))
+    with pytest.raises(ValueError, match=msg):
+        load_config(str(p))
+
+
+def test_filter_reminder_months_only_loads(tmp_path):
+    import json
+    from conftest import CFG_PATH
+    d = json.load(open(CFG_PATH)); d.update(filter_reminder_hours=None, filter_reminder_months=6)
+    p = tmp_path / "c.json"; p.write_text(json.dumps(d))
+    c = load_config(str(p))
+    assert c.filter_reminder_hours is None and c.filter_reminder_months == 6
