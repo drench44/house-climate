@@ -1,4 +1,6 @@
-FROM python:3.12-slim
+# Exact tag, bumped on purpose: python:3.12-slim moves with every Python
+# patch and Debian point release, so two builds of one commit could differ.
+FROM python:3.12.14-slim-trixie
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
