@@ -616,8 +616,8 @@ def make_sink(cfg, env=None):
 def pushable(fired, cfg):
     """The alerts that should leave the box. Keys in alerts.push_suppress are
     still evaluated and still shown on the wall (/api/anomalies), just never
-    pushed, because another system (for example Home Assistant) already sends
-    them and a second buzz for the same event is noise."""
+    pushed: either another system (for example Home Assistant) already sends
+    them, or the owner just does not want that alert on the phone."""
     suppress = set(cfg.alerts.get("push_suppress") or ())
     return [al for al in fired if al.key not in suppress]
 
