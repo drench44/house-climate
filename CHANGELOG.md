@@ -37,6 +37,8 @@ rolls that section to a dated version via `python scripts/release.py`.
   database is deliberately left without a limit (the comment on `db` says
   why). Both Dockerfiles pin `python:3.12.14-slim-trixie` instead of the
   moving `python:3.12-slim`. `tests/test_compose.py` pins all of it.
+- `pushable()`'s docstring: `alerts.push_suppress` is also for alerts the
+  owner just does not want on the phone, not only ones another system sends.
 
 ## [1.3.0] — 2026-09-22
 
