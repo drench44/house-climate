@@ -2,34 +2,41 @@
 
 Open-core home-climate dashboard: FastAPI + Postgres (TimescaleDB) engine,
 vanilla-JS wall, optional Home Assistant integration. This is the **public
-engine** repo — keep house-specific data (real utility rates, HA entity IDs,
+engine** repo; keep house-specific data (real utility rates, HA entity IDs,
 coordinates, LAN IPs, ntfy topics) OUT of it; those live in a private overlay.
 `tests/test_no_house_data.py` guards this.
 
-## Code review before merge — required
+## Code review before merge: required, scaled to risk
 
 Any substantive change in this repo goes through review BEFORE it merges (or
-opens as a PR). Run all three review agents on the branch diff and address real
-findings:
+opens as a PR). Pick the band by what the diff touches, run those agents on the
+branch diff, address real findings, and state the band in the PR body:
 
-- `pr-review-toolkit:silent-failure-hunter` — swallowed errors, weak fallbacks,
+- **0 agents:** docs, comments, config text (`*.md` and the like).
+- **1 agent** (`code-reviewer`): ordinary code.
+- **All 3:** anything that could ship a wrong result to a user, damage data,
+  touch money or credentials, or reach hardware (the Daikin poller, alerts,
+  the readings and advice the dashboard shows, the database).
+
+The three agents:
+
+- `pr-review-toolkit:silent-failure-hunter`: swallowed errors, weak fallbacks,
   silent wrong-but-reassuring outcomes
-- `pr-review-toolkit:code-reviewer` — guideline/style/best-practice adherence,
+- `pr-review-toolkit:code-reviewer`: guideline/style/best-practice adherence,
   dead code, public-repo leaks
-- `pr-review-toolkit:pr-test-analyzer` — test-coverage quality; flag tests that
-  skip silently in CI (this repo's DB tests need a real Postgres — a bare pytest
+- `pr-review-toolkit:pr-test-analyzer`: test-coverage quality; flag tests that
+  skip silently in CI (this repo's DB tests need a real Postgres; a bare pytest
   run silently skips them) or assert nothing
 
 Also do a per-change review, and a whole-branch review for multi-task work.
 Verify tests genuinely RUN (real DB/services, not silently skipped). This is the
-default gate — it should happen without being asked. Docs-only changes
-(`*.md`, comments) are exempt.
+default gate: it should happen without being asked.
 
-## Versioning & changelog — required
+## Versioning & changelog: required
 
 Any PR that changes app code under `src/` must add a bullet under `##
 [Unreleased]` in `CHANGELOG.md` (`### Added/Changed/Fixed`). Docs-only (`*.md`)
-and test-only (`tests/`) diffs are exempt — the same carve-out as the review
+and test-only (`tests/`) diffs are exempt, the same carve-out as the review
 gate. This is enforced by the CI `changelog-guard` job and the local
 `.githooks/pre-commit` hook. Releases are cut with `python scripts/release.py
 {major|minor|patch}` (never hand-edit `VERSION` or the `?v=` asset stamps). See
@@ -37,7 +44,7 @@ gate. This is enforced by the CI `changelog-guard` job and the local
 
 ## After cloning
 
-After cloning, run `scripts/install-hooks.sh` — installs the pre-push
+After cloning, run `scripts/install-hooks.sh`; it installs the pre-push
 privacy guard AND the pre-commit changelog guard (both via
 `core.hooksPath=.githooks`; the privacy guard is inert without the operator's
 private scanner).
