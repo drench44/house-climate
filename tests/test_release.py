@@ -286,11 +286,11 @@ def test_main_reports_honestly_when_the_restore_also_fails(tmp_path, monkeypatch
 
 def test_release_commit_matches_the_ci_policy_main_allowlist(tmp_path, monkeypatch):
     """The release commit is the one commit that reaches main without a PR.
-    drench44/ci-policy's main-watch lets it through only because its allowlist
+    drench44/ci-shared's main-watch lets it through only because its allowlist
     (policy/main-allowlist.json, read at the SHA .github/workflows/main-watch.yml
     pins) accepts exactly this subject and file set. A release that writes any
     other file, or another subject, opens a main-watch issue on every release.
-    If this test has to change, change that allowlist rule (a ci-policy PR) and
+    If this test has to change, change that allowlist rule (a ci-shared PR) and
     bump the pinned SHA here in the same breath."""
     repo = _release_repo(tmp_path, monkeypatch)
     assert release.main(["minor"]) == 0

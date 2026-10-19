@@ -19,7 +19,7 @@ if [ -n "$operator_raw" ] && [ "$operator" != "true" ] && [ "$operator" != "fals
 fi
 [ "$operator" = "true" ] || exit 0
 
-SCANNER="$HOME/Documents/garage/privacy/scan-repo.sh"
+SCANNER="$HOME/.config/privacy/scan-repo.sh"
 if [ ! -x "$SCANNER" ]; then
   echo "pre-push: guard.operator is set but the scanner is missing at $SCANNER" >&2
   echo "pre-push: refusing to push (fail closed) — restore the private checkout" >&2

@@ -128,7 +128,7 @@ def test_operator_mode_is_set_only_with_the_private_scanner(repo):
     git, run, _ = repo
     run()
     assert local(git, "guard.operator") == ""
-    scanner = run.home / "Documents" / "garage" / "privacy" / "scan-repo.sh"
+    scanner = run.home / ".config" / "privacy" / "scan-repo.sh"
     scanner.parent.mkdir(parents=True)
     scanner.write_text("#!/bin/sh\nexit 0\n")
     scanner.chmod(0o755)
