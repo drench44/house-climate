@@ -14,7 +14,7 @@ file carries ZERO house-specific literals. It asserts only:
 
 House-SPECIFIC detection (the actual subnets, hostnames, family names,
 camera slugs, operator handles) lives ONLY in the private scanner's
-denylist at garage/privacy/ and is enforced by the operator-side pre-push
+denylist in the private deploy overlay and is enforced by the operator-side pre-push
 hook. That denylist is itself house data and can never live in a public
 repo — which is the whole reason it is kept separate from this file.
 """

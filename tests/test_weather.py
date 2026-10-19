@@ -120,7 +120,7 @@ def test_fetch_fallback_both_unreachable_returns_null():
 
 
 # --- rainSource: only a real gauge reading may become the authoritative daily
-# total. The weather-dashboard feed sends rainSource "gauge" when rainToday is
+# total. The weather service feed sends rainSource "gauge" when rainToday is
 # the gauge's own running total, and "partial"/"model" when rainToday is a
 # forecast-model number (the gauge leg is down or only covers other fields).
 

@@ -1,4 +1,4 @@
-"""Pins the drench44/ci-policy callers (.github/workflows/pr-policy.yml and
+"""Pins the drench44/ci-shared callers (.github/workflows/pr-policy.yml and
 main-watch.yml, added 2026-09-23).
 
 This repo is PUBLIC, so the callers must run on a GitHub-hosted runner: a
@@ -27,9 +27,9 @@ def test_caller_is_pinned_and_runs_on_a_github_hosted_runner(name):
     text = _code(name)
     uses = re.findall(r"^\s+uses:\s*(\S+)", text, re.M)
     assert len(uses) == 1, uses
-    m = re.fullmatch(r"drench44/ci-policy/\.github/workflows/([\w.-]+)@([0-9a-f]{40})", uses[0])
+    m = re.fullmatch(r"drench44/ci-shared/\.github/workflows/([\w.-]+)@([0-9a-f]{40})", uses[0])
     assert m and m.group(1) == name, uses[0]
-    assert re.search(r"^ {4}uses: drench44/ci-policy/", text, re.M)
+    assert re.search(r"^ {4}uses: drench44/ci-shared/", text, re.M)
     assert re.search(r"^ {4}with:\s*$", text, re.M)
     assert re.findall(r"^\s+ci-policy-ref:\s*(\S+)\s*$", text, re.M) == [m.group(2)]
     assert re.findall(r"^ {6}ci-policy-ref:\s*(\S+)\s*$", text, re.M) == [m.group(2)]
@@ -58,7 +58,7 @@ CI_POLICY_HEAD = {
     ),
     "main-watch.yml": (
         "name: main-watch\non:\n  push:\n    branches: [main]\n"
-        # 2026-09-23 (ci-policy PR #2): the hourly schedule re-checks commits
+        # 2026-09-23 (ci-shared PR #2): the hourly schedule re-checks commits
         # whose PR checks were still running at merge; statuses: write marks
         # every judged commit for the out-of-band audit; actions: read lets it
         # tell workflows apart. The called workflow asks for exactly these, and
@@ -79,10 +79,13 @@ def test_ci_policy_caller_is_exactly_the_shared_shape(name):
     assert sha, text
     want = (
         CI_POLICY_HEAD[name]
-        + f"    uses: drench44/ci-policy/.github/workflows/{name}@{sha.group(1)}\n"
+        + f"    uses: drench44/ci-shared/.github/workflows/{name}@{sha.group(1)}\n"
         + f"    with:\n      ci-policy-ref: {sha.group(1)}\n      runs-on: {CI_POLICY_RUNNER}\n"
     )
     assert text == want
+
+
+CI_SHARED_PIN = "dcaa8bd208ec44614eac90700cbe14a10052301c"
 
 
 def test_ci_policy_callers_pin_the_same_commit():
@@ -90,3 +93,4 @@ def test_ci_policy_callers_pin_the_same_commit():
     in its SHA alone would pass every other test and only break after merge."""
     shas = {n: set(re.findall(r"@([0-9a-f]{40})\b", ((WORKFLOWS) / n).read_text())) for n in ("pr-policy.yml", "main-watch.yml")}
     assert all(len(s) == 1 for s in shas.values()) and shas["pr-policy.yml"] == shas["main-watch.yml"], shas
+    assert shas["pr-policy.yml"] == {CI_SHARED_PIN}, shas

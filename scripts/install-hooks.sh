@@ -6,7 +6,7 @@
 # Two setups run this repo's .githooks:
 #   - plain: core.hooksPath=.githooks (the default for any clone).
 #   - chained: when the machine has the ci-policy global git hooks
-#     (github.com/drench44/ci-policy) installed as its global core.hooksPath,
+#     (github.com/drench44/ci-shared) installed as its global core.hooksPath,
 #     those run first and hand off to .githooks via ci-policy.chainHooksPath.
 #     Setting core.hooksPath=.githooks here would bypass them, so in that case
 #     this chains instead.
@@ -41,9 +41,9 @@ else
 fi
 # .githooks/pre-commit (the changelog guard) is now active for everyone; the
 # pre-push privacy guard only does work in operator mode.
-if [ -x "$HOME/Documents/garage/privacy/scan-repo.sh" ]; then
+if [ -n "${PRIVACY_SCANNER:-}" ] && [ -x "$PRIVACY_SCANNER" ]; then
   git config guard.operator true
   echo "installed: $how, guard.operator=true (operator mode: pushes are scanned)"
 else
-  echo "installed: $how (inert: private scanner not present on this machine)"
+  echo "installed: $how (inert: PRIVACY_SCANNER not set to a runnable scanner)"
 fi

@@ -165,7 +165,7 @@ def health_full():
     """Does house-climate WORK? The new poller ticking (its heartbeat carries
     its commit), readings it wrote since it started, the alert loop in this
     process running, the settings present, the shipped config baked in. See
-    deep_health.py. The deploy gate (homelab-deploy, in the garage overlay)
+    deep_health.py. The deploy gate (homelab-deploy, in the private deploy overlay)
     reads it. Always 200: a report, not a liveness probe."""
     now = datetime.now(timezone.utc)
     engine_commit = (BUILD_INFO or {}).get("engine_commit")

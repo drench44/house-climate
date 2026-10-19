@@ -16,6 +16,11 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+### Changed
+- Shared CI workflows now come from drench44/ci-shared, and comments and docs no
+  longer name private repositories. The optional operator push scanner is now
+  named by the `PRIVACY_SCANNER` environment variable, with no default path.
+
 ### Added
 - `GET /health/full`: a report of whether the stack actually works, for
   deploy gates and people. The poller's heartbeat now carries its commit and
