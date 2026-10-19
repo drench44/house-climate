@@ -2,7 +2,7 @@
 # Pre-push privacy guard (generic shim — contains no private data).
 #
 # For the repo operator (git config guard.operator true), every push is
-# scanned by a private house-data/secret scanner before anything leaves
+# scanned by the scanner named in $PRIVACY_SCANNER before anything leaves
 # the machine; the push is BLOCKED on findings or if the scanner cannot
 # run (fail closed). For everyone else this hook is inert — and without
 # `git config core.hooksPath .githooks` it never runs at all.
@@ -19,10 +19,14 @@ if [ -n "$operator_raw" ] && [ "$operator" != "true" ] && [ "$operator" != "fals
 fi
 [ "$operator" = "true" ] || exit 0
 
-SCANNER="$HOME/.config/privacy/scan-repo.sh"
+# The scanner is optional and has no default: point PRIVACY_SCANNER at an
+# executable to use one. Unset, this hook is inert (the global hooks do the
+# leak check). Set but not runnable, the push is refused (fail closed).
+SCANNER="${PRIVACY_SCANNER:-}"
+[ -n "$SCANNER" ] || exit 0
 if [ ! -x "$SCANNER" ]; then
-  echo "pre-push: guard.operator is set but the scanner is missing at $SCANNER" >&2
-  echo "pre-push: refusing to push (fail closed) — restore the private checkout" >&2
+  echo "pre-push: PRIVACY_SCANNER is set but the scanner is missing at $SCANNER" >&2
+  echo "pre-push: refusing to push (fail closed). Fix the path" >&2
   echo "pre-push: or, if this machine truly should not scan: git config --unset guard.operator" >&2
   exit 1
 fi

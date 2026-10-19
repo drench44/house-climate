@@ -132,6 +132,7 @@ def test_operator_mode_is_set_only_with_the_private_scanner(repo):
     scanner.parent.mkdir(parents=True)
     scanner.write_text("#!/bin/sh\nexit 0\n")
     scanner.chmod(0o755)
+    run.env["PRIVACY_SCANNER"] = str(scanner)
     out = run().stdout
     assert local(git, "guard.operator") == "true"
     assert "operator mode" in out

@@ -41,9 +41,9 @@ else
 fi
 # .githooks/pre-commit (the changelog guard) is now active for everyone; the
 # pre-push privacy guard only does work in operator mode.
-if [ -x "$HOME/.config/privacy/scan-repo.sh" ]; then
+if [ -n "${PRIVACY_SCANNER:-}" ] && [ -x "$PRIVACY_SCANNER" ]; then
   git config guard.operator true
   echo "installed: $how, guard.operator=true (operator mode: pushes are scanned)"
 else
-  echo "installed: $how (inert: private scanner not present on this machine)"
+  echo "installed: $how (inert: PRIVACY_SCANNER not set to a runnable scanner)"
 fi

@@ -18,8 +18,8 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ### Changed
 - Shared CI workflows now come from drench44/ci-shared, and comments and docs no
-  longer name private repositories. The operator push scanner is looked up at
-  `~/.config/privacy/scan-repo.sh`.
+  longer name private repositories. The optional operator push scanner is now
+  named by the `PRIVACY_SCANNER` environment variable, with no default path.
 
 ### Added
 - `GET /health/full`: a report of whether the stack actually works, for
