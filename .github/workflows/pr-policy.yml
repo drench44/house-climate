@@ -1,4 +1,4 @@
-# Shared PR policy from drench44/ci-policy (see its README): the PR body must
+# Shared PR policy from drench44/ci-shared (see its README): the PR body must
 # state the review band, a PR that fixes a regression must add or change a
 # test, and the diff has a size limit (warn over 800 changed lines, fail over
 # 2,500 without a size-override).
@@ -13,13 +13,11 @@ permissions:
   pull-requests: read
 jobs:
   policy:
-    # Pinned to a commit, not @main, so a change to ci-policy reaches this repo
-    # only through a PR here. 2c990d5 is ci-policy PR #2; pr-policy only had its
-    # checkout action pinned there; it stays on the same commit as main-watch.yml.
-    # ci-policy-ref must name the same commit: it picks the policy code the
-    # job checks out and runs.
-    uses: drench44/ci-policy/.github/workflows/pr-policy.yml@2c990d56f10ceb29fda3a0da1010fb96f53e0cb8 # main @ 2c990d5
+    # Pinned to a commit, not @main, so a change to ci-shared reaches this repo
+    # only through a PR here. ci-policy-ref must name the same commit: it picks
+    # the policy code the job checks out and runs.
+    uses: drench44/ci-shared/.github/workflows/pr-policy.yml@dcaa8bd208ec44614eac90700cbe14a10052301c # main @ dcaa8bd
     with:
-      ci-policy-ref: 2c990d56f10ceb29fda3a0da1010fb96f53e0cb8
+      ci-policy-ref: dcaa8bd208ec44614eac90700cbe14a10052301c
       # Public repo: GitHub-hosted runner (free for public repos).
       runs-on: '"ubuntu-latest"'

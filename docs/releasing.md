@@ -42,14 +42,14 @@ a GitHub Release whose notes are that version's changelog section
 
 The release commit is the only commit that reaches `main` without a pull
 request. Two shared checks from
-[drench44/ci-policy](https://github.com/drench44/ci-policy) run here:
+[drench44/ci-shared](https://github.com/drench44/ci-shared) run here:
 `pr-policy` on every PR (the body states which review band ran, a PR that says
 it fixes a regression changes a test, and a size limit), and `main-watch` on
 every push to `main`, which opens an issue labeled `main-watch` for any commit
 that did not come through a merged PR with green checks. It needs every check
 on the PR head green, waits (an hourly scheduled run re-checks, up to 3 hours)
 for checks still running when the PR was merged, and marks each commit it
-judges with a `ci-policy/main-watch` status that ci-policy's hosted audit
+judges with a `ci-policy/main-watch` status that the hosted audit
 reads to notice a main-watch that never ran. Its allowlist accepts
 exactly `release: vX.Y.Z` commits that touch only `VERSION`, `CHANGELOG.md` and
 `src/house_climate/web/static/*.html`, which is what `release.py` writes.
