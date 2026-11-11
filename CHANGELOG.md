@@ -16,6 +16,8 @@ rolls that section to a dated version via `python scripts/release.py`.
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-11-11
+
 ### Changed
 - Shared CI workflows now come from drench44/ci-shared, and comments and docs no
   longer name private repositories. The optional operator push scanner is now
