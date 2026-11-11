@@ -217,6 +217,13 @@ channel numbers to room names. Everything sensor-driven on the dashboard
 (rooms panel, humidity/moisture analytics, sensor-vs-thermostat deltas)
 lights up automatically.
 
+The poller also stores, with no extra config, the gateway's own built-in
+sensor as `ecowitt_gateway` in `sensor_readings` (its room's temperature and
+humidity, plus absolute and relative barometric pressure in inHg under
+`extra`), and each sensor's radio strength in dBm (`extra.rssi`) beside the
+0 to 4 signal bars. These are recorded for analysis; the dashboard does not
+show them yet.
+
 ## Optional: weather
 
 Point `weather_url` at anything serving a `wx.json` snapshot (outdoor temp,

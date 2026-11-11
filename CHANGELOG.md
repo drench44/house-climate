@@ -22,6 +22,15 @@ rolls that section to a dated version via `python scripts/release.py`.
   named by the `PRIVACY_SCANNER` environment variable, with no default path.
 
 ### Added
+- The poller now stores the Ecowitt gateway's own built-in sensor on every
+  tick as sensor `ecowitt_gateway`: the temperature and humidity where the
+  gateway sits, and barometric pressure (absolute and relative, in inHg, in
+  `extra`), which nothing recorded before. It needs no config and is not
+  shown on the dashboard yet. A pressure value in a unit the poller does not
+  know, or one no barometer can read, is logged as an `ecowitt_gateway` poll
+  error and never costs the room readings.
+- Each room sensor reading now also stores the radio strength in dBm
+  (`extra.rssi`) beside the 0 to 4 signal bars, when the gateway reports it.
 - `GET /health/full`: a report of whether the stack actually works, for
   deploy gates and people. The poller's heartbeat now carries its commit and
   start time; the report requires the running poller to be the one ticking,

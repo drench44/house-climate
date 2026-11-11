@@ -5,6 +5,7 @@ cloud, no WS View app. The gateway is deliberately blocked from the internet
 (Firewalla), so this is the only path the sensor data takes. WH31 room sensors
 appear under `ch_aisle`, keyed by their channel switch (1-8).
 """
+import math
 import re
 import requests
 
@@ -60,25 +61,106 @@ def fetch_sensors_info(gateway_url, timeout=6) -> list:
     return out
 
 
-def signal_by_sensor_id(sensors_info: list) -> dict:
-    """Map our sensor_id -> radio signal (0-4 bars) for the registered WH31
-    channels and the outdoor WH32. Sensors not actively reporting (signal '--')
-    are skipped so a phantom registration doesn't override a live one."""
+def _radio_field_by_sensor_id(sensors_info: list, field: str) -> dict:
+    """Map our sensor_id -> one numeric field of the gateway's per-sensor
+    detail, for the registered WH31 channels and the outdoor WH32. A sensor
+    whose field is not a number (a registration that is not reporting shows
+    '--') is skipped, so a phantom registration doesn't override a live one."""
     out = {}
     for s in sensors_info:
         if str(s.get("id")) in ("None", "FFFFFFFF", "00000000"):
             continue
-        sig = _num(s.get("signal"))
-        if sig is None:
-            continue
+        val = _num(s.get(field))
+        if val is None or not math.isfinite(val):
+            continue   # 'nan'/'inf' parse as floats; int() of one would raise
+                       # and cost the whole tick's room readings
+        val = round(val)
         img = str(s.get("img", "")).lower()
         if img == "wh31":
             m = re.search(r"CH(\d+)", str(s.get("name", "")))
             if m:
-                out[f"ecowitt_ch{m.group(1)}"] = int(sig)
+                out[f"ecowitt_ch{m.group(1)}"] = val
         elif img in ("wh26", "wh32"):
-            out["ecowitt_outdoor"] = int(sig)
+            out["ecowitt_outdoor"] = val
     return out
+
+
+def signal_by_sensor_id(sensors_info: list) -> dict:
+    """Map our sensor_id -> radio signal (0-4 bars), the gateway's coarse
+    reading; see rssi_by_sensor_id for the finer one."""
+    return _radio_field_by_sensor_id(sensors_info, "signal")
+
+
+def rssi_by_sensor_id(sensors_info: list) -> dict:
+    """Map our sensor_id -> received signal strength in dBm (negative; closer
+    to zero is stronger). Finer than the 0-4 bars, which sit at 4 for a wide
+    range of strengths. A gateway that does not report it leaves those
+    sensors absent from the result."""
+    return _radio_field_by_sensor_id(sensors_info, "rssi")
+
+
+# Pressure arrives as one string, number and unit together ("29.67 inHg"),
+# in whichever unit the gateway is set to display.
+_INHG_PER_UNIT = {
+    "INHG": 1.0,
+    "HPA": 0.0295299830714,
+    "MB": 0.0295299830714,
+    "MBAR": 0.0295299830714,
+    "KPA": 0.295299830714,
+    "MMHG": 0.0393700787402,
+}
+_PRESSURE_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*([A-Za-z]+)\s*$")
+
+
+# Lowest and highest pressure a working barometer can report anywhere people
+# live: about 15 inHg is station pressure near 18,000 ft, and the sea-level
+# record high is under 32.1 inHg.
+_PRESSURE_MIN_INHG = 15.0
+_PRESSURE_MAX_INHG = 33.0
+
+
+def _pressure_inhg(v):
+    """Parse a gateway pressure like '29.67 inHg' or '1004.7 hPa' and return
+    inches of mercury. None when the field is absent, blank, or the gateway's
+    own no-reading mark ('--'). Anything else that does not read as a number
+    with a known unit raises: a bare 29.67 and a bare 1004.7 cannot be told
+    apart safely, and a guessed scale would store a wrong barometer that
+    looks fine. A parsed value no barometer can read (a dead sensor's
+    '0.00 inHg') raises too, for the same reason."""
+    if v is None or str(v).strip().strip("-") == "":
+        return None
+    m = _PRESSURE_RE.match(str(v))
+    factor = _INHG_PER_UNIT.get(m.group(2).upper()) if m else None
+    if factor is None:
+        raise ValueError(f"unsupported Ecowitt pressure value {v!r}")
+    inhg = float(m.group(1)) * factor
+    if not _PRESSURE_MIN_INHG <= inhg <= _PRESSURE_MAX_INHG:
+        raise ValueError(f"implausible Ecowitt pressure {v!r}")
+    return inhg
+
+
+GATEWAY_SENSOR_ID = "ecowitt_gateway"
+
+
+def parse_gateway(data: dict):
+    """Extract the gateway's own built-in sensor (the `wh25` block): the
+    temperature and humidity where the gateway sits, and barometric pressure,
+    absolute (station) and relative (sea-level adjusted, per the gateway's
+    own offset setting). This is the only barometer in the system. Returns a
+    reading dict, or None when the gateway reports no such block (some models
+    have no built-in sensor)."""
+    blocks = data.get("wh25") or []
+    if not blocks:
+        return None
+    b = blocks[0]
+    temp = _temp_f(b.get("intemp"), b.get("unit"))
+    hum = _num(b.get("inhumi"))
+    abs_p = _pressure_inhg(b.get("abs"))
+    rel_p = _pressure_inhg(b.get("rel"))
+    if temp is None and hum is None and abs_p is None and rel_p is None:
+        return None
+    return {"sensor_id": GATEWAY_SENSOR_ID, "temp_f": temp, "humidity": hum,
+            "abs_pressure_inhg": abs_p, "rel_pressure_inhg": rel_p}
 
 
 # The single outdoor T&H sensor (WH32) reports in `common_list`, keyed by
