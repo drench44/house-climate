@@ -110,18 +110,39 @@ def poll_ecowitt(conn, cfg) -> str:
             o = ecowitt.parse_outdoor(data, outdoor_name)
             if o:
                 rows.append(o)
-        signals = ecowitt.signal_by_sensor_id(ecowitt.fetch_sensors_info(ec["gateway_url"]))
+        sensors_info = ecowitt.fetch_sensors_info(ec["gateway_url"])
+        signals = ecowitt.signal_by_sensor_id(sensors_info)
+        rssis = ecowitt.rssi_by_sensor_id(sensors_info)
         for s in rows:
-            sig = signals.get(s["sensor_id"])
+            extra = {k: v for k, v in (("signal", signals.get(s["sensor_id"])),
+                                       ("rssi", rssis.get(s["sensor_id"])))
+                     if v is not None}
             db.insert_sensor_reading(conn, s["sensor_id"], now,
                                      temp_f=s["temp_f"], humidity=s["humidity"],
                                      battery=1.0 if s["battery_low"] else 0.0,
-                                     extra={"signal": sig} if sig is not None else None,
+                                     extra=extra or None,
                                      dewpoint_f=humidity_an.dew_point_f(s["temp_f"], s["humidity"]))
+        # The gateway's own built-in sensor (its room's temperature and
+        # humidity, and the only barometer in the system). Stored after the
+        # room sensors and under its own guard: a pressure string in a unit
+        # we do not know must be recorded as an error, but must not cost the
+        # room readings already taken on this tick.
+        try:
+            g = ecowitt.parse_gateway(data)
+            if g:
+                pressure = {k: g[k] for k in ("abs_pressure_inhg", "rel_pressure_inhg")
+                            if g[k] is not None}
+                db.insert_sensor_reading(conn, g["sensor_id"], now,
+                                         temp_f=g["temp_f"], humidity=g["humidity"],
+                                         extra=pressure or None,
+                                         dewpoint_f=humidity_an.dew_point_f(g["temp_f"], g["humidity"]))
+        except Exception as e:
+            log.warning("ecowitt gateway sensor not stored", exc_info=True)
+            db.record_error(conn, "ecowitt", "ecowitt_gateway", str(e))
     except Exception as e:
         db.record_error(conn, "ecowitt", "ecowitt_fetch", str(e))
         return "ecowitt_error"
-    return f"ecowitt_ok({len(rows)})"
+    return f"ecowitt_ok({len(rows)})"   # configured room sensors; the gateway row is not counted
 
 
 # ---------------------------------------------------------------------------

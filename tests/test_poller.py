@@ -155,6 +155,115 @@ def test_poll_ecowitt_success_inserts_and_returns_count(monkeypatch):
     assert kw["dewpoint_f"] is not None           # dewpoint computed
 
 
+def _patch_one_room(monkeypatch, livedata, inserted, recorded, sensors_info=()):
+    monkeypatch.setattr(poller.ecowitt, "fetch_livedata", lambda url: livedata)
+    monkeypatch.setattr(poller.ecowitt, "fetch_sensors_info", lambda url: list(sensors_info))
+    monkeypatch.setattr(poller.db, "insert_sensor_reading",
+                        lambda c, sid, ts, **k: inserted.append((sid, k)))
+    monkeypatch.setattr(poller.db, "record_error",
+                        lambda c, dev, kind, detail: recorded.append((kind, detail)))
+
+
+_ROOM = {"channel": "1", "battery": "0", "temp": "60.0", "unit": "F", "humidity": "80%"}
+
+
+def _cfg_ch1():
+    return SimpleNamespace(ecowitt={"enabled": True, "gateway_url": "http://gw",
+                                    "channels": {"1": "Room"}})
+
+
+def test_poll_ecowitt_stores_rssi_beside_signal(monkeypatch):
+    inserted, recorded = [], []
+    info = [{"img": "wh31", "name": "Temp & Humidity CH1", "id": "EB",
+             "rssi": "-54", "signal": "4"}]
+    _patch_one_room(monkeypatch, {"ch_aisle": [_ROOM]}, inserted, recorded, info)
+    assert poller.poll_ecowitt(None, _cfg_ch1()) == "ecowitt_ok(1)"
+    assert inserted[0][0] == "ecowitt_ch1"
+    assert inserted[0][1]["extra"] == {"signal": 4, "rssi": -54}
+    assert recorded == []
+
+
+def test_poll_ecowitt_extra_is_null_without_radio_detail(monkeypatch):
+    inserted, recorded = [], []
+    _patch_one_room(monkeypatch, {"ch_aisle": [_ROOM]}, inserted, recorded)
+    assert poller.poll_ecowitt(None, _cfg_ch1()) == "ecowitt_ok(1)"
+    assert inserted[0][1]["extra"] is None
+
+
+def test_poll_ecowitt_stores_gateway_sensor_with_pressure(monkeypatch):
+    inserted, recorded = [], []
+    live = {"ch_aisle": [_ROOM],
+            "wh25": [{"intemp": "72.1", "unit": "F", "inhumi": "50%",
+                      "abs": "29.67 inHg", "rel": "29.71 inHg"}]}
+    _patch_one_room(monkeypatch, live, inserted, recorded)
+    # The count stays the configured room sensors; the gateway rides along.
+    assert poller.poll_ecowitt(None, _cfg_ch1()) == "ecowitt_ok(1)"
+    assert [sid for sid, _ in inserted] == ["ecowitt_ch1", "ecowitt_gateway"]
+    kw = inserted[1][1]
+    assert (kw["temp_f"], kw["humidity"]) == (72.1, 50.0)
+    assert kw["extra"] == {"abs_pressure_inhg": pytest.approx(29.67),
+                           "rel_pressure_inhg": pytest.approx(29.71)}
+    assert kw["dewpoint_f"] == pytest.approx(52.5, abs=0.3)
+    assert "battery" not in kw            # the gateway is mains powered
+    assert recorded == []
+
+
+def test_poll_ecowitt_bad_gateway_pressure_is_recorded_and_keeps_rooms(monkeypatch):
+    # An unknown pressure unit must surface as its own poll_error, and the
+    # room reading taken on the same tick must still be stored.
+    inserted, recorded = [], []
+    live = {"ch_aisle": [_ROOM], "wh25": [{"intemp": "72.1", "unit": "F", "abs": "29.67"}]}
+    _patch_one_room(monkeypatch, live, inserted, recorded)
+    assert poller.poll_ecowitt(None, _cfg_ch1()) == "ecowitt_ok(1)"
+    assert [sid for sid, _ in inserted] == ["ecowitt_ch1"]
+    assert [k for k, _ in recorded] == ["ecowitt_gateway"]
+    assert "29.67" in recorded[0][1]
+
+
+def test_poll_ecowitt_gateway_insert_failure_is_recorded_and_keeps_rooms(monkeypatch):
+    # The nested guard covers a database error too, not only the parser.
+    inserted, recorded = [], []
+    live = {"ch_aisle": [_ROOM], "wh25": [{"intemp": "72.1", "unit": "F", "inhumi": "50%"}]}
+    _patch_one_room(monkeypatch, live, inserted, recorded)
+
+    def insert(c, sid, ts, **k):
+        if sid == "ecowitt_gateway":
+            raise RuntimeError("db down")
+        inserted.append((sid, k))
+    monkeypatch.setattr(poller.db, "insert_sensor_reading", insert)
+    assert poller.poll_ecowitt(None, _cfg_ch1()) == "ecowitt_ok(1)"
+    assert [sid for sid, _ in inserted] == ["ecowitt_ch1"]
+    assert recorded == [("ecowitt_gateway", "db down")]
+
+
+def test_poll_ecowitt_pressure_only_gateway_block(monkeypatch):
+    inserted, recorded = [], []
+    live = {"ch_aisle": [_ROOM], "wh25": [{"abs": "29.67 inHg"}]}
+    _patch_one_room(monkeypatch, live, inserted, recorded)
+    poller.poll_ecowitt(None, _cfg_ch1())
+    kw = inserted[1][1]
+    assert kw["temp_f"] is None and kw["humidity"] is None and kw["dewpoint_f"] is None
+    assert kw["extra"] == {"abs_pressure_inhg": pytest.approx(29.67)}   # no rel key
+    assert recorded == []
+
+
+def test_poll_ecowitt_rssi_without_signal(monkeypatch):
+    inserted, recorded = [], []
+    info = [{"img": "wh31", "name": "Temp & Humidity CH1", "id": "EB",
+             "rssi": "-50", "signal": "--"}]
+    _patch_one_room(monkeypatch, {"ch_aisle": [_ROOM]}, inserted, recorded, info)
+    poller.poll_ecowitt(None, _cfg_ch1())
+    assert inserted[0][1]["extra"] == {"rssi": -50}
+
+
+def test_poll_ecowitt_no_gateway_block_stores_rooms_only(monkeypatch):
+    inserted, recorded = [], []
+    _patch_one_room(monkeypatch, {"ch_aisle": [_ROOM]}, inserted, recorded)
+    poller.poll_ecowitt(None, _cfg_ch1())
+    assert [sid for sid, _ in inserted] == ["ecowitt_ch1"]
+    assert recorded == []
+
+
 def test_poll_ecowitt_disabled_returns_off():
     assert poller.poll_ecowitt(None, SimpleNamespace(ecowitt={"enabled": False})) == "ecowitt_off"
     assert poller.poll_ecowitt(None, SimpleNamespace(ecowitt=None)) == "ecowitt_off"
